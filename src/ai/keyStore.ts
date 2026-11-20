@@ -10,6 +10,7 @@ export interface AiSettings {
   localMaxOutputTokens: number;
   localTemperature: number;
   localTopP: number;
+  lessonDepth: "concise" | "standard" | "comprehensive";
 }
 
 export type AiProvider = "gemini" | "openai-compatible";
@@ -28,12 +29,33 @@ export const GEMINI_MODEL_OPTIONS = [
   { id: "gemini-4-carbon", label: "Gemini 4 Carbon · Reasoning" },
 ] as const;
 
-export type AppTheme =
-  | "daylight"
-  | "mica-dark"
-  | "warm-paper"
-  | "nordic-frost"
-  | "sage-studio";
+export const APP_THEME_OPTIONS = [
+  { id: "daylight", label: "Windows 11 Daylight", mode: "light", swatches: ["#f5f6f3", "#ffffff", "#326a9f"] },
+  { id: "mica-dark", label: "Mica Dark", mode: "dark", swatches: ["#202020", "#2c2c2c", "#79b4ed"] },
+  { id: "warm-paper", label: "Warm Paper", mode: "light", swatches: ["#f4efe5", "#fffaf0", "#8a6341"] },
+  { id: "nordic-frost", label: "Nordic Frost", mode: "light", swatches: ["#edf2f5", "#fbfdff", "#507d9d"] },
+  { id: "sage-studio", label: "Sage Studio", mode: "light", swatches: ["#eef1e8", "#fbfcf7", "#687b5d"] },
+  { id: "midnight-dusk", label: "Midnight Dusk", mode: "dark", swatches: ["#16151D", "#1F1E29", "#F02475"] },
+  { id: "tako", label: "Tako", mode: "dark", swatches: ["#211F2E", "#2A273A", "#F3B375"] },
+  { id: "nord-night", label: "Nord Night", mode: "dark", swatches: ["#242933", "#2E3440", "#88C0D0"] },
+  { id: "catppuccin-mocha", label: "Catppuccin Mocha", mode: "dark", swatches: ["#1E1E2E", "#313244", "#CBA6F7"] },
+  { id: "tokyo-night", label: "Tokyo Night", mode: "dark", swatches: ["#1A1B26", "#24283B", "#7AA2F7"] },
+  { id: "amoled-obsidian", label: "AMOLED Obsidian", mode: "dark", swatches: ["#000000", "#161616", "#60A5FA"] },
+  { id: "strawberry-daiquiri", label: "Strawberry Daiquiri", mode: "light", swatches: ["#FFF8F8", "#FFEBEE", "#B61E46"] },
+  { id: "lavender-mist", label: "Lavender Mist", mode: "light", swatches: ["#F7F5FF", "#EDE7F6", "#6750A4"] },
+  { id: "teal-turquoise", label: "Teal & Turquoise", mode: "light", swatches: ["#F4FBFB", "#E0F2F1", "#00695C"] },
+  { id: "catppuccin-latte", label: "Catppuccin Latte", mode: "light", swatches: ["#EFF1F5", "#E6E9EF", "#7287FD"] },
+] as const;
+
+export type AppTheme = (typeof APP_THEME_OPTIONS)[number]["id"];
+export type AppearanceMode = "dark" | "light";
+export type FontFamily =
+  | "system"
+  | "geometric"
+  | "editorial"
+  | "hyperlegible"
+  | "monospace";
+export type ReadingScale = "compact" | "default" | "comfortable";
 
 const STORAGE_KEY = "noesis.ai.settings.v1";
 const PREFERENCES_STORAGE_KEY = "noesis.preferences.v1";
@@ -51,10 +73,16 @@ const DEFAULT_SETTINGS: AiSettings = {
   localMaxOutputTokens: 1200,
   localTemperature: 0.4,
   localTopP: 0.9,
+  lessonDepth: "standard",
 };
 
 export interface UserPreferences {
   theme: AppTheme;
+  appearanceMode: AppearanceMode;
+  lastDarkThemeId: AppTheme;
+  lastLightThemeId: AppTheme;
+  fontFamily: FontFamily;
+  readingScale: ReadingScale;
   showCanvasDots: boolean;
   edgeRouting: "curved" | "orthogonal";
   nodeDensity: "comfortable" | "compact";
@@ -66,6 +94,11 @@ export interface UserPreferences {
 
 export const DEFAULT_PREFERENCES: UserPreferences = {
   theme: "daylight",
+  appearanceMode: "light",
+  lastDarkThemeId: "mica-dark",
+  lastLightThemeId: "daylight",
+  fontFamily: "system",
+  readingScale: "default",
   showCanvasDots: true,
   edgeRouting: "curved",
   nodeDensity: "comfortable",
@@ -75,13 +108,12 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
   launchInFullscreen: false,
 };
 
-const APP_THEMES: AppTheme[] = [
-  "daylight",
-  "mica-dark",
-  "warm-paper",
-  "nordic-frost",
-  "sage-studio",
-];
+const DARK_THEMES = APP_THEME_OPTIONS.filter(({ mode }) => mode === "dark").map(
+  ({ id }) => id
+);
+const LIGHT_THEMES = APP_THEME_OPTIONS.filter(({ mode }) => mode === "light").map(
+  ({ id }) => id
+);
 
 function loadModelPreference(value: unknown, fallback: string): string {
   if (typeof value !== "string" || !value.trim()) return fallback;
@@ -170,6 +202,11 @@ export function loadAiSettings(): AiSettings {
         1,
         DEFAULT_SETTINGS.localTopP
       ),
+      lessonDepth:
+        parsed.lessonDepth === "concise" ||
+        parsed.lessonDepth === "comprehensive"
+          ? parsed.lessonDepth
+          : "standard",
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -213,6 +250,7 @@ export function saveAiSettings(settings: AiSettings): void {
         1,
         DEFAULT_SETTINGS.localTopP
       ),
+      lessonDepth: settings.lessonDepth,
     })
   );
 }
@@ -222,10 +260,47 @@ export function loadUserPreferences(): UserPreferences {
     const raw = localStorage.getItem(PREFERENCES_STORAGE_KEY);
     if (!raw) return { ...DEFAULT_PREFERENCES };
     const parsed = JSON.parse(raw) as Partial<UserPreferences>;
+    const savedTheme = APP_THEME_OPTIONS.find(
+      (option) => option.id === parsed.theme
+    );
+    const appearanceMode: AppearanceMode =
+      parsed.appearanceMode === "dark" || parsed.appearanceMode === "light"
+        ? parsed.appearanceMode
+        : savedTheme?.mode === "dark"
+          ? "dark"
+          : "light";
+    const lastDarkThemeId =
+      DARK_THEMES.find((item) => item === parsed.lastDarkThemeId) ??
+      (savedTheme?.mode === "dark"
+        ? savedTheme.id
+        : DEFAULT_PREFERENCES.lastDarkThemeId);
+    const lastLightThemeId =
+      LIGHT_THEMES.find((item) => item === parsed.lastLightThemeId) ??
+      (savedTheme?.mode === "light"
+        ? savedTheme.id
+        : DEFAULT_PREFERENCES.lastLightThemeId);
+    const theme =
+      savedTheme?.mode === appearanceMode
+        ? savedTheme.id
+        : appearanceMode === "dark"
+          ? lastDarkThemeId
+          : lastLightThemeId;
     return {
-      theme:
-        APP_THEMES.find((theme) => theme === parsed.theme) ??
-        DEFAULT_PREFERENCES.theme,
+      theme,
+      appearanceMode,
+      lastDarkThemeId,
+      lastLightThemeId,
+      fontFamily:
+        parsed.fontFamily === "geometric" ||
+        parsed.fontFamily === "editorial" ||
+        parsed.fontFamily === "hyperlegible" ||
+        parsed.fontFamily === "monospace"
+          ? parsed.fontFamily
+          : "system",
+      readingScale:
+        parsed.readingScale === "compact" || parsed.readingScale === "comfortable"
+          ? parsed.readingScale
+          : "default",
       showCanvasDots:
         typeof parsed.showCanvasDots === "boolean"
           ? parsed.showCanvasDots

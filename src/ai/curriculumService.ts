@@ -1,6 +1,6 @@
 import {
+  generateGeminiJson,
   generateGeminiText,
-  parseGeminiJson,
   parseOrRepairGeminiJson,
   streamGeminiText,
   type GeminiRequestOptions,
@@ -52,53 +52,64 @@ interface RawCurriculumResponse {
   edges: SkeletonEdgeInput[];
 }
 
-interface RawHydrationResponse {
-  lesson_markdown: string;
-  mermaid_diagram: string;
-  flashcards: Array<{ front: string; back: string }>;
-}
-
-function normalizeHydrationResponse(value: unknown): RawHydrationResponse {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("The generated lesson was not a JSON object.");
-  }
-  const response = value as Record<string, unknown>;
-  const lessonMarkdown = response.lesson_markdown ?? response.markdown;
-  const mermaidDiagram = response.mermaid_diagram ?? response.mermaid ?? "";
-  const flashcards = response.flashcards ?? [];
-  if (
-    typeof lessonMarkdown !== "string" ||
-    !lessonMarkdown.trim() ||
-    typeof mermaidDiagram !== "string" ||
-    !Array.isArray(flashcards) ||
-    !flashcards.every(
-      (card) =>
-        card !== null &&
-        typeof card === "object" &&
-        typeof (card as Record<string, unknown>).front === "string" &&
-        typeof (card as Record<string, unknown>).back === "string"
-    )
-  ) {
-    throw new Error("The generated lesson did not match the lesson schema.");
-  }
-  return {
-    lesson_markdown: lessonMarkdown,
-    mermaid_diagram: mermaidDiagram,
-    flashcards: flashcards as RawHydrationResponse["flashcards"],
-  };
-}
-
-function isRawMarkdownLesson(text: string): boolean {
-  return /^(?:#{1,6}\s|```(?:[\w+-]+)?(?:\s|$)|(?:[-*+]\s|\d+\.\s)|>\s)/.test(
-    text.trim()
-  );
-}
-
 const tutorSummaryInFlight = new Set<string>();
 
 export interface CurriculumProgress {
   phase: string;
   nodeTitles: string[];
+}
+
+export interface CurriculumSourceDocument {
+  name: string;
+  text: string;
+}
+
+export type WorkedExampleTool =
+  | "mermaid"
+  | "math"
+  | "code"
+  | "trace-table"
+  | "analogy";
+
+export async function generateWorkedExample(
+  node: GraphNode,
+  userPrompt: string,
+  tools: WorkedExampleTool[],
+  options: {
+    signal?: AbortSignal;
+    onChunk?: (text: string) => void;
+  } = {}
+): Promise<string> {
+  const vaultHits = await searchVaultFts(
+    `${node.title} ${node.summary_hint} ${userPrompt}`,
+    5,
+    node.workspace_id
+  );
+  const vaultContext = vaultHits.length
+    ? vaultHits.map((hit) => `[${hit.file_name}] ${hit.content}`).join("\n\n")
+    : "No matching local vault excerpts.";
+  const toolInstructions: Record<WorkedExampleTool, string> = {
+    mermaid:
+      "Include a valid Mermaid fenced code block (stateDiagram-v2, flowchart TD, sequenceDiagram, or graph) for an appropriate diagram.",
+    math: String.raw`Show complete step-by-step equations with KaTeX-compatible \frac{numerator}{denominator} syntax; never use \over.`,
+    code: "Include a commented code walkthrough and a sample input/output trace.",
+    "trace-table": "Include a Markdown state or execution trace table.",
+    analogy: "Include a concise real-world analogy and explain where it does and does not apply.",
+  };
+  const selectedInstructions = tools.length
+    ? tools.map((tool) => toolInstructions[tool]).join("\n")
+    : "Choose the most useful worked-example format for this concept.";
+  return streamGeminiText(
+    {
+      tier: "synthesis",
+      systemInstruction:
+        "Generate one self-contained worked example to append to the existing lesson. Use clear Markdown headings, explain each step, and remain grounded in the concept and provided sources. Use \\frac{numerator}{denominator} for fractions and never use TeX \\over. Do not repeat the whole lesson.",
+      userPrompt: `Concept: ${node.title}\nSummary: ${node.summary_hint}\nLearner focus: ${userPrompt || "Choose a representative example."}\nRequested tools:\n${selectedInstructions}\n\nExisting lesson:\n${node.lesson_markdown ?? ""}\n\nLocal vault excerpts:\n${vaultContext}`,
+      maxOutputTokens: 3072,
+      signal: options.signal,
+    },
+    options.onChunk ?? (() => {})
+  );
 }
 
 export async function summarizeTutorThread(
@@ -150,14 +161,22 @@ export async function summarizeTutorThread(
 export async function generateWorkspaceCurriculum(
   topicPrompt: string,
   onProgress?: (progress: CurriculumProgress) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  sourceDocument?: CurriculumSourceDocument
 ): Promise<{
   workspace: Workspace;
   nodes: GraphNode[];
   edges: GraphEdge[];
 }> {
-  onProgress?.({ phase: "Searching your local vault…", nodeTitles: [] });
-  const vaultHits = await searchVaultFts(topicPrompt, 6);
+  onProgress?.({
+    phase: sourceDocument
+      ? "Reading uploaded course document…"
+      : "Searching your local vault…",
+    nodeTitles: [],
+  });
+  const vaultHits = sourceDocument
+    ? []
+    : await searchVaultFts(topicPrompt, 6);
   if (signal?.aborted) {
     throw new DOMException("Curriculum generation stopped.", "AbortError");
   }
@@ -172,6 +191,13 @@ export async function generateWorkspaceCurriculum(
           )
           .join("\n\n---\n\n")
       : "No local vault documents matched; use authoritative foundational curriculum structure.";
+  const sourceText = sourceDocument
+    ? minifyContextText(sourceDocument.text)
+    : "";
+  const sourceContext =
+    sourceText.length > 10_000
+      ? `${sourceText.slice(0, 10_000).trimEnd()}\n[Document excerpt truncated]`
+      : sourceText;
 
   onProgress?.({ phase: "Drafting prerequisite structure…", nodeTitles: [] });
   let streamedText = "";
@@ -181,8 +207,12 @@ export async function generateWorkspaceCurriculum(
   } = {
     tier: "synthesis",
     systemInstruction:
-      "Create a prerequisite-first DAG with 7-12 atomic concepts. Edges point prerequisite to dependent. Return only compact JSON with keys t,d,n,e. Node keys: id,t,h. Each edge is [sourceId,targetId]. Keep h under 12 words. No cycles or prose.",
-    userPrompt: `Goal: ${topicPrompt}\nLocal excerpts:\n${vaultContext}`,
+      sourceDocument
+        ? "Create a prerequisite-first DAG based on the uploaded course document. Use its course scope, stated sequence, learning outcomes, and topics as the primary source; add only necessary prerequisites. Create 7-12 atomic concepts. Edges point prerequisite to dependent. Return only compact JSON with keys t,d,n,e. Node keys: id,t,h. Each edge is [sourceId,targetId]. Keep h under 12 words. No cycles or prose."
+        : "Create a prerequisite-first DAG with 7-12 atomic concepts. Edges point prerequisite to dependent. Return only compact JSON with keys t,d,n,e. Node keys: id,t,h. Each edge is [sourceId,targetId]. Keep h under 12 words. No cycles or prose.",
+    userPrompt: sourceDocument
+      ? `Goal: ${topicPrompt}\nUploaded course document: ${sourceDocument.name}\nDocument text:\n${sourceContext}`
+      : `Goal: ${topicPrompt}\nLocal excerpts:\n${vaultContext}`,
     maxOutputTokens: 2048,
     signal,
     jsonSchema: {
@@ -282,6 +312,7 @@ export async function generateWorkspaceCurriculum(
     id: workspaceId,
     title: raw.workspace_title || topicPrompt.slice(0, 48),
     root_domain: raw.root_domain || "General",
+    layout_mode: "auto",
     created_at: now,
     updated_at: now,
   };
@@ -350,52 +381,63 @@ function extractCompletedNodeTitles(text: string): string[] {
 }
 
 function mapCompactCurriculum(
-  compact: CompactCurriculumResponse
+  value: unknown
 ): RawCurriculumResponse {
-  if (
-    !compact ||
-    typeof compact.t !== "string" ||
-    typeof compact.d !== "string" ||
-    !Array.isArray(compact.n) ||
-    !Array.isArray(compact.e)
-  ) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("The generated curriculum did not match the compact DAG schema.");
   }
-  if (compact.n.length === 0) {
+  const compact = value as Record<string, unknown>;
+  const rawNodes = Array.isArray(compact.n) ? compact.n : [];
+  if (rawNodes.length === 0) {
     throw new Error("The generated curriculum contains no concepts.");
   }
 
   const nodeIds = new Set<string>();
-  const nodes = compact.n.map((node) => {
-    if (
-      !node ||
-      typeof node.id !== "string" ||
-      typeof node.t !== "string" ||
-      typeof node.h !== "string" ||
-      !node.id.trim() ||
-      !node.t.trim() ||
-      nodeIds.has(node.id)
-    ) {
-      throw new Error("The generated curriculum contains an invalid node.");
-    }
-    nodeIds.add(node.id);
-    return { id: node.id, title: node.t, summary_hint: node.h };
+  const nodes = rawNodes.map((rawNode, index) => {
+    const node =
+      rawNode && typeof rawNode === "object" && !Array.isArray(rawNode)
+        ? (rawNode as Record<string, unknown>)
+        : {};
+    let id =
+      typeof node.id === "string" && node.id.trim()
+        ? node.id.trim()
+        : `concept-${index + 1}`;
+    while (nodeIds.has(id)) id = `concept-${index + 1}-${nodeIds.size + 1}`;
+    nodeIds.add(id);
+    const title =
+      typeof node.t === "string" && node.t.trim()
+        ? node.t.trim()
+        : `Concept ${index + 1}`;
+    const summary =
+      typeof node.h === "string" && node.h.trim()
+        ? node.h.trim()
+        : `Core knowledge and skills for ${title}.`;
+    return { id, title, summary_hint: summary };
   });
-  const edges = compact.e.map((edge) => {
+  const edges = (Array.isArray(compact.e) ? compact.e : []).flatMap((edge) => {
     if (
       !Array.isArray(edge) ||
       edge.length !== 2 ||
       typeof edge[0] !== "string" ||
-      typeof edge[1] !== "string"
+      typeof edge[1] !== "string" ||
+      !nodeIds.has(edge[0]) ||
+      !nodeIds.has(edge[1]) ||
+      edge[0] === edge[1]
     ) {
-      throw new Error("The generated curriculum contains an invalid edge.");
+      return [];
     }
-    return { source_id: edge[0], target_id: edge[1] };
+    return [{ source_id: edge[0], target_id: edge[1] }];
   });
 
   return {
-    workspace_title: compact.t,
-    root_domain: compact.d,
+    workspace_title:
+      typeof compact.t === "string" && compact.t.trim()
+        ? compact.t.trim()
+        : "Learning curriculum",
+    root_domain:
+      typeof compact.d === "string" && compact.d.trim()
+        ? compact.d.trim()
+        : "General",
     nodes,
     edges,
   };
@@ -413,6 +455,20 @@ export async function hydrateNodeContent(
   citations: string[];
   flashcards: Flashcard[];
 }> {
+  const lessonDepth = loadAiSettings().lessonDepth;
+  const lessonDepthInstructions = {
+    concise:
+      "Write approximately 450–650 words. Focus on core intuition, a formal definition, and one worked example.",
+    standard:
+      "Write approximately 1,000–1,500 words with structured sections, intuition, formal mechanics, two worked examples, and takeaways.",
+    comprehensive:
+      "Write approximately 2,000–3,200+ words with motivation, formal definitions or theorems, step-by-step derivations, multiple worked examples, edge cases, common pitfalls, and a summary.",
+  }[lessonDepth];
+  const lessonTokenBudgets = {
+    concise: 1536,
+    standard: 3584,
+    comprehensive: 8192,
+  } as const;
   const vaultHits = await searchVaultFts(
     `${node.title} ${node.summary_hint}`,
     5,
@@ -431,85 +487,73 @@ export async function hydrateNodeContent(
       ? vaultHits.map((h) => `[${h.file_name}] ${h.content}`).join("\n\n")
       : "No direct local file excerpts matched; provide rigorous first-principles instruction.";
 
-  const hydrationRequest: GeminiRequestOptions & {
-    jsonSchema: Record<string, unknown>;
-  } = {
+  const lessonRequest: GeminiRequestOptions = {
     tier: "synthesis",
     systemInstruction:
-      "Teach from first principles in concise Markdown with examples and takeaways. Return exactly one JSON object matching the schema. Put lesson Markdown in lesson_markdown, valid Mermaid syntax without fences in mermaid_diagram, and 4 high-yield recall cards in flashcards. Do not return prose or code fences outside the JSON object.",
+      `Teach from first principles. ${lessonDepthInstructions} Use \\frac{numerator}{denominator} for every fraction and never use TeX \\over. Return the complete lesson as raw Markdown only, with clear headings, worked examples, and an optional valid Mermaid diagram in a fenced mermaid block. Do not wrap the lesson in JSON.`,
     userPrompt: `Course: ${workspaceTitle}\nTopic Node: ${node.title}\nScope: ${node.summary_hint}\n\nLocal Vault Context:\n${vaultContext}`,
-    maxOutputTokens: 5500,
-    jsonSchema: {
+    maxOutputTokens: lessonTokenBudgets[lessonDepth],
+  };
+  const generatedLesson = (await generateGeminiText(lessonRequest)).trim();
+  if (!generatedLesson) {
+    throw new Error(`Lesson generation returned empty content for ${node.title}.`);
+  }
+
+  const mermaidMatch = generatedLesson.match(
+    /```mermaid\s*\r?\n([\s\S]*?)```/i
+  );
+  const mermaidDiagram = mermaidMatch?.[1]?.trim() ?? "";
+  const lessonMarkdown = mermaidMatch
+    ? generatedLesson.replace(mermaidMatch[0], "").trim()
+    : generatedLesson;
+  const flashcardSchema: Record<string, unknown> = {
+    type: "ARRAY",
+    items: {
       type: "OBJECT",
       properties: {
-        lesson_markdown: { type: "STRING" },
-        mermaid_diagram: {
-          type: "STRING",
-          description: "Valid Mermaid graph TD or flowchart LR syntax only",
-        },
-        flashcards: {
-          type: "ARRAY",
-          items: {
-            type: "OBJECT",
-            properties: {
-              front: { type: "STRING" },
-              back: { type: "STRING" },
-            },
-            required: ["front", "back"],
-          },
-        },
+        front: { type: "STRING" },
+        back: { type: "STRING" },
       },
-      required: ["lesson_markdown", "mermaid_diagram", "flashcards"],
+      required: ["front", "back"],
     },
   };
-
-  const firstText = await generateGeminiText(hydrationRequest);
-  let raw: RawHydrationResponse;
-  try {
-    raw = normalizeHydrationResponse(parseGeminiJson<unknown>(firstText));
-  } catch (initialError) {
-    if (isRawMarkdownLesson(firstText)) {
-      raw = normalizeHydrationResponse({
-        markdown: firstText.trim(),
-        mermaid: "",
-        flashcards: [],
-      });
-    } else {
-      let retryText = "";
-      try {
-        retryText = await generateGeminiText({
-          ...hydrationRequest,
-          temperature: 0,
-          userPrompt: `${hydrationRequest.userPrompt}\n\nReturn the complete lesson as one valid JSON object matching the schema. Escape every backslash and quote inside string values.`,
-        });
-        raw = normalizeHydrationResponse(parseGeminiJson<unknown>(retryText));
-      } catch (retryError) {
-        const markdownFallback = [retryText, firstText].find(
-          isRawMarkdownLesson
-        );
-        if (markdownFallback) {
-          raw = normalizeHydrationResponse({
-            markdown: markdownFallback.trim(),
-            mermaid: "",
-            flashcards: [],
-          });
-        } else {
-          const detail =
-            retryError instanceof Error
-              ? retryError.message
-              : initialError instanceof Error
-                ? initialError.message
-                : "Unknown response parsing error";
-          throw new Error(
-            `Lesson generation returned invalid structured content after one retry: ${detail}`
-          );
-        }
-      }
-    }
+  const rawFlashcards = await generateGeminiJson<unknown>({
+    tier: "fast",
+    temperature: 0,
+    maxOutputTokens: 700,
+    systemInstruction:
+      "Generate four concise, high-yield recall flashcards from the lesson. Return a flat JSON array of objects with string front and back fields only.",
+    userPrompt: `Concept: ${node.title}\nScope: ${node.summary_hint}\nLesson:\n${lessonMarkdown.slice(0, 9000)}`,
+    jsonSchema: flashcardSchema,
+  });
+  if (!Array.isArray(rawFlashcards)) {
+    throw new Error(`Flashcard generation returned an invalid array for ${node.title}.`);
+  }
+  const normalizedFlashcards = rawFlashcards.slice(0, 5).map((value) => {
+    const card =
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : {};
+    return {
+      front:
+        typeof card.front === "string" && card.front.trim()
+          ? card.front.trim()
+          : `What is an important idea in ${node.title}?`,
+      back:
+        typeof card.back === "string" && card.back.trim()
+          ? card.back.trim()
+          : node.summary_hint,
+    };
+  });
+  while (normalizedFlashcards.length < 3) {
+    normalizedFlashcards.push({
+      front: `What is an important idea in ${node.title}?`,
+      back: node.summary_hint,
+    });
   }
 
   const now = Date.now();
-  const cards: Flashcard[] = raw.flashcards.map((fc) => ({
+  const cards: Flashcard[] = normalizedFlashcards.map((fc) => ({
     id: crypto.randomUUID(),
     node_id: node.id,
     front: fc.front,
@@ -522,15 +566,15 @@ export async function hydrateNodeContent(
 
   await hydrateNodeBatch(
     node.id,
-    raw.lesson_markdown,
-    raw.mermaid_diagram || null,
+    lessonMarkdown,
+    mermaidDiagram || null,
     JSON.stringify(citations),
     cards
   );
 
   return {
-    lessonMarkdown: raw.lesson_markdown,
-    mermaidDiagram: raw.mermaid_diagram,
+    lessonMarkdown,
+    mermaidDiagram,
     citations,
     flashcards: cards,
   };
@@ -598,7 +642,7 @@ export async function askGroundedTutor(
 
   const reply = await streamGeminiText({
     tier: "fast",
-    systemInstruction: payload.systemInstruction,
+    systemInstruction: `${payload.systemInstruction}\nFor mathematical fractions, use \\frac{numerator}{denominator}; never use TeX \\over.`,
     userPrompt: payload.userPrompt,
     maxOutputTokens: outputTokenBudget,
     signal: options.signal,

@@ -4,6 +4,7 @@ import { StreamLanguage } from "@codemirror/language";
 import type { Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { AppTheme } from "../../ai/keyStore";
+import { APP_THEME_OPTIONS } from "../../ai/keyStore";
 import type { QuizLanguage } from "../../types/domain";
 
 const grammarCache = new Map<QuizLanguage, Promise<Extension>>();
@@ -69,7 +70,8 @@ export function CodeEditor({
   const [languageExtension, setLanguageExtension] = useState<Extension[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const requestId = useRef(0);
-  const isDark = theme === "mica-dark";
+  const isDark =
+    APP_THEME_OPTIONS.find((option) => option.id === theme)?.mode === "dark";
   const editorTheme = useMemo(
     () =>
       EditorView.theme(
@@ -78,7 +80,7 @@ export function CodeEditor({
             color: isDark ? "#d4d4d4" : "#263238",
             backgroundColor: isDark ? "#1e1e1e" : "#ffffff",
           },
-          ".cm-content": { fontFamily: "Cascadia Code, Consolas, monospace" },
+          ".cm-content": { fontFamily: "var(--font-mono)" },
           ".cm-gutters": {
             color: isDark ? "#858585" : "#7c8991",
             backgroundColor: isDark ? "#1e1e1e" : "#faf8f5",

@@ -1,7 +1,12 @@
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import {
   loadAiSettings,
   type AiProvider,
 } from "./keyStore.ts";
+import {
+  hasStructuredContent,
+  parseSafeJson,
+} from "./jsonSafeParser.ts";
 import { fitRequestToProviderBudget } from "./tokenOptimizer.ts";
 
 export type ModelTier = "fast" | "synthesis";
@@ -47,6 +52,83 @@ interface ProviderConfig {
   model: string;
   endpoint: string;
   apiKey?: string;
+}
+
+interface LocalProxyResponse {
+  status: number;
+  status_text: string;
+  body: string;
+}
+
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("The request was aborted.", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () =>
+      reject(new DOMException("The request was aborted.", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() =>
+      signal.removeEventListener("abort", abort)
+    );
+  });
+}
+
+async function requestEndpoint(
+  endpoint: string,
+  init: RequestInit,
+  useNativeProxy: boolean
+): Promise<Response> {
+  if (!useNativeProxy || !isTauri()) return fetch(endpoint, init);
+  if (init.signal?.aborted) {
+    throw new DOMException("The request was aborted.", "AbortError");
+  }
+  const headers: Record<string, string> = {};
+  new Headers(init.headers).forEach((value, name) => {
+    headers[name] = value;
+  });
+  const result = await abortable(invoke<LocalProxyResponse>("local_ai_request", {
+    url: endpoint,
+    method: init.method ?? "GET",
+    headers,
+    body: typeof init.body === "string" ? init.body : null,
+  }), init.signal ?? undefined);
+  if (init.signal?.aborted) {
+    throw new DOMException("The request was aborted.", "AbortError");
+  }
+  return new Response(result.body, {
+    status: result.status,
+    statusText: result.status_text,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function requestNativeStream(
+  endpoint: string,
+  init: RequestInit,
+  onEvent: (event: string) => void
+): Promise<Response> {
+  const channel = new Channel<string>();
+  channel.onmessage = onEvent;
+  const headers: Record<string, string> = {};
+  new Headers(init.headers).forEach((value, name) => {
+    headers[name] = value;
+  });
+  const result = await abortable(invoke<LocalProxyResponse>("local_ai_stream", {
+    url: endpoint,
+    headers,
+    body: typeof init.body === "string" ? init.body : "",
+    onEvent: channel,
+  }), init.signal ?? undefined);
+  if (init.signal?.aborted) {
+    throw new DOMException("The request was aborted.", "AbortError");
+  }
+  return new Response(result.body, {
+    status: result.status,
+    statusText: result.status_text,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 function getProviderConfig(opts: GeminiRequestOptions): ProviderConfig {
@@ -95,22 +177,75 @@ function getProviderConfig(opts: GeminiRequestOptions): ProviderConfig {
     throw new Error("Local AI base URL must use HTTP or HTTPS.");
   }
   const basePath = endpoint.pathname.replace(/\/+$/, "");
-  endpoint.pathname = basePath.endsWith("/chat/completions")
-    ? basePath
-    : `${basePath}/chat/completions`;
+  if (/\/v\d+\/chat\/completions$/i.test(basePath)) {
+    endpoint.pathname = basePath;
+  } else {
+    const apiPath = !basePath
+      ? "/v1"
+      : /\/v\d+$/i.test(basePath)
+        ? basePath
+        : `${basePath}/v1`;
+    endpoint.pathname = `${apiPath}/chat/completions`;
+  }
   endpoint.search = "";
   endpoint.hash = "";
   return { provider, model, endpoint: endpoint.toString() };
 }
 
-function getTemperature(opts: GeminiRequestOptions): number {
-  if (opts.temperature !== undefined) return opts.temperature;
-  const settings = loadAiSettings();
-  if ((opts.provider ?? settings.provider) === "openai-compatible") {
-    return settings.localTemperature;
+export function isLocalAiEndpoint(baseUrl: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  } catch {
+    return false;
   }
-  const preset = settings.creativityPreset;
-  return preset === "focused" ? 0.2 : preset === "exploratory" ? 0.75 : 0.4;
+  if (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "0.0.0.0" ||
+    hostname === "::1" ||
+    /^f[cd][0-9a-f]{2}:/i.test(hostname) ||
+    /^fe[89ab][0-9a-f]:/i.test(hostname)
+  ) {
+    return true;
+  }
+
+  const octets = hostname.split(".").map(Number);
+  if (
+    octets.length !== 4 ||
+    octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)
+  ) {
+    return false;
+  }
+  return (
+    octets[0] === 10 ||
+    octets[0] === 127 ||
+    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+    (octets[0] === 192 && octets[1] === 168) ||
+    (octets[0] === 169 && octets[1] === 254)
+  );
+}
+
+function getTemperature(opts: GeminiRequestOptions): number {
+  const settings = loadAiSettings();
+  const provider = opts.provider ?? settings.provider;
+  const temperature =
+    opts.temperature ??
+    (provider === "openai-compatible"
+      ? settings.localTemperature
+      : settings.creativityPreset === "focused"
+        ? 0.2
+        : settings.creativityPreset === "exploratory"
+          ? 0.75
+          : 0.4);
+  if (
+    provider === "openai-compatible" &&
+    opts.jsonSchema &&
+    isLocalAiEndpoint(opts.baseUrl ?? settings.localBaseUrl)
+  ) {
+    return Math.min(0.25, temperature);
+  }
+  return temperature;
 }
 
 function getErrorDetail(responseText: string, statusText: string): string {
@@ -306,12 +441,13 @@ function waitForRetry(delay: number, signal?: AbortSignal): Promise<void> {
 
 async function fetchWithTransientRetry(
   endpoint: string,
-  init: RequestInit
+  init: RequestInit,
+  useNativeProxy = false
 ): Promise<Response> {
   for (let attempt = 0; ; attempt += 1) {
     let response: Response;
     try {
-      response = await fetch(endpoint, init);
+      response = await requestEndpoint(endpoint, init, useNativeProxy);
     } catch (error) {
       if (init.signal?.aborted) {
         throw new DOMException("The request was aborted.", "AbortError");
@@ -400,7 +536,9 @@ function getOpenAiRequestBody(
 ): Record<string, unknown> {
   const settings = loadAiSettings();
   const systemInstruction = opts.jsonSchema
-    ? `${opts.systemInstruction}\nReturn a JSON object matching this schema: ${JSON.stringify(
+    ? `${opts.systemInstruction}\nReturn a JSON ${
+        String(opts.jsonSchema.type).toUpperCase() === "ARRAY" ? "array" : "object"
+      } matching this schema: ${JSON.stringify(
         opts.jsonSchema
       )}`
     : opts.systemInstruction;
@@ -416,6 +554,36 @@ function getOpenAiRequestBody(
     response_format: opts.jsonSchema ? { type: "json_object" } : undefined,
     stream,
   };
+}
+
+function getOpenAiFallbackBody(
+  opts: GeminiRequestOptions,
+  model: string,
+  stream: boolean
+): Record<string, unknown> {
+  const body = getOpenAiRequestBody(opts, model, stream);
+  const completionTokens = body.max_completion_tokens;
+  delete body.top_p;
+  delete body.response_format;
+  delete body.max_completion_tokens;
+  if (body.max_tokens === undefined && typeof completionTokens === "number") {
+    body.max_tokens = completionTokens;
+  }
+  return body;
+}
+
+function shouldRetryWithoutJsonMode(
+  opts: GeminiRequestOptions,
+  config: ProviderConfig,
+  status: number
+): boolean {
+  return (
+    config.provider === "openai-compatible" &&
+    (status === 400 ||
+      (status === 422 &&
+        Boolean(opts.jsonSchema) &&
+        isLocalAiEndpoint(config.endpoint)))
+  );
 }
 
 function extractTextContent(content: unknown): string {
@@ -460,7 +628,7 @@ async function generateGeminiTextOnce(
   const config = getProviderConfig(requestOptions);
   const isGemini = config.provider === "gemini";
   return withRequestTimeout(requestOptions, config, async (signal) => {
-    const response = await fetchWithTransientRetry(config.endpoint, {
+    let response = await fetchWithTransientRetry(config.endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -472,7 +640,24 @@ async function generateGeminiTextOnce(
           : getOpenAiRequestBody(requestOptions, config.model, false)
       ),
       signal,
-    });
+    }, !isGemini);
+    if (shouldRetryWithoutJsonMode(requestOptions, config, response.status)) {
+      const fallbackResponse = await fetchWithTransientRetry(
+        config.endpoint,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(
+            getOpenAiFallbackBody(requestOptions, config.model, false)
+          ),
+          signal,
+        },
+        true
+      );
+      response = fallbackResponse;
+    }
     const responseText = await response.text();
 
     if (!response.ok) {
@@ -565,20 +750,123 @@ async function streamGeminiTextOnce(
       "?alt=sse"
     : config.endpoint;
   return withRequestTimeout(requestOptions, config, async (signal) => {
-    const response = await fetchWithTransientRetry(endpoint, {
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      ...(isGemini ? { "x-goog-api-key": config.apiKey! } : {}),
+    };
+    if (!isGemini && isTauri()) {
+      const resultChunks: string[] = [];
+      let streamError: unknown = null;
+      const handleEvent = (event: string) => {
+        if (signal.aborted || !event || event === "[DONE]") return;
+        try {
+          const text = getStreamText(config.provider, config.model, event);
+          if (text) {
+            resultChunks.push(text);
+            onChunk(text);
+          }
+        } catch (error) {
+          if (!(error instanceof SyntaxError)) streamError = error;
+        }
+      };
+      let response = await requestNativeStream(
+        endpoint,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(
+            getOpenAiRequestBody(requestOptions, config.model, true)
+          ),
+          signal,
+        },
+        handleEvent
+      );
+      if (shouldRetryWithoutJsonMode(requestOptions, config, response.status)) {
+        const fallbackResponse = await requestEndpoint(
+          endpoint,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(
+              getOpenAiFallbackBody(requestOptions, config.model, false)
+            ),
+            signal,
+          },
+          true
+        );
+        response = fallbackResponse;
+        resultChunks.length = 0;
+      }
+      if (!response.ok) {
+        throw new AiApiError(
+          config.provider,
+          config.model,
+          response.status,
+          response.statusText,
+          await response.text()
+        );
+      }
+      if (streamError) throw streamError;
+      if (resultChunks.length > 0) return resultChunks.join("");
+
+      const responseText = await response.text();
+      let result: { text: string; error?: string };
+      try {
+        result = getResponseText(config.provider, responseText);
+      } catch {
+        throw new Error(
+          `Local AI returned an invalid JSON or streaming response for model ${config.model}.`
+        );
+      }
+      if (result.error || !result.text) {
+        throw new Error(
+          formatApiError(
+            config.provider,
+            config.model,
+            response.status,
+            response.statusText,
+            JSON.stringify({ error: { message: result.error ?? "Empty response" } })
+          )
+        );
+      }
+      onChunk(result.text);
+      return result.text;
+    }
+
+    let response = await fetchWithTransientRetry(endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        ...(isGemini ? { "x-goog-api-key": config.apiKey! } : {}),
-      },
+      headers,
       body: JSON.stringify(
         isGemini
           ? getGeminiRequestBody(requestOptions)
           : getOpenAiRequestBody(requestOptions, config.model, true)
       ),
       signal,
-    });
+    }, !isGemini);
+    if (shouldRetryWithoutJsonMode(requestOptions, config, response.status)) {
+      const fallbackResponse = await fetchWithTransientRetry(
+        endpoint,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(
+            getOpenAiFallbackBody(
+              requestOptions,
+              config.model,
+              true
+            )
+          ),
+          signal,
+        },
+        true
+      );
+      response = fallbackResponse;
+    }
     if (!response.ok) {
       const responseText = await response.text();
       throw new AiApiError(
@@ -670,108 +958,17 @@ export async function streamGeminiText(
   );
 }
 
-function parseJsonResponse(raw: string): unknown {
-  const withoutFences = raw
-    .trim()
-    .replace(/^```(?:json|javascript|js)?\s*/i, "")
-    .replace(/\s*```$/, "")
-    .trim();
-  const starts = [
-    withoutFences.indexOf("{"),
-    withoutFences.indexOf("["),
-  ]
-    .filter((index) => index >= 0)
-    .sort((left, right) => left - right);
-  const candidates = [
-    withoutFences,
-    ...starts.map((start) => {
-      const closing = withoutFences[start] === "[" ? "]" : "}";
-      const end = withoutFences.lastIndexOf(closing);
-      return end > start ? withoutFences.slice(start, end + 1) : "";
-    }),
-  ].filter(Boolean);
-
-  let initialError: unknown;
-  for (const candidate of candidates) {
-    try {
-      return JSON.parse(candidate) as unknown;
-    } catch (error) {
-      initialError ??= error;
-    }
-    try {
-      return JSON.parse(repairJsonString(candidate)) as unknown;
-    } catch (error) {
-      initialError ??= error;
-    }
-  }
-  throw initialError ?? new Error("No JSON value was found.");
-}
-
-function repairJsonString(input: string): string {
-  const repaired: string[] = [];
-  let inString = false;
-
-  for (let index = 0; index < input.length; index += 1) {
-    const character = input[index];
-    if (!inString) {
-      repaired.push(character);
-      if (character === '"') inString = true;
-      continue;
-    }
-
-    if (character === "\\") {
-      const next = input[index + 1] ?? "";
-      const isUnicodeEscape =
-        next === "u" && /^[0-9a-f]{4}$/i.test(input.slice(index + 2, index + 6));
-      if ('"\\/bfnrt'.includes(next) || isUnicodeEscape) {
-        repaired.push(character, next);
-        index += 1;
-        if (isUnicodeEscape) {
-          repaired.push(input.slice(index + 1, index + 5));
-          index += 4;
-        }
-      } else {
-        repaired.push("\\\\");
-      }
-      continue;
-    }
-
-    if (character === '"') {
-      let nextIndex = index + 1;
-      while (/\s/.test(input[nextIndex] ?? "") && nextIndex < input.length) {
-        nextIndex += 1;
-      }
-      const next = input[nextIndex];
-      if (next === undefined || [",", "}", "]", ":"].includes(next)) {
-        repaired.push(character);
-        inString = false;
-      } else {
-        repaired.push('\\"');
-      }
-      continue;
-    }
-
-    const code = character.charCodeAt(0);
-    if (code < 0x20) {
-      repaired.push(
-        code === 0x0a
-          ? "\\n"
-          : code === 0x0d
-            ? "\\r"
-            : code === 0x09
-              ? "\\t"
-              : `\\u${code.toString(16).padStart(4, "0")}`
-      );
-    } else {
-      repaired.push(character);
-    }
-  }
-
-  return repaired.join("");
-}
-
 export function parseGeminiJson<T>(raw: string): T {
-  return parseJsonResponse(raw) as T;
+  return parseSafeJson<T>(raw);
+}
+
+function parseStructuredJson<T>(
+  raw: string,
+  schema: Record<string, unknown>
+): T {
+  return parseSafeJson<T>(raw, {
+    expectArray: String(schema.type).toUpperCase() === "ARRAY",
+  });
 }
 
 export async function generateGeminiJson<T>(
@@ -786,7 +983,11 @@ export async function parseOrRepairGeminiJson<T>(
   raw: string
 ): Promise<T> {
   try {
-    return parseGeminiJson<T>(raw);
+    const parsed = parseStructuredJson<T>(raw, opts.jsonSchema);
+    if (!hasStructuredContent(parsed)) {
+      throw new Error("The model returned no valid structured items.");
+    }
+    return parsed;
   } catch (initialError) {
     const config = getProviderConfig(opts);
     try {
@@ -800,12 +1001,16 @@ export async function parseOrRepairGeminiJson<T>(
             : 2400
         ),
         systemInstruction:
-          "Repair the response into one valid JSON object matching the required schema. Preserve all valid information. Return JSON only, with no prose or markdown.",
+          "Return ONLY valid compact JSON matching the exact schema. Escape all quotes and newlines inside strings. No markdown fences or prose.",
         userPrompt: `Repair this response into valid JSON matching the schema.\nSchema: ${JSON.stringify(
           opts.jsonSchema
         )}\nResponse:\n${raw}`,
       });
-      return parseGeminiJson<T>(repaired);
+      const parsed = parseStructuredJson<T>(repaired, opts.jsonSchema);
+      if (!hasStructuredContent(parsed)) {
+        throw new Error("The repair response contained no valid structured items.");
+      }
+      return parsed;
     } catch (repairError) {
       throw new Error(
         `${config.provider === "gemini" ? "Gemini" : "Local AI"} model ${config.model} returned invalid JSON and automatic repair failed: ${
@@ -836,4 +1041,71 @@ export async function testGeminiConnection(options: {
   if (!response.trim()) {
     throw new Error("AI connection test returned an empty response.");
   }
+}
+
+export async function fetchLocalModels(baseUrl: string): Promise<string[]> {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(`Invalid local AI base URL: ${baseUrl}`);
+  }
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("Local AI base URL must use HTTP or HTTPS.");
+  }
+  let path = url.pathname.replace(/\/+$/, "");
+  path = path.replace(/\/chat\/completions$/i, "");
+  if (!path.endsWith("/models")) {
+    if (!path.endsWith("/v1")) path += "/v1";
+    path += "/models";
+  }
+  url.pathname = path;
+  url.search = "";
+  url.hash = "";
+
+  const response = await requestEndpoint(
+    url.toString(),
+    { method: "GET", headers: { Accept: "application/json" } },
+    true
+  );
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `Local model discovery failed (${response.status}): ${getErrorDetail(
+        responseText,
+        response.statusText
+      )}`
+    );
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(responseText) as unknown;
+  } catch (error) {
+    throw new Error(
+      `Local model discovery returned invalid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Local model discovery response must be an object.");
+  }
+  const record = payload as Record<string, unknown>;
+  const models = Array.isArray(record.data)
+    ? record.data
+    : Array.isArray(record.models)
+      ? record.models
+      : null;
+  if (!models) throw new Error("Local model response did not contain a model list.");
+  return models
+    .map((model) => {
+      if (typeof model === "string") return model.trim();
+      if (model && typeof model === "object") {
+        const item = model as Record<string, unknown>;
+        const id = item.id ?? item.name;
+        return typeof id === "string" ? id.trim() : "";
+      }
+      return "";
+    })
+    .filter((model, index, list) => Boolean(model) && list.indexOf(model) === index);
 }

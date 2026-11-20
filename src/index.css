@@ -1,9 +1,11 @@
+@import "katex/dist/katex.min.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  font-family: var(--font-ui);
   color: var(--text-primary);
   background: var(--bg-canvas);
   color-scheme: light;
@@ -30,9 +32,18 @@
   --node-mastered-bg: #f1faf6;
   --node-mastered-border: #9ccdc0;
   --node-mastered-ink: #263e39;
-  --node-progress-bg: #fff9ed;
-  --node-progress-border: #dfbf91;
-  --node-progress-ink: #49391f;
+  --node-progress-accent: var(--color-accent);
+  --node-progress-bg: color-mix(
+    in srgb,
+    var(--node-progress-accent) 9%,
+    var(--color-panel)
+  );
+  --node-progress-border: color-mix(
+    in srgb,
+    var(--node-progress-accent) 35%,
+    var(--color-border)
+  );
+  --node-progress-ink: var(--color-ink);
   --node-locked-bg: #f9faf9;
   --node-locked-border: #dfe2e2;
   --node-locked-ink: #66737a;
@@ -40,10 +51,22 @@
   --node-unlocked-border: #a9c5df;
   --node-unlocked-ink: #2a4358;
   --bg-canvas: var(--color-canvas);
+  --bg-surface: var(--color-panel);
+  --bg-elevated: var(--color-panel-subtle);
+  --border-subtle: var(--color-border);
   --text-primary: var(--color-ink);
+  --text-secondary: var(--color-muted);
   --text-muted: var(--color-muted);
   --accent-primary: var(--color-accent);
-  --border-subtle: var(--color-border);
+  --accent-hover: var(--color-accent-button);
+  --accent-soft: var(--color-accent-soft);
+  --node-locked: var(--node-locked-bg);
+  --node-unlocked: var(--node-unlocked-bg);
+  --node-progress: var(--node-progress-bg);
+  --node-mastered: var(--node-mastered-bg);
+  --font-ui: "Segoe UI Variable", system-ui, sans-serif;
+  --font-lesson: "Segoe UI Variable", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", Consolas, monospace;
   --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-snap: cubic-bezier(0.2, 0.9, 0.3, 1);
   --ease-exit: cubic-bezier(0.4, 0, 1, 1);
@@ -125,6 +148,10 @@ button:disabled {
     line-height: 1.8;
   }
 
+  .lesson-prose {
+    font-family: var(--font-lesson);
+  }
+
   .prose h1,
   .prose h2,
   .prose h3,
@@ -132,6 +159,193 @@ button:disabled {
     color: var(--color-ink);
     font-weight: 700;
     letter-spacing: -0.02em;
+  }
+
+  [data-font="geometric"] {
+    --font-ui: Inter, "Plus Jakarta Sans", system-ui, sans-serif;
+    --font-lesson: Inter, "Plus Jakarta Sans", system-ui, sans-serif;
+  }
+
+  [data-font="editorial"] {
+    --font-lesson: Literata, Georgia, Cambria, serif;
+  }
+
+  [data-font="hyperlegible"] {
+    --font-ui: "Atkinson Hyperlegible", Verdana, sans-serif;
+    --font-lesson: "Atkinson Hyperlegible", Verdana, sans-serif;
+  }
+
+  [data-font="monospace"] {
+    --font-ui: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    --font-lesson: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  }
+
+  [data-reading-scale="compact"] .lesson-prose.prose { font-size: 0.83125rem; }
+  [data-reading-scale="comfortable"] .lesson-prose.prose { font-size: 0.9625rem; }
+
+}
+
+  [data-theme="midnight-dusk"],
+  [data-theme="tako"],
+  [data-theme="nord-night"],
+  [data-theme="catppuccin-mocha"],
+  [data-theme="tokyo-night"],
+  [data-theme="amoled-obsidian"] {
+    color-scheme: dark;
+    --color-sidebar: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-hover: var(--color-panel-subtle);
+    --color-selected: var(--color-accent-soft);
+    --color-border-strong: color-mix(in srgb, var(--color-muted) 50%, var(--color-border));
+    --color-accent-button: var(--color-accent);
+    --color-success: #78c5a1;
+    --color-warning: #d3a75d;
+    --color-edge-muted: var(--color-border-strong);
+    --color-edge-active: var(--color-accent);
+    --color-edge-upstream: var(--color-muted);
+    --color-canvas-dot: color-mix(in srgb, var(--color-muted) 18%, transparent);
+    --node-mastered-bg: color-mix(in srgb, #4caf85 20%, var(--color-canvas));
+    --node-mastered-border: #4b8f74;
+    --node-mastered-ink: var(--color-ink);
+    --node-progress-bg: color-mix(
+      in srgb,
+      var(--node-progress-accent) 18%,
+      var(--color-canvas)
+    );
+    --node-progress-border: color-mix(
+      in srgb,
+      var(--node-progress-accent) 48%,
+      var(--color-border)
+    );
+    --node-progress-ink: var(--color-ink);
+    --node-locked-bg: var(--color-panel-subtle);
+    --node-locked-border: var(--color-border);
+    --node-locked-ink: var(--color-muted);
+    --node-unlocked-bg: var(--color-panel);
+    --node-unlocked-border: var(--color-accent);
+    --node-unlocked-ink: var(--color-ink);
+  }
+
+  [data-theme="midnight-dusk"] {
+    --color-app-bg: #16151D; --color-canvas: #16151D; --color-panel: #1F1E29;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #ECEBF3; --color-muted: #A9A6BC;
+    --color-accent: #F02475; --color-accent-soft: #422638; --color-border: #393744;
+    --color-edge-upstream: #F48FB1;
+  }
+  [data-theme="tako"] {
+    --color-app-bg: #211F2E; --color-canvas: #211F2E; --color-panel: #2A273A;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #F4F2FA; --color-muted: #B8B3CC;
+    --color-accent: #F3B375; --color-accent-soft: #493b3b; --color-border: #49455a;
+    --color-edge-upstream: #B4A7D6;
+  }
+  [data-theme="nord-night"] {
+    --color-app-bg: #242933; --color-canvas: #242933; --color-panel: #2E3440;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #ECEFF4; --color-muted: #D8DEE9;
+    --color-accent: #88C0D0; --color-accent-soft: #364752; --color-border: #434c5e;
+    --color-edge-upstream: #81A1C1;
+  }
+  [data-theme="catppuccin-mocha"] {
+    --color-app-bg: #1E1E2E; --color-canvas: #1E1E2E; --color-panel: #313244;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #CDD6F4; --color-muted: #A6ADC8;
+    --color-accent: #CBA6F7; --color-accent-soft: #3b3450; --color-border: #45475a;
+    --color-edge-upstream: #89B4FA;
+  }
+  [data-theme="tokyo-night"] {
+    --color-app-bg: #1A1B26; --color-canvas: #1A1B26; --color-panel: #24283B;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #C0CAF5; --color-muted: #9AA5CE;
+    --color-accent: #7AA2F7; --color-accent-soft: #29324a; --color-border: #3b4261;
+    --color-edge-upstream: #7DCFFF;
+  }
+  [data-theme="amoled-obsidian"] {
+    --color-app-bg: #000000; --color-canvas: #000000; --color-panel: #161616;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #F5F5F7; --color-muted: #9E9EA8;
+    --color-accent: #60A5FA; --color-accent-soft: #17283b; --color-border: #303030;
+  }
+
+  [data-theme="strawberry-daiquiri"],
+  [data-theme="lavender-mist"],
+  [data-theme="teal-turquoise"],
+  [data-theme="catppuccin-latte"] {
+    --color-sidebar: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-hover: var(--color-panel-subtle);
+    --color-selected: var(--color-accent-soft);
+    --color-border-strong: color-mix(in srgb, var(--color-muted) 50%, var(--color-border));
+    --color-edge-muted: var(--color-border-strong);
+    --color-edge-active: var(--color-accent);
+  }
+
+  [data-theme="strawberry-daiquiri"] {
+    color-scheme: light; --color-app-bg: #FFF8F8; --color-canvas: #FFF8F8;
+    --color-panel: #FFEBEE;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #2B171C;
+    --color-muted: #6E4B53; --color-accent: #B61E46; --color-accent-button: #B61E46;
+    --color-accent-soft: #f9dce4; --color-border: #efd0d7;
+    --color-edge-upstream: #E91E63;
+  }
+  [data-theme="lavender-mist"] {
+    color-scheme: light; --color-app-bg: #F7F5FF; --color-canvas: #F7F5FF;
+    --color-panel: #EDE7F6;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #1E192B;
+    --color-muted: #5A526E; --color-accent: #6750A4; --color-accent-button: #6750A4;
+    --color-accent-soft: #e4dcf4; --color-border: #d9d1e8;
+    --color-edge-upstream: #7E57C2;
+  }
+  [data-theme="teal-turquoise"] {
+    color-scheme: light; --color-app-bg: #F4FBFB; --color-canvas: #F4FBFB;
+    --color-panel: #E0F2F1;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #102624;
+    --color-muted: #436662; --color-accent: #00695C; --color-accent-button: #00695C;
+    --color-accent-soft: #d0eae6; --color-border: #c8dfdb;
+    --color-edge-upstream: #00897B;
+  }
+  [data-theme="catppuccin-latte"] {
+    color-scheme: light; --color-app-bg: #EFF1F5; --color-canvas: #EFF1F5;
+    --color-panel: #E6E9EF;
+    --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
+    --color-ink: #4C4F69;
+    --color-muted: #6C6F85; --color-accent: #7287FD; --color-accent-button: #7287FD;
+    --color-accent-soft: #dfe4ff; --color-border: #d2d6e0;
+    --color-edge-upstream: #179299;
+  }
+
+@layer components {
+  .katex,
+  .katex * {
+    box-sizing: content-box !important;
+  }
+
+  .katex {
+    font-size: 1.08em;
+    line-height: 1.2 !important;
+    border-color: currentColor;
+  }
+
+  .katex .frac-line {
+    border-bottom-style: solid !important;
+    border-bottom-width: 0.06em !important;
+    border-color: currentColor !important;
+    min-height: 1px;
+  }
+
+  .katex-display {
+    overflow-x: auto;
+    overflow-y: visible;
+    padding: 0.5rem 0;
+    margin: 0.85rem 0;
+  }
+
+  .lesson-prose p,
+  .lesson-prose li {
+    line-height: 1.8;
   }
 
   .prose h1 {
@@ -181,8 +395,12 @@ button:disabled {
     background: var(--color-panel-subtle);
     padding: 0.12rem 0.35rem;
     color: var(--color-accent);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 0.84em;
+  }
+
+  [data-theme] .font-mono {
+    font-family: var(--font-mono);
   }
 
   .prose pre {
@@ -273,12 +491,19 @@ button:disabled {
     --color-edge-active: #79b4ed;
     --color-edge-upstream: #c4a277;
     --color-canvas-dot: rgba(190, 202, 211, 0.12);
+    --node-progress-bg: color-mix(
+      in srgb,
+      var(--node-progress-accent) 18%,
+      var(--color-canvas)
+    );
+    --node-progress-border: color-mix(
+      in srgb,
+      var(--node-progress-accent) 48%,
+      var(--color-border)
+    );
     --node-mastered-bg: #263a33;
     --node-mastered-border: #537c6c;
     --node-mastered-ink: #d9eee4;
-    --node-progress-bg: #3b3326;
-    --node-progress-border: #806b43;
-    --node-progress-ink: #f4e3bf;
     --node-locked-bg: #292b2c;
     --node-locked-border: #4a4e50;
     --node-locked-ink: #bec4c7;
@@ -312,9 +537,6 @@ button:disabled {
     --node-mastered-bg: #edf2e8;
     --node-mastered-border: #b1c2a3;
     --node-mastered-ink: #3c4934;
-    --node-progress-bg: #f7edda;
-    --node-progress-border: #d9bc8e;
-    --node-progress-ink: #51412f;
     --node-locked-bg: #f5f0e7;
     --node-locked-border: #ded4c5;
     --node-locked-ink: #786e60;
@@ -348,9 +570,6 @@ button:disabled {
     --node-mastered-bg: #edf7f3;
     --node-mastered-border: #add0c4;
     --node-mastered-ink: #29483d;
-    --node-progress-bg: #fbf5e9;
-    --node-progress-border: #ddc69f;
-    --node-progress-ink: #51442f;
     --node-locked-bg: #f4f7f8;
     --node-locked-border: #d8e0e3;
     --node-locked-ink: #67777f;
@@ -384,9 +603,6 @@ button:disabled {
     --node-mastered-bg: #edf4e9;
     --node-mastered-border: #b7cba8;
     --node-mastered-ink: #394b35;
-    --node-progress-bg: #f8f2e4;
-    --node-progress-border: #d8c59d;
-    --node-progress-ink: #514631;
     --node-locked-bg: #f3f5ef;
     --node-locked-border: #d9dfd2;
     --node-locked-ink: #6b7768;
@@ -604,6 +820,37 @@ button:disabled {
   .motion-presence[data-presence="visible"] .motion-popover {
     opacity: 1;
     transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  .confirm-delete-backdrop {
+    animation: confirm-delete-fade-in 150ms ease-out both;
+  }
+
+  .confirm-delete-panel {
+    animation: confirm-delete-scale-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  @keyframes confirm-delete-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes confirm-delete-scale-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .confirm-delete-backdrop,
+    .confirm-delete-panel {
+      animation: none;
+    }
   }
 
   .motion-spotlight {

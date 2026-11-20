@@ -1,9 +1,13 @@
 import {
+  canReach,
   validateAndLayerDag,
   buildInitialGraphNodes,
 } from "../src/engine/dagTopology.ts";
 import { computeSugiyamaLayout } from "../src/engine/sugiyamaLayout.ts";
-import { computeMasteryCascade } from "../src/engine/masteryCascade.ts";
+import {
+  computeMasteryCascade,
+  recomputeGraphState,
+} from "../src/engine/masteryCascade.ts";
 import { scheduleNextReview } from "../src/engine/sm2Scheduler.ts";
 import {
   chunkDocumentText,
@@ -65,6 +69,12 @@ async function testAll() {
     "Removed edge should be D->A"
   );
   assert(validated.validEdges.length === 4, "Valid edges should be A->B, A->C, B->D, C->D");
+  assert(
+    canReach(validated.validEdges, "A", "D") &&
+      !canReach(validated.validEdges, "D", "A") &&
+      canReach(validated.validEdges, "A", "A"),
+    "reachability should find paths and identify self-loops for interactive edge checks"
+  );
 
   assert(validated.layerByNode.get("A") === 0, "A should be layer 0");
   assert(validated.layerByNode.get("B") === 1, "B should be layer 1");
@@ -81,6 +91,21 @@ async function testAll() {
   assert(nodes.find((n) => n.id === "B")?.status === "locked", "B should be locked");
   assert(nodes.find((n) => n.id === "C")?.status === "locked", "C should be locked");
   assert(nodes.find((n) => n.id === "D")?.status === "locked", "D should be locked");
+  const graphAfterDisconnect = recomputeGraphState(
+    nodes,
+    validated.validEdges.filter(
+      (edge) => !(edge.source_id === "A" && edge.target_id === "B")
+    )
+  );
+  const bAfterDisconnect = graphAfterDisconnect.updatedNodes.find(
+    (node) => node.id === "B"
+  )!;
+  assert(
+    bAfterDisconnect.status === "unlocked" &&
+      bAfterDisconnect.in_degree_unmastered === 0 &&
+      bAfterDisconnect.layer_index === 0,
+    "disconnecting the last prerequisite should unlock and re-layer a node"
+  );
   console.log("✓ dagTopology tests passed!");
 
   console.log("=== 2. Testing sugiyamaLayout ===");

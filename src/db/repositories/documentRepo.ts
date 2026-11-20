@@ -113,6 +113,19 @@ export async function deleteDocument(docId: string): Promise<void> {
   );
 }
 
+export async function countDocumentChunks(docId: string): Promise<number> {
+  const db = await getDb();
+  const rows = await db.select<Array<{ count: number }>>(
+    "SELECT COUNT(*) AS count FROM doc_chunks WHERE doc_id = $1",
+    [docId]
+  );
+  const count = rows[0]?.count;
+  if (count === undefined) {
+    throw new Error("Failed to retrieve the document chunk count.");
+  }
+  return count;
+}
+
 /**
  * Queries SQLite FTS5 using BM25 ranking, safely sanitizing user tokens into OR prefix queries.
  */

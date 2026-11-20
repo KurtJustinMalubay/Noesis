@@ -13,6 +13,7 @@ import {
   Bot,
   Check,
   History,
+  LoaderCircle,
   Pencil,
   Plus,
   Send,
@@ -27,6 +28,7 @@ import {
 import { AnimatedPresence } from "./AnimatedPresence";
 import {
   clearTutorThreadMessages,
+  countTutorThreadMessages,
   createTutorThread,
   createTutorThreadTitle,
   deleteTutorThread,
@@ -44,6 +46,7 @@ import {
 import type { GraphNode } from "../types/domain";
 import { RichContent } from "./ui/RichContent";
 import type { TutorPayload } from "../ai/tokenOptimizer";
+import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 
 interface TutorDrawerProps {
   isOpen: boolean;
@@ -58,6 +61,19 @@ interface ThreadGroup {
   title: string;
   threads: TutorThread[];
 }
+
+type TutorDeleteConfirmation =
+  | {
+      kind: "thread";
+      thread: TutorThread;
+      messageCount: number;
+    }
+  | {
+      kind: "history";
+      threadId: string;
+      threadTitle: string;
+      messageCount: number;
+    };
 
 function toLessonContext(node: GraphNode): TutorLessonContext {
   return {
@@ -121,7 +137,7 @@ const TutorMessageBubble = memo(function TutorMessageBubble({
           {message.attached_lesson_title}
         </p>
       )}
-      <div className="prose prose-xs max-w-none select-text">
+      <div className="prose lesson-prose prose-xs max-w-none select-text">
         {message.content ? (
           <RichContent>{message.content}</RichContent>
         ) : message.role === "assistant" && isActiveStream ? (
@@ -161,6 +177,11 @@ export function TutorDrawer({
   const [isVisible, setIsVisible] = useState(false);
   const [input, setInput] = useState("");
   const [threads, setThreads] = useState<TutorThread[]>([]);
+  const [deleteConfirmation, setDeleteConfirmation] =
+    useState<TutorDeleteConfirmation | null>(null);
+  const [preparingDeleteThreadId, setPreparingDeleteThreadId] = useState<
+    string | null
+  >(null);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<TutorMessage[]>([]);
   const [attachedLesson, setAttachedLesson] =
@@ -219,6 +240,10 @@ export function TutorDrawer({
   useEffect(() => {
     onPanelReadyRef.current();
   }, []);
+
+  useEffect(() => {
+    if (!isOpen) setDeleteConfirmation(null);
+  }, [isOpen]);
 
   useEffect(() => {
     enterFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
@@ -666,20 +691,50 @@ export function TutorDrawer({
   };
 
   const handleDeleteThread = async (thread: TutorThread) => {
+    const isActive = thread.id === activeThreadIdRef.current;
+    if (isActive) stopGeneration();
+    await deleteTutorThread(thread.id);
+    const remainingThreads = threads.filter(
+      (candidate) => candidate.id !== thread.id
+    );
+    setThreads(remainingThreads);
+    if (isActive) {
+      const nextThread = remainingThreads[0] ?? null;
+      setCurrentThread(nextThread?.id ?? null);
+      setAttachedLesson(nextThread?.lessonContext ?? null);
+    }
+  };
+
+  const requestThreadDeletion = async (thread: TutorThread) => {
+    if (preparingDeleteThreadId) return;
+    setPreparingDeleteThreadId(thread.id);
     try {
-      await deleteTutorThread(thread.id);
-      const remainingThreads = threads.filter(
-        (candidate) => candidate.id !== thread.id
-      );
-      setThreads(remainingThreads);
-      if (thread.id === activeThreadIdRef.current) {
-        stopGeneration();
-        const nextThread = remainingThreads[0] ?? null;
-        setCurrentThread(nextThread?.id ?? null);
-        setAttachedLesson(nextThread?.lessonContext ?? null);
-      }
+      const messageCount = await countTutorThreadMessages(thread.id);
+      setDeleteConfirmation({ kind: "thread", thread, messageCount });
     } catch (error) {
-      onToast(`Unable to delete tutor chat: ${errorMessage(error)}`);
+      onToast(`Unable to inspect tutor chat: ${errorMessage(error)}`);
+    } finally {
+      setPreparingDeleteThreadId(null);
+    }
+  };
+
+  const requestChatHistoryClear = async () => {
+    const threadId = activeThreadIdRef.current;
+    if (!threadId || preparingDeleteThreadId) return;
+    setPreparingDeleteThreadId(threadId);
+    try {
+      const messageCount = await countTutorThreadMessages(threadId);
+      const thread = threads.find((item) => item.id === threadId);
+      setDeleteConfirmation({
+        kind: "history",
+        threadId,
+        threadTitle: thread?.title ?? "Current tutor chat",
+        messageCount,
+      });
+    } catch (error) {
+      onToast(`Unable to inspect tutor chat: ${errorMessage(error)}`);
+    } finally {
+      setPreparingDeleteThreadId(null);
     }
   };
 
@@ -736,33 +791,27 @@ export function TutorDrawer({
     setAttachedLesson(lessonContext);
   };
 
-  const handleClearChat = async () => {
-    const threadId = activeThreadIdRef.current;
-    if (!threadId) return;
-    stopGeneration();
-    try {
-      await clearTutorThreadMessages(threadId);
-      if (activeThreadIdRef.current === threadId) {
-        setMessages([]);
-        setHasMoreMessages(false);
-        setNextCursor(null);
-        shouldStickToBottomRef.current = true;
-      }
-      setThreads((current) =>
-        current.map((thread) =>
-          thread.id === threadId
-            ? {
-                ...thread,
-                rolling_summary: "",
-                summary_cursor_created_at: null,
-                summary_cursor_id: null,
-              }
-            : thread
-        )
-      );
-    } catch (error) {
-      onToast(`Unable to clear tutor chat: ${errorMessage(error)}`);
+  const handleClearChat = async (threadId: string) => {
+    if (threadId === activeThreadIdRef.current) stopGeneration();
+    await clearTutorThreadMessages(threadId);
+    if (activeThreadIdRef.current === threadId) {
+      setMessages([]);
+      setHasMoreMessages(false);
+      setNextCursor(null);
+      shouldStickToBottomRef.current = true;
     }
+    setThreads((current) =>
+      current.map((thread) =>
+        thread.id === threadId
+          ? {
+              ...thread,
+              rolling_summary: "",
+              summary_cursor_created_at: null,
+              summary_cursor_id: null,
+            }
+          : thread
+      )
+    );
   };
 
   const handleScroll = () => {
@@ -847,8 +896,10 @@ export function TutorDrawer({
           </button>
           <button
             type="button"
-            onClick={() => void handleClearChat()}
-            disabled={!activeThreadId}
+            onClick={() => void requestChatHistoryClear()}
+            disabled={
+              !activeThreadId || preparingDeleteThreadId === activeThreadId
+            }
             className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:opacity-40"
             title="Clear current chat"
             aria-label="Clear current chat"
@@ -934,12 +985,17 @@ export function TutorDrawer({
                           </button>
                           <button
                             type="button"
-                            onClick={() => void handleDeleteThread(thread)}
+                            onClick={() => void requestThreadDeletion(thread)}
+                            disabled={preparingDeleteThreadId === thread.id}
                             className="rounded p-1 text-[var(--color-muted)] opacity-0 transition hover:bg-rose-50 hover:text-rose-700 group-hover:opacity-100 focus:opacity-100"
                             title="Delete chat"
                             aria-label={`Delete ${thread.title}`}
                           >
-                            <Trash2 className="h-3 w-3" />
+                            {preparingDeleteThreadId === thread.id ? (
+                              <LoaderCircle className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3 w-3" />
+                            )}
                           </button>
                         </>
                       )}
@@ -1084,6 +1140,44 @@ export function TutorDrawer({
           </div>
         )}
       </div>
+      {isOpen && deleteConfirmation && (
+        <ConfirmDeleteModal
+          title={
+            deleteConfirmation.kind === "thread"
+              ? "Delete tutor chat?"
+              : "Clear chat history?"
+          }
+          itemName={
+            deleteConfirmation.kind === "thread"
+              ? deleteConfirmation.thread.title
+              : deleteConfirmation.threadTitle
+          }
+          description={
+            deleteConfirmation.kind === "thread"
+              ? "The tutor chat and its entire saved message history will be permanently deleted."
+              : "All messages and the saved conversation summary will be permanently cleared. The chat itself will remain."
+          }
+          impactItems={[
+            { label: "Messages", value: deleteConfirmation.messageCount },
+          ]}
+          deleteLabel={
+            deleteConfirmation.kind === "thread" ? "Delete chat" : "Clear history"
+          }
+          onCancel={() => setDeleteConfirmation(null)}
+          onConfirm={() =>
+            deleteConfirmation.kind === "thread"
+              ? handleDeleteThread(deleteConfirmation.thread)
+              : handleClearChat(deleteConfirmation.threadId)
+          }
+          onError={(error) =>
+            onToast(
+              `Unable to ${
+                deleteConfirmation.kind === "thread" ? "delete tutor chat" : "clear tutor chat"
+              }: ${errorMessage(error)}`
+            )
+          }
+        />
+      )}
     </aside>
   );
 }

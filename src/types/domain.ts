@@ -1,9 +1,11 @@
 export type NodeStatus = "locked" | "unlocked" | "in_progress" | "mastered";
+export type CanvasLayoutMode = "auto" | "free";
 
 export interface Workspace {
   id: string;
   title: string;
   root_domain: string;
+  layout_mode: CanvasLayoutMode;
   created_at: number;
   updated_at: number;
 }
@@ -44,6 +46,11 @@ export interface Flashcard {
 }
 
 export type QuizQuestionType = "mcq" | "open_ended" | "coding";
+export type QuizDifficulty = "easy" | "medium" | "hard";
+export type QuizDifficultyMode =
+  | QuizDifficulty
+  | "progressive"
+  | "balanced";
 
 export type QuizLanguage =
   | "auto"
@@ -60,8 +67,9 @@ export type QuizLanguage =
 
 export interface QuizGenerationConfig {
   formats: QuizQuestionType[];
-  count: 3 | 5 | 8;
+  count: 3 | 5 | 8 | 10 | 12;
   language: QuizLanguage;
+  difficultyMode?: QuizDifficultyMode;
 }
 
 export type QuizAnswer = string | number;
@@ -85,13 +93,16 @@ export interface QuizQuestion {
   language?: string;
   starterCode?: string;
   testCases?: string[];
+  hints?: string[];
   explanation: string;
   sourceNodeId: string;
+  difficulty?: QuizDifficulty;
 }
 
 export interface QuizDraft {
   answers: Record<string, QuizAnswer>;
   currentQuestionIndex: number;
+  difficultyMode?: QuizDifficultyMode;
   languageByQuestion?: Record<string, QuizLanguage>;
   results?: QuizGradingResult[];
   score?: number;

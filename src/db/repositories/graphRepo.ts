@@ -172,3 +172,118 @@ export async function updateNodesStatusBatch(
     ])
   );
 }
+
+export async function insertConceptNode(node: GraphNode): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute(
+      `INSERT INTO nodes
+        (id, workspace_id, title, summary_hint, status, mastery_score,
+         in_degree_unmastered, layer_index, pos_x, pos_y, is_hydrated,
+         lesson_markdown, mermaid_diagram, source_citations, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+      [
+        node.id,
+        node.workspace_id,
+        node.title,
+        node.summary_hint,
+        node.status,
+        node.mastery_score,
+        node.in_degree_unmastered,
+        node.layer_index,
+        node.pos_x,
+        node.pos_y,
+        node.is_hydrated,
+        node.lesson_markdown,
+        node.mermaid_diagram,
+        node.source_citations,
+        node.updated_at,
+      ]
+    )
+  );
+}
+
+export async function updateConceptNode(
+  nodeId: string,
+  title: string,
+  summary: string
+): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute(
+      "UPDATE nodes SET title = $1, summary_hint = $2, updated_at = $3 WHERE id = $4",
+      [title, summary, Date.now(), nodeId]
+    )
+  );
+}
+
+export async function deleteConceptNode(nodeId: string): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute("DELETE FROM nodes WHERE id = $1", [nodeId])
+  );
+}
+
+export async function insertGraphEdge(edge: GraphEdge): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute(
+      "INSERT INTO edges (workspace_id, source_id, target_id) VALUES ($1, $2, $3)",
+      [edge.workspace_id, edge.source_id, edge.target_id]
+    )
+  );
+}
+
+export async function deleteGraphEdge(
+  workspaceId: string,
+  sourceId: string,
+  targetId: string
+): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute(
+      "DELETE FROM edges WHERE workspace_id = $1 AND source_id = $2 AND target_id = $3",
+      [workspaceId, sourceId, targetId]
+    )
+  );
+}
+
+export async function updateGraphNodeState(nodes: GraphNode[]): Promise<void> {
+  const db = await getDb();
+  await executeBatch(
+    db,
+    `UPDATE nodes
+     SET status = $1,
+         in_degree_unmastered = $2,
+         layer_index = $3,
+         pos_x = $4,
+         pos_y = $5,
+         updated_at = $6
+     WHERE id = $7 AND workspace_id = $8`,
+    nodes.map((node) => [
+      node.status,
+      node.in_degree_unmastered,
+      node.layer_index,
+      node.pos_x,
+      node.pos_y,
+      Date.now(),
+      node.id,
+      node.workspace_id,
+    ])
+  );
+}
+
+export async function updateNodePosition(
+  workspaceId: string,
+  nodeId: string,
+  x: number,
+  y: number
+): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute(
+      "UPDATE nodes SET pos_x = $1, pos_y = $2, updated_at = $3 WHERE id = $4 AND workspace_id = $5",
+      [x, y, Date.now(), nodeId, workspaceId]
+    )
+  );
+}

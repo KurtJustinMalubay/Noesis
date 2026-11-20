@@ -4,23 +4,72 @@
     <meta charset="UTF-8" />
     <script>
       (() => {
-        const themes = new Set([
-          "daylight",
-          "mica-dark",
-          "warm-paper",
-          "nordic-frost",
-          "sage-studio",
+        const themeModes = {
+          daylight: "light",
+          "mica-dark": "dark",
+          "warm-paper": "light",
+          "nordic-frost": "light",
+          "sage-studio": "light",
+          "midnight-dusk": "dark",
+          tako: "dark",
+          "nord-night": "dark",
+          "catppuccin-mocha": "dark",
+          "tokyo-night": "dark",
+          "amoled-obsidian": "dark",
+          "strawberry-daiquiri": "light",
+          "lavender-mist": "light",
+          "teal-turquoise": "light",
+          "catppuccin-latte": "light",
+        };
+        const fonts = new Set([
+          "system",
+          "geometric",
+          "editorial",
+          "hyperlegible",
+          "monospace",
         ]);
+        const readingScales = new Set([
+          "compact",
+          "default",
+          "comfortable",
+        ]);
+        const root = document.documentElement;
         let theme = "daylight";
+        let font = "system";
+        let readingScale = "default";
         try {
           const preferences = JSON.parse(
             localStorage.getItem("noesis.preferences.v1") || "null"
           );
-          if (themes.has(preferences?.theme)) theme = preferences.theme;
+          const mode =
+            preferences?.appearanceMode === "dark" ||
+            preferences?.appearanceMode === "light"
+              ? preferences.appearanceMode
+              : themeModes[preferences?.theme] || "light";
+          const fallbackTheme =
+            mode === "dark" ? "mica-dark" : "daylight";
+          const lastTheme =
+            mode === "dark"
+              ? preferences?.lastDarkThemeId
+              : preferences?.lastLightThemeId;
+          theme =
+            themeModes[preferences?.theme] === mode
+              ? preferences.theme
+              : themeModes[lastTheme] === mode
+                ? lastTheme
+                : fallbackTheme;
+          if (fonts.has(preferences?.fontFamily)) {
+            font = preferences.fontFamily;
+          }
+          if (readingScales.has(preferences?.readingScale)) {
+            readingScale = preferences.readingScale;
+          }
         } catch {
-          // Use the default theme when saved preferences are unavailable.
+          // Use default appearance values when saved preferences are unavailable.
         }
-        document.documentElement.setAttribute("data-theme", theme);
+        root.setAttribute("data-theme", theme);
+        root.setAttribute("data-font", font);
+        root.setAttribute("data-reading-scale", readingScale);
       })();
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

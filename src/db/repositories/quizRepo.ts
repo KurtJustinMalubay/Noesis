@@ -12,6 +12,7 @@ const LEGACY_CONFIG: QuizGenerationConfig = {
   formats: ["mcq"],
   count: 5,
   language: "auto",
+  difficultyMode: "medium",
 };
 
 export async function getNodeQuiz(
@@ -48,10 +49,19 @@ export async function getNodeQuiz(
     const storedConfig = JSON.parse(rows[0].config_json) as QuizGenerationConfig;
     if (
       Array.isArray(storedConfig.formats) &&
-      [3, 5, 8].includes(storedConfig.count) &&
+      [3, 5, 8, 10, 12].includes(storedConfig.count) &&
       typeof storedConfig.language === "string"
     ) {
-      config = storedConfig;
+      config = {
+        ...storedConfig,
+        difficultyMode:
+          storedConfig.difficultyMode === "easy" ||
+          storedConfig.difficultyMode === "hard" ||
+          storedConfig.difficultyMode === "progressive" ||
+          storedConfig.difficultyMode === "balanced"
+            ? storedConfig.difficultyMode
+            : "medium",
+      };
     }
   } catch {
     config = LEGACY_CONFIG;
@@ -70,6 +80,13 @@ export async function getNodeQuiz(
           (storedDraft.currentQuestionIndex ?? -1) >= 0
             ? storedDraft.currentQuestionIndex!
             : 0,
+        difficultyMode:
+          storedDraft.difficultyMode === "easy" ||
+          storedDraft.difficultyMode === "hard" ||
+          storedDraft.difficultyMode === "progressive" ||
+          storedDraft.difficultyMode === "balanced"
+            ? storedDraft.difficultyMode
+            : "medium",
         results: Array.isArray(storedDraft.results)
           ? storedDraft.results
           : undefined,

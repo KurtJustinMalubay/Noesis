@@ -61,3 +61,15 @@ export async function clearGeneratedDiagnostics(): Promise<void> {
   const db = await getDb();
   await serializeDbWrite(() => db.execute("DELETE FROM node_quizzes"));
 }
+
+export async function countGeneratedDiagnostics(): Promise<number> {
+  const db = await getDb();
+  const rows = await db.select<Array<{ count: number }>>(
+    "SELECT COUNT(*) AS count FROM node_quizzes"
+  );
+  const count = rows[0]?.count;
+  if (count === undefined) {
+    throw new Error("Failed to retrieve the generated quiz count.");
+  }
+  return count;
+}

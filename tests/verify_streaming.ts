@@ -1,4 +1,5 @@
 import {
+  fetchLocalModels,
   generateGeminiJson,
   generateGeminiText,
   parseGeminiJson,
@@ -440,6 +441,7 @@ async function run(): Promise<void> {
 
     storedAiSettings = JSON.stringify({
       provider: "openai-compatible",
+      apiKey: "saved-gemini-secret",
       localBaseUrl: "http://localhost:11434/v1",
       localModel: "qwen2.5",
     });
@@ -471,11 +473,29 @@ async function run(): Promise<void> {
     );
     assert(
       !requestedHeaders.has("x-goog-api-key") &&
+        !requestedHeaders.has("Authorization") &&
         localRequestBody?.model === "qwen2.5" &&
         localRequestBody?.max_tokens === 77 &&
         localRequestBody?.temperature === 0.4 &&
         localRequestBody?.top_p === 0.9,
       "local requests should use the configured model without a Gemini key"
+    );
+
+    let discoveryHeaders = new Headers();
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      discoveryHeaders = new Headers(init?.headers);
+      return new Response(
+        JSON.stringify({ data: [{ id: "qwen2.5" }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }) as typeof fetch;
+    const discoveredModels = await fetchLocalModels(
+      "http://127.0.0.1:11434/v1"
+    );
+    assert(
+      discoveredModels[0] === "qwen2.5" &&
+        !discoveryHeaders.has("Authorization"),
+      "local model discovery must not forward a saved Gemini key"
     );
 
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -576,8 +596,9 @@ async function run(): Promise<void> {
     );
 
     const localChunks: string[] = [];
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       requestedUrl = String(input);
+      requestedHeaders = new Headers(init?.headers);
       return makeResponse(
         [
           `data: ${JSON.stringify({ choices: [{ delta: { content: "Local " } }] })}\n\n`,
@@ -597,7 +618,8 @@ async function run(): Promise<void> {
     assert(
       localStream === "Local stream." &&
         localChunks.join("") === localStream &&
-        requestedUrl.endsWith("/chat/completions"),
+        requestedUrl.endsWith("/chat/completions") &&
+        !requestedHeaders.has("Authorization"),
       "OpenAI-compatible SSE deltas should stream progressively"
     );
 
@@ -623,6 +645,48 @@ async function run(): Promise<void> {
     assert(
       repaired.repaired && repairCalls === 2,
       "invalid local model JSON should trigger one automatic repair request"
+    );
+
+    storedAiSettings = JSON.stringify({
+      provider: "openai-compatible",
+      localBaseUrl: "http://192.168.1.25:1234/v1",
+      localModel: "local-model",
+      localTemperature: 0.9,
+    });
+    const structuredLocalBodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      structuredLocalBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>
+      );
+      if (structuredLocalBodies.length === 1) {
+        return new Response("Unsupported response_format", { status: 422 });
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"repaired":true}' } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }) as typeof fetch;
+    const localJsonModeResult = await generateGeminiJson<{
+      repaired: boolean;
+    }>({
+      tier: "fast",
+      systemInstruction: "Return JSON.",
+      userPrompt: "Structured local request",
+      temperature: 0.8,
+      jsonSchema: {
+        type: "OBJECT",
+        properties: { repaired: { type: "BOOLEAN" } },
+      },
+    });
+    assert(
+      localJsonModeResult.repaired &&
+        structuredLocalBodies.length === 2 &&
+        structuredLocalBodies[0].temperature === 0.25 &&
+        structuredLocalBodies[0].response_format !== undefined &&
+        structuredLocalBodies[1].response_format === undefined,
+      "structured local requests should clamp temperature and retry HTTP 422 without response_format"
     );
 
     storedAiSettings = JSON.stringify({

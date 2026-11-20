@@ -1,10 +1,80 @@
 import type { GraphEdge, GraphNode, NodeStatus } from "../types/domain";
+import { validateAndLayerDag } from "./dagTopology.ts";
 
 export interface NodeStatusPatch {
   id: string;
   status: NodeStatus;
   in_degree_unmastered: number;
   mastery_score?: number;
+}
+
+export interface GraphStateResult {
+  updatedNodes: GraphNode[];
+  patches: NodeStatusPatch[];
+  newlyUnlockedIds: string[];
+}
+
+export function recomputeGraphState(
+  nodes: GraphNode[],
+  edges: GraphEdge[]
+): GraphStateResult {
+  const workspaceId = nodes[0]?.workspace_id ?? "";
+  const topology = validateAndLayerDag(
+    workspaceId,
+    nodes.map(({ id, title, summary_hint }) => ({ id, title, summary_hint })),
+    edges.map(({ source_id, target_id }) => ({ source_id, target_id }))
+  );
+  if (topology.validEdges.length !== edges.length) {
+    throw new Error("Cannot update a graph with invalid or cyclic edges.");
+  }
+
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const unmasteredByNode = new Map(nodes.map((node) => [node.id, 0]));
+  for (const edge of edges) {
+    if (nodesById.get(edge.source_id)?.status !== "mastered") {
+      unmasteredByNode.set(
+        edge.target_id,
+        (unmasteredByNode.get(edge.target_id) ?? 0) + 1
+      );
+    }
+  }
+
+  const patches: NodeStatusPatch[] = [];
+  const newlyUnlockedIds: string[] = [];
+  const updatedNodes = nodes.map((node) => {
+    const unmasteredCount = unmasteredByNode.get(node.id) ?? 0;
+    const status: NodeStatus =
+      node.status === "mastered"
+        ? "mastered"
+        : unmasteredCount > 0
+          ? "locked"
+          : node.is_hydrated === 1 || node.status === "in_progress"
+            ? "in_progress"
+            : "unlocked";
+    const layerIndex = topology.layerByNode.get(node.id) ?? 0;
+
+    if (
+      status !== node.status ||
+      unmasteredCount !== node.in_degree_unmastered
+    ) {
+      patches.push({
+        id: node.id,
+        status,
+        in_degree_unmastered: unmasteredCount,
+      });
+    }
+    if (node.status === "locked" && status === "unlocked") {
+      newlyUnlockedIds.push(node.id);
+    }
+    return {
+      ...node,
+      status,
+      in_degree_unmastered: unmasteredCount,
+      layer_index: layerIndex,
+    };
+  });
+
+  return { updatedNodes, patches, newlyUnlockedIds };
 }
 
 const childrenByEdges = new WeakMap<GraphEdge[], Map<string, string[]>>();

@@ -14,6 +14,7 @@ export interface IngestResult {
   document: StoredDocument;
   chunkCount: number;
   deduplicated: boolean;
+  extractedText?: string;
 }
 
 async function extractPdfText(bytes: Uint8Array): Promise<{
@@ -44,11 +45,12 @@ async function extractPdfText(bytes: Uint8Array): Promise<{
  */
 export async function ingestLocalFilePath(
   filePath: string,
-  workspaceId: string | null = null
+  workspaceId: string | null = null,
+  includeExtractedText = false
 ): Promise<IngestResult> {
   const fileBytes = await readFile(filePath);
   const fileName = filePath.split(/[\\/]/).pop() ?? "Untitled";
-  return ingestRawBytes(fileBytes, fileName, workspaceId);
+  return ingestRawBytes(fileBytes, fileName, workspaceId, includeExtractedText);
 }
 
 /**
@@ -57,7 +59,8 @@ export async function ingestLocalFilePath(
 export async function ingestRawBytes(
   fileBytes: Uint8Array,
   fileName: string,
-  workspaceId: string | null = null
+  workspaceId: string | null = null,
+  includeExtractedText = false
 ): Promise<IngestResult> {
   const arrayBuffer = fileBytes.buffer.slice(
     fileBytes.byteOffset,
@@ -66,7 +69,7 @@ export async function ingestRawBytes(
 
   const fileHash = await computeSha256Hex(arrayBuffer);
   const existing = await findDocumentByHash(fileHash);
-  if (existing) {
+  if (existing && !includeExtractedText) {
     return {
       document: existing,
       chunkCount: 0,
@@ -86,6 +89,19 @@ export async function ingestRawBytes(
     rawText = new TextDecoder("utf-8").decode(fileBytes);
   }
 
+  if (!rawText.trim()) {
+    throw new Error(`No readable text was found in "${fileName}".`);
+  }
+
+  if (existing) {
+    return {
+      document: existing,
+      chunkCount: 0,
+      deduplicated: true,
+      extractedText: includeExtractedText ? rawText : undefined,
+    };
+  }
+
   const chunks = chunkDocumentText(rawText);
   const doc: StoredDocument = {
     id: crypto.randomUUID(),
@@ -102,6 +118,7 @@ export async function ingestRawBytes(
       document: concurrentDuplicate,
       chunkCount: 0,
       deduplicated: true,
+      extractedText: includeExtractedText ? rawText : undefined,
     };
   }
 
@@ -109,5 +126,6 @@ export async function ingestRawBytes(
     document: doc,
     chunkCount: chunks.length,
     deduplicated: false,
+    extractedText: includeExtractedText ? rawText : undefined,
   };
 }

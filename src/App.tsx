@@ -7,13 +7,13 @@ import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { AppGuide } from "./components/AppGuide";
 import { AnimatedPresence } from "./components/AnimatedPresence";
 import { BootSplash } from "./components/BootSplash";
+import { UpdateIndicator } from "./components/UpdateIndicator";
 import type { GraphNode } from "./types/domain";
+import { getWorkspaceDeletionSummary } from "./db/repositories/workspaceRepo";
 import {
   setNativeFullscreen,
   toggleNativeFullscreen,
 } from "./utils/windowControls";
-
-const TUTORIAL_SEEN_KEY = "noesis.app-guide.seen.v1";
 
 const LessonReader = lazy(() =>
   import("./components/LessonReader").then((module) => ({
@@ -45,6 +45,7 @@ export default function App() {
   const [hasOpenedGuide, setHasOpenedGuide] = useState(false);
   const [hasOpenedModal, setHasOpenedModal] = useState(false);
   const sidebarCollapsedRef = useRef(false);
+  const startupGuideEvaluated = useRef(false);
   const launchFullscreenApplied = useRef(false);
   const lastSelectedNodeRef = useRef<GraphNode | null>(null);
   const store = useNoesisStore();
@@ -122,22 +123,26 @@ export default function App() {
   }, [isGuideOpen]);
 
   useEffect(() => {
-    if (!store.preferences.showAppTutorial) {
-      setIsGuideOpen(false);
+    if (
+      !dbReady ||
+      startupGuideEvaluated.current ||
+      store.activeModal !== "none"
+    ) {
       return;
     }
-    if (
-      dbReady &&
-      store.activeModal === "none" &&
-      localStorage.getItem(TUTORIAL_SEEN_KEY) !== "true"
-    ) {
-      setIsGuideOpen(true);
-    }
+    startupGuideEvaluated.current = true;
+    if (store.preferences.showAppTutorial) setIsGuideOpen(true);
   }, [dbReady, store.activeModal, store.preferences.showAppTutorial]);
 
   const closeGuide = () => {
-    localStorage.setItem(TUTORIAL_SEEN_KEY, "true");
     setIsGuideOpen(false);
+  };
+  const setGuideOnStartup = (show: boolean) => {
+    void store
+      .setPreferences({ ...store.preferences, showAppTutorial: show })
+      .catch((error) =>
+        store.showToast(error instanceof Error ? error.message : String(error))
+      );
   };
 
   const activeWorkspace =
@@ -154,6 +159,8 @@ export default function App() {
   return (
     <div
       data-theme={store.preferences.theme}
+      data-font={store.preferences.fontFamily}
+      data-reading-scale={store.preferences.readingScale}
       className="app-shell relative flex h-screen w-screen overflow-hidden bg-[var(--color-app-bg)] text-[var(--color-ink)]"
     >
       {bootError ? (
@@ -178,6 +185,7 @@ export default function App() {
               onToggle={toggleSidebar}
               onSelect={(id) => store.selectWorkspace(id)}
               onDelete={(id) => store.removeWorkspace(id)}
+              onGetDeleteSummary={getWorkspaceDeletionSummary}
               onNewDag={() => store.setActiveModal("new_workspace")}
               onVault={() => store.setActiveModal("vault")}
               onReview={() => store.setActiveModal("review")}
@@ -215,8 +223,10 @@ export default function App() {
             )}
           </div>
           <div className="flex items-center gap-2">
+            <UpdateIndicator onToast={store.showToast} />
             <button
               type="button"
+              data-guide="tutor"
               onClick={() => {
                 setHasOpenedTutor(true);
                 store.setTutorOpen(!store.isTutorOpen);
@@ -288,11 +298,22 @@ export default function App() {
               <DagCanvas
                 nodes={store.nodes}
                 edges={store.edges}
+                layoutMode={activeWorkspace?.layout_mode ?? "auto"}
                 selectedNodeId={store.selectedNodeId}
                 showDots={store.preferences.showCanvasDots}
                 edgeRouting={store.preferences.edgeRouting}
                 nodeDensity={store.preferences.nodeDensity}
                 onSelectNode={(id) => store.selectNode(id)}
+                quizNodeIds={store.quizNodeIds}
+                onSetLayoutMode={store.setCanvasLayoutMode}
+                onMoveNode={store.moveGraphNode}
+                onRealignGrid={store.realignGraphGrid}
+                onAddNode={store.addConceptNode}
+                onEditNode={store.editConceptNode}
+                onDeleteNode={store.removeConceptNode}
+                onConnectNodes={store.connectConceptNodes}
+                onDisconnectNodes={store.disconnectConceptNodes}
+                onToast={store.showToast}
               />
             </div>
           )}
@@ -326,6 +347,7 @@ export default function App() {
                     }
                   }}
                   onStartDiagnostic={(id) => store.openDiagnosticForNode(id)}
+                  onToast={(message) => store.showToast(message)}
                 />
               </Suspense>
             )}
@@ -378,11 +400,14 @@ export default function App() {
             diagnosticDraft={store.diagnosticDraft}
             diagnosticScore={store.diagnosticScore}
             isLoadingDiagnostic={store.isLoadingDiagnostic}
+            diagnosticProgress={store.diagnosticProgress}
             isSubmittingDiagnostic={store.isSubmittingDiagnostic}
             isConfiguringDiagnostic={store.isConfiguringDiagnostic}
             diagnosticError={store.diagnosticError}
             onClose={() => store.setActiveModal("none")}
-            onGenerateCurriculum={(topic) => store.generateNewCurriculum(topic)}
+            onGenerateCurriculum={(topic, sourceDocument) =>
+              store.generateNewCurriculum(topic, sourceDocument)
+            }
             onCancelCurriculum={() => store.cancelCurriculumGeneration()}
             onGradeCard={(card, grade) => store.gradeDueCard(card, grade)}
             onStartDiagnostic={(nodeId) =>
@@ -418,7 +443,12 @@ export default function App() {
           )}
 
           {(hasOpenedGuide || isGuideOpen) && (
-            <AppGuide isOpen={isGuideOpen} onClose={closeGuide} />
+            <AppGuide
+              isOpen={isGuideOpen}
+              onClose={closeGuide}
+              showOnStartup={store.preferences.showAppTutorial}
+              onShowOnStartupChange={setGuideOnStartup}
+            />
           )}
         </>
       ) : null}

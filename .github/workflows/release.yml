@@ -1,0 +1,104 @@
+name: Windows releases
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }} installers
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            vcvars: amd64
+          - arch: aarch64
+            target: aarch64-pc-windows-msvc
+            vcvars: amd64_arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Verify updater signing secret
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw "Configure TAURI_SIGNING_PRIVATE_KEY with the private key matching tauri.conf.json's updater public key."
+          }
+
+      - name: Build signed MSI and NSIS installers
+        shell: cmd
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do set "VS_PATH=%%i"
+          if not defined VS_PATH exit /b 1
+          call "%VS_PATH%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b 1
+          call npm run tauri -- build --target ${{ matrix.target }} --bundles msi,nsis
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/msi/*
+            src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish release and updater manifest
+    runs-on: windows-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64
+          path: updater-assets/x86_64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-aarch64
+          path: updater-assets/aarch64
+
+      - name: Create updater manifest
+        run: node scripts/create-updater-manifest.mjs latest.json updater-assets
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            updater-assets/**/*
+            latest.json

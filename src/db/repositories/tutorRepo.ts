@@ -237,6 +237,21 @@ export async function deleteTutorThread(threadId: string): Promise<void> {
   );
 }
 
+export async function countTutorThreadMessages(
+  threadId: string
+): Promise<number> {
+  const db = await getDb();
+  const rows = await db.select<Array<{ count: number }>>(
+    "SELECT COUNT(*) AS count FROM tutor_messages WHERE thread_id = $1",
+    [threadId]
+  );
+  const count = rows[0]?.count;
+  if (count === undefined) {
+    throw new Error("Failed to retrieve the tutor message count.");
+  }
+  return count;
+}
+
 export async function insertTutorMessage(
   message: TutorMessage
 ): Promise<void> {

@@ -19,6 +19,37 @@ export interface ValidatedDagResult {
   inDegreeByNode: Map<string, number>;
 }
 
+export function canReach(
+  edges: Pick<GraphEdge, "source_id" | "target_id">[],
+  startNodeId: string,
+  targetNodeId: string
+): boolean {
+  if (startNodeId === targetNodeId) return true;
+
+  const children = new Map<string, string[]>();
+  for (const edge of edges) {
+    let outgoing = children.get(edge.source_id);
+    if (!outgoing) {
+      outgoing = [];
+      children.set(edge.source_id, outgoing);
+    }
+    outgoing.push(edge.target_id);
+  }
+
+  const visited = new Set<string>([startNodeId]);
+  const stack = [startNodeId];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const child of children.get(current) ?? []) {
+      if (child === targetNodeId) return true;
+      if (visited.has(child)) continue;
+      visited.add(child);
+      stack.push(child);
+    }
+  }
+  return false;
+}
+
 /**
  * Validates and sanitizes a raw curriculum graph into a strict Directed Acyclic Graph (DAG).
  * 1. Filters dangling edges and self-loops.

@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { loadQuizPreferences, saveQuizPreferences } from "../ai/quizService";
+import type { QuizBatchProgress } from "../ai/quizService";
 import type { AppTheme } from "../ai/keyStore";
 import type {
   QuizAnswer,
@@ -66,6 +67,7 @@ interface QuizArenaProps {
   savedDraft: QuizDraft;
   savedScore: number | null;
   isLoading: boolean;
+  generationProgress: QuizBatchProgress | null;
   isSubmitting: boolean;
   isConfiguring: boolean;
   error: string | null;
@@ -99,6 +101,7 @@ export function QuizArena({
   savedDraft,
   savedScore,
   isLoading,
+  generationProgress,
   isSubmitting,
   isConfiguring,
   error,
@@ -172,6 +175,7 @@ export function QuizArena({
         ...savedDraft,
         answers: { ...answersRef.current },
         currentQuestionIndex: currentIndex,
+        difficultyMode: config.difficultyMode ?? "medium",
         languageByQuestion: questionLanguages,
       }).catch((error: unknown) => {
         onToast(error instanceof Error ? error.message : String(error));
@@ -180,6 +184,7 @@ export function QuizArena({
     return () => window.clearTimeout(timer);
   }, [
     answerVersion,
+    config.difficultyMode,
     currentIndex,
     isConfiguring,
     nodeId,
@@ -195,6 +200,7 @@ export function QuizArena({
     answers: { ...answersRef.current },
     currentQuestionIndex: currentIndex,
     languageByQuestion: questionLanguages,
+    difficultyMode: config.difficultyMode ?? "medium",
     results: gradingResults,
     score: score ?? undefined,
   });
@@ -398,8 +404,29 @@ export function QuizArena({
           <span className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
           <p className="text-sm font-semibold">Preparing your assessment…</p>
           <p className="text-xs text-[var(--color-muted)]">
-            This may take a moment while the lesson-grounded questions are generated.
+            {generationProgress && generationProgress.total > 1
+              ? `Generating question batch ${Math.min(
+                  generationProgress.completed + 1,
+                  generationProgress.total
+                )} of ${generationProgress.total}…`
+              : "This may take a moment while the lesson-grounded questions are generated."}
           </p>
+          {generationProgress && generationProgress.total > 1 && (
+            <div
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={generationProgress.total}
+              aria-valuenow={generationProgress.completed}
+              className="h-1 w-48 overflow-hidden rounded-full bg-[var(--color-border)]"
+            >
+              <div
+                className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-300"
+                style={{
+                  width: `${(generationProgress.completed / generationProgress.total) * 100}%`,
+                }}
+              />
+            </div>
+          )}
         </div>
       ) : isConfiguring ? (
         <div className="flex flex-1 items-start justify-center overflow-y-auto p-5 md:items-center md:p-8">
@@ -485,7 +512,7 @@ export function QuizArena({
               <label className="block text-xs font-semibold">
                 Question count
                 <div className="mt-2 flex gap-2">
-                  {([3, 5, 8] as const).map((count) => (
+                  {([3, 5, 8, 10, 12] as const).map((count) => (
                     <button
                       key={count}
                       type="button"
@@ -523,6 +550,27 @@ export function QuizArena({
                   </select>
                 </label>
               )}
+              <label className="block text-xs font-semibold">
+                Difficulty
+                <select
+                  value={config.difficultyMode ?? "medium"}
+                  onChange={(event) =>
+                    setConfig({
+                      ...config,
+                      difficultyMode: event.target.value as NonNullable<
+                        QuizGenerationConfig["difficultyMode"]
+                      >,
+                    })
+                  }
+                  className="mt-2 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2.5 text-xs"
+                >
+                  <option value="easy">Easy</option>
+                  <option value="medium">Medium</option>
+                  <option value="hard">Hard</option>
+                  <option value="progressive">Hybrid: Progressive (Easy → Hard)</option>
+                  <option value="balanced">Hybrid: Balanced Mix</option>
+                </select>
+              </label>
             </div>
 
             <div className="mt-8 flex items-center justify-between gap-3 border-t border-[var(--color-border)] pt-5">
@@ -569,6 +617,9 @@ export function QuizArena({
                       <FileText className="h-4 w-4" />
                     )}
                     {activeQuestion.type.replace("_", " ")}
+                    <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-2 py-0.5 text-[9px] text-[var(--color-muted)]">
+                      {(activeQuestion.difficulty ?? "medium").toUpperCase()}
+                    </span>
                   </div>
                   <RichContent className="prose prose-sm max-w-none text-[var(--color-ink)]">
                     {activeQuestion.prompt}
@@ -745,6 +796,13 @@ export function QuizArena({
                   {score >= passThreshold / 100
                     ? "Mastery achieved"
                     : `Pass threshold ${passThreshold}%`}
+                  {" · "}
+                  {(["easy", "medium", "hard"] as const)
+                    .map(
+                      (difficulty) =>
+                        `${difficulty}: ${questions.filter((question) => question.difficulty === difficulty).length}`
+                    )
+                    .join(" / ")}
                 </span>
               ) : (
                 <>Answered {answeredCount} of {questions.length}</>

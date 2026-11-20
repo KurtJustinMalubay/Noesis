@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  CanvasLayoutMode,
   GraphEdge,
   GraphNode,
   QuizAnswer,
@@ -13,9 +14,18 @@ import type {
 import {
   deleteWorkspace,
   listWorkspaces,
+  updateWorkspaceLayoutMode,
 } from "../db/repositories/workspaceRepo";
 import {
+  deleteConceptNode,
+  deleteGraphEdge,
   getWorkspaceGraph,
+  hydrateNodeBatch,
+  insertConceptNode,
+  insertGraphEdge,
+  updateConceptNode,
+  updateGraphNodeState,
+  updateNodePosition,
   updateNodesStatusBatch,
 } from "../db/repositories/graphRepo";
 import {
@@ -37,6 +47,7 @@ import {
 import {
   generateNodeQuiz,
   gradeSubjectiveBatch,
+  type QuizBatchProgress,
   type SubjectiveQuizItem,
 } from "../ai/quizService";
 import {
@@ -47,7 +58,12 @@ import {
   saveNodeQuizDraft,
   saveNodeQuizScore,
 } from "../db/repositories/quizRepo";
-import { computeMasteryCascade } from "../engine/masteryCascade";
+import {
+  computeMasteryCascade,
+  recomputeGraphState,
+} from "../engine/masteryCascade";
+import { canReach } from "../engine/dagTopology";
+import { computeSugiyamaLayout } from "../engine/sugiyamaLayout";
 import { scheduleNextReview, type ReviewGrade } from "../engine/sm2Scheduler";
 import {
   hasConfiguredApiKey,
@@ -57,7 +73,10 @@ import {
   saveUserPreferences,
   type UserPreferences,
 } from "../ai/keyStore";
-import type { CurriculumProgress } from "../ai/curriculumService";
+import type {
+  CurriculumProgress,
+  CurriculumSourceDocument,
+} from "../ai/curriculumService";
 
 export type ActiveModal =
   | "none"
@@ -92,6 +111,7 @@ interface NoesisState {
   diagnosticDraft: QuizDraft;
   diagnosticScore: number | null;
   isLoadingDiagnostic: boolean;
+  diagnosticProgress: QuizBatchProgress | null;
   isSubmittingDiagnostic: boolean;
   isConfiguringDiagnostic: boolean;
   diagnosticError: string | null;
@@ -103,9 +123,29 @@ interface NoesisState {
   // Actions
   initAppData: () => Promise<void>;
   selectWorkspace: (workspaceId: string) => Promise<void>;
-  generateNewCurriculum: (topicPrompt: string) => Promise<void>;
+  generateNewCurriculum: (
+    topicPrompt: string,
+    sourceDocument?: CurriculumSourceDocument
+  ) => Promise<void>;
   cancelCurriculumGeneration: () => void;
   removeWorkspace: (workspaceId: string) => Promise<void>;
+  setCanvasLayoutMode: (mode: CanvasLayoutMode) => Promise<void>;
+  moveGraphNode: (nodeId: string, x: number, y: number) => Promise<void>;
+  realignGraphGrid: () => Promise<void>;
+  addConceptNode: (input: {
+    title: string;
+    summary: string;
+    x: number;
+    y: number;
+  }) => Promise<string>;
+  editConceptNode: (
+    nodeId: string,
+    title: string,
+    summary: string
+  ) => Promise<void>;
+  removeConceptNode: (nodeId: string) => Promise<void>;
+  connectConceptNodes: (sourceId: string, targetId: string) => Promise<void>;
+  disconnectConceptNodes: (sourceId: string, targetId: string) => Promise<void>;
   selectNode: (nodeId: string | null) => Promise<void>;
   markNodeMastered: (nodeId: string, score?: number) => Promise<void>;
   openDiagnosticForNode: (nodeId: string) => Promise<void>;
@@ -155,6 +195,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   diagnosticDraft: { answers: {}, currentQuestionIndex: 0 },
   diagnosticScore: null,
   isLoadingDiagnostic: false,
+  diagnosticProgress: null,
   isSubmittingDiagnostic: false,
   isConfiguringDiagnostic: false,
   diagnosticError: null,
@@ -208,7 +249,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     });
   },
 
-  generateNewCurriculum: async (topicPrompt: string) => {
+  generateNewCurriculum: async (topicPrompt, sourceDocument) => {
     if (get().isGeneratingCurriculum) return;
     const controller = new AbortController();
     set({
@@ -220,7 +261,8 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       const { workspace, nodes, edges } = await generateWorkspaceCurriculum(
         topicPrompt,
         (curriculumProgress) => set({ curriculumProgress }),
-        controller.signal
+        controller.signal,
+        sourceDocument
       );
       const workspaces = [workspace, ...get().workspaces];
       set({
@@ -276,6 +318,201 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     }
   },
 
+  setCanvasLayoutMode: async (mode) => {
+    const workspaceId = get().activeWorkspaceId;
+    const workspace = get().workspaces.find((item) => item.id === workspaceId);
+    if (!workspaceId || !workspace || workspace.layout_mode === mode) return;
+
+    const { nodes, edges } = get();
+    const graphState = recomputeGraphState(nodes, edges).updatedNodes;
+    const positionedNodes = computeSugiyamaLayout(graphState, edges);
+    await updateGraphNodeState(positionedNodes);
+    await updateWorkspaceLayoutMode(workspaceId, mode);
+    set({
+      nodes: positionedNodes,
+      nodeIndex: new Map(positionedNodes.map((node, index) => [node.id, index])),
+      workspaces: get().workspaces.map((item) =>
+        item.id === workspaceId ? { ...item, layout_mode: mode } : item
+      ),
+    });
+  },
+
+  moveGraphNode: async (nodeId, x, y) => {
+    const workspaceId = get().activeWorkspaceId;
+    const node = get().nodes.find((item) => item.id === nodeId);
+    if (!workspaceId || !node || node.workspace_id !== workspaceId) return;
+    await updateNodePosition(workspaceId, nodeId, x, y);
+    const nodes = get().nodes.map((item) =>
+      item.id === nodeId ? { ...item, pos_x: x, pos_y: y } : item
+    );
+    set({ nodes });
+  },
+
+  realignGraphGrid: async () => {
+    const nodes = get().nodes.map((node) => ({
+      ...node,
+      pos_x: Math.round(node.pos_x / 16) * 16,
+      pos_y: Math.round(node.pos_y / 16) * 16,
+    }));
+    await updateGraphNodeState(nodes);
+    set({ nodes });
+  },
+
+  addConceptNode: async ({ title, summary, x, y }) => {
+    const workspaceId = get().activeWorkspaceId;
+    const workspace = get().workspaces.find((item) => item.id === workspaceId);
+    if (!workspaceId || !workspace) {
+      throw new Error("Select a workspace before adding a concept.");
+    }
+    const cleanTitle = title.trim();
+    if (!cleanTitle) throw new Error("Concept title is required.");
+
+    const node: GraphNode = {
+      id: crypto.randomUUID(),
+      workspace_id: workspaceId,
+      title: cleanTitle,
+      summary_hint: summary.trim(),
+      status: "unlocked",
+      mastery_score: 0,
+      in_degree_unmastered: 0,
+      layer_index: 0,
+      pos_x: x,
+      pos_y: y,
+      is_hydrated: 0,
+      lesson_markdown: null,
+      mermaid_diagram: null,
+      source_citations: null,
+      updated_at: Date.now(),
+    };
+    const edges = get().edges;
+    const graphState = recomputeGraphState([...get().nodes, node], edges);
+    const nextNodes =
+      workspace.layout_mode === "auto"
+        ? computeSugiyamaLayout(graphState.updatedNodes, edges)
+        : graphState.updatedNodes;
+    await insertConceptNode(nextNodes.find((item) => item.id === node.id)!);
+    await updateGraphNodeState(nextNodes);
+    set({
+      nodes: nextNodes,
+      nodeIndex: new Map(nextNodes.map((item, index) => [item.id, index])),
+    });
+    return node.id;
+  },
+
+  editConceptNode: async (nodeId, title, summary) => {
+    const cleanTitle = title.trim();
+    if (!cleanTitle) throw new Error("Concept title is required.");
+    await updateConceptNode(nodeId, cleanTitle, summary.trim());
+    set({
+      nodes: get().nodes.map((node) =>
+        node.id === nodeId
+          ? { ...node, title: cleanTitle, summary_hint: summary.trim() }
+          : node
+      ),
+    });
+  },
+
+  removeConceptNode: async (nodeId) => {
+    const workspaceId = get().activeWorkspaceId;
+    const node = get().nodes.find((item) => item.id === nodeId);
+    if (!workspaceId || !node || node.workspace_id !== workspaceId) return;
+    const nextNodes = get().nodes.filter((item) => item.id !== nodeId);
+    const nextEdges = get().edges.filter(
+      (edge) => edge.source_id !== nodeId && edge.target_id !== nodeId
+    );
+    const graphState = recomputeGraphState(nextNodes, nextEdges);
+    const positionedNodes =
+      get().workspaces.find((item) => item.id === workspaceId)?.layout_mode ===
+      "auto"
+        ? computeSugiyamaLayout(graphState.updatedNodes, nextEdges)
+        : graphState.updatedNodes;
+    await deleteConceptNode(nodeId);
+    await updateGraphNodeState(positionedNodes);
+    const quizNodeIds = new Set(get().quizNodeIds);
+    quizNodeIds.delete(nodeId);
+    const checkedQuizNodeIds = new Set(get().checkedQuizNodeIds);
+    checkedQuizNodeIds.delete(nodeId);
+    set({
+      nodes: positionedNodes,
+      nodeIndex: new Map(
+        positionedNodes.map((item, index) => [item.id, index])
+      ),
+      edges: nextEdges,
+      selectedNodeId:
+        get().selectedNodeId === nodeId ? null : get().selectedNodeId,
+      quizNodeIds,
+      checkedQuizNodeIds,
+    });
+  },
+
+  connectConceptNodes: async (sourceId, targetId) => {
+    const workspaceId = get().activeWorkspaceId;
+    if (!workspaceId) throw new Error("Select a workspace first.");
+    const { nodes, edges } = get();
+    if (sourceId === targetId) {
+      throw new Error("Cannot connect a concept to itself.");
+    }
+    if (
+      !nodes.some((node) => node.id === sourceId) ||
+      !nodes.some((node) => node.id === targetId)
+    ) {
+      throw new Error("Both concepts must be in the active workspace.");
+    }
+    if (
+      edges.some(
+        (edge) => edge.source_id === sourceId && edge.target_id === targetId
+      )
+    ) {
+      throw new Error("These concepts are already connected.");
+    }
+    if (canReach(edges, targetId, sourceId)) {
+      throw new Error("Cannot connect: circular prerequisite detected.");
+    }
+
+    const edge: GraphEdge = {
+      workspace_id: workspaceId,
+      source_id: sourceId,
+      target_id: targetId,
+    };
+    const nextEdges = [...edges, edge];
+    const graphState = recomputeGraphState(nodes, nextEdges);
+    const nextNodes =
+      get().workspaces.find((item) => item.id === workspaceId)?.layout_mode ===
+      "auto"
+        ? computeSugiyamaLayout(graphState.updatedNodes, nextEdges)
+        : graphState.updatedNodes;
+    await insertGraphEdge(edge);
+    await updateGraphNodeState(nextNodes);
+    set({
+      edges: nextEdges,
+      nodes: nextNodes,
+      nodeIndex: new Map(nextNodes.map((node, index) => [node.id, index])),
+    });
+  },
+
+  disconnectConceptNodes: async (sourceId, targetId) => {
+    const workspaceId = get().activeWorkspaceId;
+    if (!workspaceId) return;
+    const nextEdges = get().edges.filter(
+      (edge) =>
+        !(edge.source_id === sourceId && edge.target_id === targetId)
+    );
+    if (nextEdges.length === get().edges.length) return;
+    const graphState = recomputeGraphState(get().nodes, nextEdges);
+    const nextNodes =
+      get().workspaces.find((item) => item.id === workspaceId)?.layout_mode ===
+      "auto"
+        ? computeSugiyamaLayout(graphState.updatedNodes, nextEdges)
+        : graphState.updatedNodes;
+    await deleteGraphEdge(workspaceId, sourceId, targetId);
+    await updateGraphNodeState(nextNodes);
+    set({
+      edges: nextEdges,
+      nodes: nextNodes,
+      nodeIndex: new Map(nextNodes.map((node, index) => [node.id, index])),
+    });
+  },
+
   selectNode: async (nodeId: string | null) => {
     if (!nodeId) {
       set({ selectedNodeId: null });
@@ -308,6 +545,13 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         const hydrated = await hydrateNodeContent(
           node,
           ws?.title ?? "Noesis Course"
+        );
+        await hydrateNodeBatch(
+          node.id,
+          hydrated.lessonMarkdown,
+          hydrated.mermaidDiagram,
+          JSON.stringify(hydrated.citations),
+          hydrated.flashcards
         );
         const updatedNodes = get().nodes.map((n) =>
           n.id === node.id
@@ -373,6 +617,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     set({
       activeModal: "diagnostic",
       isLoadingDiagnostic: true,
+      diagnosticProgress: null,
       diagnosticError: null,
       isConfiguringDiagnostic: false,
     });
@@ -420,11 +665,14 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     if (!node || get().isLoadingDiagnostic) return;
     set({
       isLoadingDiagnostic: true,
+      diagnosticProgress: null,
       isConfiguringDiagnostic: false,
       diagnosticError: null,
     });
     try {
-      const questions = await generateNodeQuiz(node, config);
+      const questions = await generateNodeQuiz(node, config, (progress) =>
+        set({ diagnosticProgress: progress })
+      );
       await saveNodeQuiz(nodeId, questions, config);
       const quizNodeIds = new Set(get().quizNodeIds);
       quizNodeIds.add(nodeId);
@@ -446,7 +694,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         isConfiguringDiagnostic: true,
       });
     } finally {
-      set({ isLoadingDiagnostic: false });
+      set({ isLoadingDiagnostic: false, diagnosticProgress: null });
     }
   },
 

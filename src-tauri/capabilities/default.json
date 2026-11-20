@@ -11,6 +11,8 @@
     "sql:default",
     "sql:allow-execute",
     "dialog:default",
+    "updater:default",
+    "process:allow-restart",
     "fs:default",
     "fs:allow-read-file",
     {

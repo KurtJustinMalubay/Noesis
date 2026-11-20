@@ -10,11 +10,53 @@ import {
   CheckCircle2,
   FileText,
   GraduationCap,
+  Copy,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import type { GraphNode } from "../types/domain";
 import type { AppTheme } from "../ai/keyStore";
+import {
+  generateWorkedExample,
+  type WorkedExampleTool,
+} from "../ai/curriculumService";
+import {
+  deleteLessonExample,
+  listLessonExamples,
+  saveLessonExample,
+  updateLessonExample,
+  type LessonExample,
+} from "../db/repositories/lessonExampleRepo";
 import { RichContent } from "./ui/RichContent";
+import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
+
+const EXAMPLE_TOOLS: Array<{ id: WorkedExampleTool; label: string }> = [
+  { id: "mermaid", label: "Mermaid Diagram / Automata Graph" },
+  { id: "math", label: "Step-by-Step Math (KaTeX)" },
+  { id: "code", label: "Code Walkthrough" },
+  { id: "trace-table", label: "State / Trace Table" },
+  { id: "analogy", label: "Real-World Analogy" },
+];
+
+function parseExampleTools(value: string): WorkedExampleTool[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (tool): tool is WorkedExampleTool =>
+        tool === "mermaid" ||
+        tool === "math" ||
+        tool === "code" ||
+        tool === "trace-table" ||
+        tool === "analogy"
+    );
+  } catch {
+    return [];
+  }
+}
 
 interface LessonReaderProps {
   node: GraphNode;
@@ -29,6 +71,7 @@ interface LessonReaderProps {
   onRetryHydration: () => void;
   onRequestCompletion: (nodeId: string) => void;
   onStartDiagnostic: (nodeId: string) => void;
+  onToast: (message: string) => void;
 }
 
 export function LessonReader({
@@ -44,14 +87,30 @@ export function LessonReader({
   onRetryHydration,
   onRequestCompletion,
   onStartDiagnostic,
+  onToast,
 }: LessonReaderProps) {
   const [isRendered, setIsRendered] = useState(isOpen);
   const [isVisible, setIsVisible] = useState(false);
   const mermaidRef = useRef<HTMLDivElement>(null);
   const [mermaidSvg, setMermaidSvg] = useState<string | null>(null);
   const [mermaidError, setMermaidError] = useState(false);
+  const [examples, setExamples] = useState<LessonExample[]>([]);
+  const [exampleToDelete, setExampleToDelete] =
+    useState<LessonExample | null>(null);
+  const [isExampleComposerOpen, setIsExampleComposerOpen] = useState(false);
+  const [examplePrompt, setExamplePrompt] = useState("");
+  const [exampleTools, setExampleTools] = useState<WorkedExampleTool[]>([]);
+  const [isGeneratingExample, setIsGeneratingExample] = useState(false);
+  const [streamedExample, setStreamedExample] = useState("");
+  const exampleAbortRef = useRef<AbortController | null>(null);
+  const onToastRef = useRef(onToast);
+  onToastRef.current = onToast;
   const enterFramesRef = useRef<number[]>([]);
   const exitTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) setExampleToDelete(null);
+  }, [isOpen]);
 
   useEffect(() => {
     enterFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
@@ -90,6 +149,92 @@ export function LessonReader({
   }, [isOpen]);
 
   useEffect(() => {
+    let active = true;
+    setExamples([]);
+    void listLessonExamples(node.id)
+      .then((loaded) => {
+        if (active) setExamples(loaded);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          onToastRef.current(
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      });
+    return () => {
+      active = false;
+      exampleAbortRef.current?.abort();
+    };
+  }, [node.id]);
+
+  const generateExample = async (existing?: LessonExample) => {
+    const tools = existing ? parseExampleTools(existing.tools_json) : exampleTools;
+    const prompt = existing?.user_prompt ?? examplePrompt;
+    const id = existing?.id ?? crypto.randomUUID();
+    const controller = new AbortController();
+    exampleAbortRef.current = controller;
+    setIsGeneratingExample(true);
+    setStreamedExample("");
+    try {
+      const content = await generateWorkedExample(node, prompt, tools, {
+        signal: controller.signal,
+        onChunk: (chunk) => setStreamedExample((current) => current + chunk),
+      });
+      const record: LessonExample = {
+        id,
+        node_id: node.id,
+        user_prompt: prompt,
+        tools_json: JSON.stringify(tools),
+        content_markdown: content,
+        created_at: existing?.created_at ?? new Date().toISOString(),
+      };
+      if (existing) {
+        await updateLessonExample(record);
+        setExamples((current) =>
+          current.map((item) => (item.id === id ? record : item))
+        );
+      } else {
+        await saveLessonExample(record);
+        setExamples((current) => [...current, record]);
+        setExamplePrompt("");
+        setExampleTools([]);
+      }
+      setStreamedExample("");
+      setIsExampleComposerOpen(false);
+      onToast(existing ? "Worked example regenerated." : "Worked example added.");
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        onToast(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (exampleAbortRef.current === controller) {
+        exampleAbortRef.current = null;
+        setIsGeneratingExample(false);
+        setStreamedExample("");
+      }
+    }
+  };
+
+  const removeExample = async () => {
+    if (!exampleToDelete) return;
+    await deleteLessonExample(exampleToDelete.id);
+    setExamples((current) =>
+      current.filter((example) => example.id !== exampleToDelete.id)
+    );
+    onToast("Worked example deleted.");
+  };
+
+  const copyExample = async (content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      onToast("Worked example copied.");
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  useEffect(() => {
     let cancelled = false;
     async function renderDiagram() {
       if (!node.mermaid_diagram) {
@@ -117,7 +262,7 @@ export function LessonReader({
             lineColor: getToken("--color-accent", "#5e8294"),
             secondaryColor: getToken("--color-panel", "#f4f7f4"),
             tertiaryColor: getToken("--color-selected", "#fbf5e9"),
-            fontFamily: "Inter, Segoe UI, sans-serif",
+            fontFamily: getToken("--font-ui", "Inter, Segoe UI, sans-serif"),
             fontSize: "13px",
           },
           securityLevel: "loose",
@@ -256,9 +401,142 @@ export function LessonReader({
               </p>
             )}
 
-            <RichContent className="prose prose-sm max-w-[72ch] select-text">
+            <RichContent className="prose lesson-prose prose-sm max-w-[72ch] select-text">
               {node.lesson_markdown ?? "_No lesson content generated yet._"}
             </RichContent>
+
+            <section className="space-y-3 border-t border-[var(--color-border)] pt-4">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-[var(--color-ink)]">
+                  Worked Examples
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setIsExampleComposerOpen((open) => !open)}
+                  disabled={isGeneratingExample}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2 text-[11px] font-semibold text-[var(--color-accent)] hover:bg-[var(--color-hover)]"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Generate Example
+                </button>
+              </div>
+              {isExampleComposerOpen && (
+                <div className="space-y-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-3">
+                  <label className="block text-[11px] font-semibold">
+                    Scenario / focus
+                    <textarea
+                      value={examplePrompt}
+                      onChange={(event) => setExamplePrompt(event.target.value)}
+                      placeholder="e.g., Trace a DFA accepting strings with an even number of 0s, or leave blank for an automatic example..."
+                      disabled={isGeneratingExample}
+                      className="mt-1.5 min-h-16 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2 text-xs font-normal text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
+                    />
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {EXAMPLE_TOOLS.map((tool) => {
+                      const selected = exampleTools.includes(tool.id);
+                      return (
+                        <button
+                          key={tool.id}
+                          type="button"
+                          aria-pressed={selected}
+                          disabled={isGeneratingExample}
+                          onClick={() =>
+                            setExampleTools((current) =>
+                              selected
+                                ? current.filter((item) => item !== tool.id)
+                                : [...current, tool.id]
+                            )
+                          }
+                          className={`rounded-full border px-2.5 py-1.5 text-[10px] ${
+                            selected
+                              ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                              : "border-[var(--color-border)] text-[var(--color-muted)]"
+                          }`}
+                        >
+                          {tool.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    {isGeneratingExample ? (
+                      <button
+                        type="button"
+                        onClick={() => exampleAbortRef.current?.abort()}
+                        className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-[11px] font-semibold"
+                      >
+                        Cancel
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void generateExample()}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-3 py-2 text-[11px] font-semibold text-[var(--color-panel)]"
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Generate & Append
+                      </button>
+                    )}
+                  </div>
+                  {streamedExample && (
+                    <RichContent className="prose lesson-prose prose-sm max-w-none border-t border-[var(--color-border)] pt-2">
+                      {streamedExample}
+                    </RichContent>
+                  )}
+                </div>
+              )}
+              {examples.map((example) => (
+                <article
+                  key={example.id}
+                  className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-4"
+                >
+                  <div className="mb-3 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-semibold text-[var(--color-ink)]">
+                        {example.user_prompt || "Generated worked example"}
+                      </p>
+                      <p className="mt-1 text-[9px] text-[var(--color-muted)]">
+                        {parseExampleTools(example.tools_json)
+                          .map((id) => EXAMPLE_TOOLS.find((tool) => tool.id === id)?.label)
+                          .filter(Boolean)
+                          .join(" · ") || "Automatic example"}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 gap-1">
+                      <button
+                        type="button"
+                        aria-label="Copy worked example"
+                        onClick={() => void copyExample(example.content_markdown)}
+                        className="rounded-md p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-hover)]"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Regenerate worked example"
+                        disabled={isGeneratingExample}
+                        onClick={() => void generateExample(example)}
+                        className="rounded-md p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-hover)] disabled:opacity-50"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Delete worked example"
+                        onClick={() => setExampleToDelete(example)}
+                        className="rounded-md p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-hover)]"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <RichContent className="prose lesson-prose prose-sm max-w-none">
+                    {example.content_markdown}
+                  </RichContent>
+                </article>
+              ))}
+            </section>
 
             {citations.length > 0 && (
               <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-4">
@@ -315,6 +593,24 @@ export function LessonReader({
           )}
         </button>
       </div>
+      {isOpen && exampleToDelete && (
+        <ConfirmDeleteModal
+          title="Delete worked example?"
+          itemName={exampleToDelete.user_prompt || "Generated worked example"}
+          description="Only this saved worked example will be removed. The concept, lesson, and other worked examples will remain."
+          impactItems={[
+            {
+              label: "Other linked data",
+              value: "None affected",
+            },
+          ]}
+          onCancel={() => setExampleToDelete(null)}
+          onConfirm={removeExample}
+          onError={(error) =>
+            onToast(error instanceof Error ? error.message : String(error))
+          }
+        />
+      )}
     </aside>
   );
 }

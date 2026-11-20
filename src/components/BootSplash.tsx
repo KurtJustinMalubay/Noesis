@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type TransitionEvent } from "react";
+import noesisLogo from "../assets/noesis-plain.png";
 
 const MINIMUM_DISPLAY_MS = 550;
 const EXIT_FALLBACK_MS = 320;
@@ -67,23 +68,11 @@ export function BootSplash({ ready, status }: BootSplashProps) {
       aria-hidden={isExiting}
     >
       <div className="flex flex-col items-center">
-        <svg
-          width="54"
-          height="54"
-          viewBox="0 0 54 54"
-          fill="none"
-          aria-label="Noesis"
-          role="img"
-        >
-          <path
-            d="M8 7h10l18 23V7h10v40H36L18 24v23H8V7Z"
-            fill="var(--text-primary)"
-          />
-          <path
-            d="M18 7h11l17 21v10L18 7Z"
-            fill="var(--accent-primary)"
-          />
-        </svg>
+        <img
+          src={noesisLogo}
+          alt="Noesis"
+          className="h-32 w-32 rounded-2xl object-cover"
+        />
         <div
           className="boot-splash-progress-track mt-7 rounded-full"
           role="progressbar"

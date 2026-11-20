@@ -5,6 +5,7 @@ import {
   CircleHelp,
   Database,
   FolderKanban,
+  LoaderCircle,
   Plus,
   RotateCcw,
   Search,
@@ -12,6 +13,10 @@ import {
   Trash2,
 } from "lucide-react";
 import type { GraphNode, Workspace } from "../types/domain";
+import noesisLogo from "../assets/noesis-plain.png";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
+import type { WorkspaceDeletionSummary } from "../db/repositories/workspaceRepo";
 
 interface WorkspaceSidebarProps {
   collapsed: boolean;
@@ -23,6 +28,7 @@ interface WorkspaceSidebarProps {
   onToggle: () => void;
   onSelect: (id: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onGetDeleteSummary: (id: string) => Promise<WorkspaceDeletionSummary>;
   onNewDag: () => void;
   onVault: () => void;
   onReview: () => void;
@@ -41,6 +47,7 @@ export function WorkspaceSidebar({
   onToggle,
   onSelect,
   onDelete,
+  onGetDeleteSummary,
   onNewDag,
   onVault,
   onReview,
@@ -49,15 +56,23 @@ export function WorkspaceSidebar({
   onToast,
 }: WorkspaceSidebarProps) {
   const [query, setQuery] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<{
+    workspace: Workspace;
+    summary: WorkspaceDeletionSummary;
+  } | null>(null);
+  const [loadingDeleteSummaryId, setLoadingDeleteSummaryId] = useState<
+    string | null
+  >(null);
+  const debouncedQuery = useDebouncedValue(query);
   const filteredWorkspaces = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
+    const normalizedQuery = debouncedQuery.trim().toLowerCase();
     if (!normalizedQuery) return workspaces;
     return workspaces.filter(
       (workspace) =>
         workspace.title.toLowerCase().includes(normalizedQuery) ||
         workspace.root_domain.toLowerCase().includes(normalizedQuery)
     );
-  }, [query, workspaces]);
+  }, [debouncedQuery, workspaces]);
 
   const selectWorkspace = async (id: string) => {
     try {
@@ -67,25 +82,29 @@ export function WorkspaceSidebar({
     }
   };
 
-  const deleteWorkspace = async (workspace: Workspace) => {
-    if (
-      !window.confirm(
-        `Delete "${workspace.title}" and its learning graph? This cannot be undone.`
-      )
-    ) {
-      return;
-    }
+  const requestWorkspaceDelete = async (workspace: Workspace) => {
+    if (loadingDeleteSummaryId) return;
+    setLoadingDeleteSummaryId(workspace.id);
     try {
-      await onDelete(workspace.id);
-      onToast(`Deleted "${workspace.title}".`);
+      const summary = await onGetDeleteSummary(workspace.id);
+      setDeleteTarget({ workspace, summary });
     } catch (error) {
       onToast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingDeleteSummaryId(null);
     }
+  };
+
+  const confirmWorkspaceDelete = async () => {
+    if (!deleteTarget) return;
+    await onDelete(deleteTarget.workspace.id);
+    onToast(`Deleted "${deleteTarget.workspace.title}".`);
   };
 
   const masteredCount = nodes.filter((node) => node.status === "mastered").length;
 
   return (
+    <>
     <aside
       data-collapsed={collapsed}
       className={`relative z-20 flex h-full shrink-0 flex-col overflow-hidden border-r border-[var(--color-border)] bg-[var(--color-sidebar)] ${
@@ -101,9 +120,11 @@ export function WorkspaceSidebar({
           }`}
           aria-hidden={collapsed}
         >
-          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[var(--color-accent-button)] text-sm font-bold text-white">
-            N
-          </span>
+          <img
+            src={noesisLogo}
+            alt=""
+            className="h-8 w-8 rounded-lg object-cover"
+          />
           <span className="text-[11px] font-bold tracking-[0.14em] text-[var(--color-ink)]">
             NOESIS
           </span>
@@ -254,12 +275,17 @@ export function WorkspaceSidebar({
               {!collapsed && (
                 <button
                   type="button"
-                  onClick={() => void deleteWorkspace(workspace)}
-                  className="mr-1 rounded p-1 text-[var(--color-muted)] opacity-0 transition hover:bg-red-100 hover:text-red-700 group-hover:opacity-100 focus-visible:opacity-100"
+                  disabled={loadingDeleteSummaryId !== null}
+                  onClick={() => void requestWorkspaceDelete(workspace)}
+                  className="mr-1 rounded p-1 text-[var(--color-muted)] opacity-0 transition hover:bg-red-100 hover:text-red-700 group-hover:opacity-100 focus-visible:opacity-100 disabled:cursor-wait disabled:opacity-50"
                   title="Delete curriculum"
                   aria-label={`Delete ${workspace.title}`}
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  {loadingDeleteSummaryId === workspace.id ? (
+                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-3.5 w-3.5" />
+                  )}
                 </button>
               )}
             </div>
@@ -300,6 +326,7 @@ export function WorkspaceSidebar({
           collapsed={collapsed}
           icon={Settings}
           label="Settings"
+          guide="settings"
           onClick={onSettings}
         />
       </nav>
@@ -315,6 +342,35 @@ export function WorkspaceSidebar({
           Local-first · SQLite
       </div>
     </aside>
+    {deleteTarget && (
+      <ConfirmDeleteModal
+        title="Delete workspace?"
+        itemName={deleteTarget.workspace.title}
+        description="This removes the learning graph and permanently deletes the associated study data listed below."
+        impactItems={[
+          { label: "Concepts", value: deleteTarget.summary.conceptCount },
+          {
+            label: "Hydrated lessons",
+            value: deleteTarget.summary.hydratedLessonCount,
+          },
+          { label: "Flashcards", value: deleteTarget.summary.flashcardCount },
+          {
+            label: "Worked examples",
+            value: deleteTarget.summary.workedExampleCount,
+          },
+          {
+            label: "Quiz attempts",
+            value: deleteTarget.summary.quizAttemptCount,
+          },
+        ]}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={confirmWorkspaceDelete}
+        onError={(error) =>
+          onToast(error instanceof Error ? error.message : String(error))
+        }
+      />
+    )}
+    </>
   );
 }
 

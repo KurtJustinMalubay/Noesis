@@ -6,6 +6,67 @@ function normalizeLatexCommands(expression: string): string {
   return expression.replace(/\\\\(?=[A-Za-z])/g, "\\");
 }
 
+function hasWrappingBraces(value: string): boolean {
+  if (!value.startsWith("{") || !value.endsWith("}")) return false;
+  let depth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === "{") depth += 1;
+    if (value[index] === "}") depth -= 1;
+    if (depth === 0 && index < value.length - 1) return false;
+  }
+  return depth === 0;
+}
+
+function normalizeOverFractions(expression: string): string {
+  const leading = expression.match(/^\s*/)?.[0] ?? "";
+  const trailing = expression.match(/\s*$/)?.[0] ?? "";
+  const value = expression.trim();
+  if (hasWrappingBraces(value)) {
+    return `${leading}${normalizeOverFractions(value.slice(1, -1))}${trailing}`;
+  }
+
+  let result = "";
+  let groupStart = -1;
+  let depth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === "{") {
+      if (depth === 0) groupStart = index;
+      depth += 1;
+    } else if (value[index] === "}") {
+      depth -= 1;
+      if (depth === 0 && groupStart >= 0) {
+        result += `{${normalizeOverFractions(value.slice(groupStart + 1, index))}}`;
+        groupStart = -1;
+        continue;
+      }
+    }
+    if (depth === 0) result += value[index];
+  }
+
+  depth = 0;
+  for (let index = 0; index < result.length; index += 1) {
+    if (result[index] === "{") depth += 1;
+    else if (result[index] === "}") depth -= 1;
+    else if (
+      depth === 0 &&
+      result.slice(index).match(/^\\over\b/)
+    ) {
+      const numerator = result.slice(0, index).trim();
+      const denominator = result.slice(index + "\\over".length).trim();
+      if (numerator && denominator) {
+        return `${leading}\\frac{${unwrapGroup(numerator)}}{${unwrapGroup(
+          denominator
+        )}}${trailing}`;
+      }
+    }
+  }
+  return `${leading}${result}${trailing}`;
+}
+
+function unwrapGroup(value: string): string {
+  return hasWrappingBraces(value.trim()) ? value.trim().slice(1, -1) : value.trim();
+}
+
 export function stripMathMarkup(value: string): string {
   const symbols: Record<string, string> = {
     Sigma: "Σ",
@@ -64,7 +125,9 @@ export function normalizeMathMarkdown(markdown: string): string {
     .replace(
       /(?<!\\)(\${1,2})([\s\S]*?)(?<!\\)\1/g,
       (_match, delimiter: string, expression: string) =>
-        `${delimiter}${normalizeLatexCommands(expression)}${delimiter}`
+        `${delimiter}${normalizeOverFractions(
+          normalizeLatexCommands(expression)
+        )}${delimiter}`
     );
 
   return normalized.replace(

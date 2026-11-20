@@ -21,6 +21,15 @@ assert(
   normalized.includes(String.raw`\$5`),
   "escaped currency must stay literal"
 );
+const normalizedFractions = normalizeMathMarkdown(
+  String.raw`$$\frac{1}{3} + \frac{1}{4} + {2 \over 5} \div {4 \over 5}$$ and $A \over B$`
+);
+assert(
+  normalizedFractions.includes(String.raw`\frac{2}{5}`) &&
+    normalizedFractions.includes(String.raw`\frac{4}{5}`) &&
+    normalizedFractions.includes(String.raw`\frac{A}{B}`),
+  "infix TeX fractions inside math delimiters should normalize to standard frac commands"
+);
 assert(
   stripMathMarkup(String.raw`Language \(\Sigma^*\) with \$5 and \(\emptyset\)`) ===
     "Language Σ^* with $5 and ∅",
@@ -29,8 +38,10 @@ assert(
 
 const codeMarkdown = [
   "Inline `\\\\Sigma`",
+  "Inline fraction `\\(2 \\\\over 5\\)`",
   "```latex",
   "$\\\\emptyset$",
+  "\\(2 \\\\over 5\\)",
   "```",
 ].join("\n");
 assert(

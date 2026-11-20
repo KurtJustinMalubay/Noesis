@@ -1,26 +1,75 @@
-# Noesis
+# Noesis v1.0.0
 
-Noesis is a local-first learning studio for building prerequisite-based learning
-paths, reading generated lessons, reviewing with spaced repetition, and taking
-AI-generated mastery assessments.
+Noesis is a local-first learning studio for building prerequisite-based
+curricula, studying AI-generated lessons, practicing with adaptive assessments,
+and reviewing with spaced repetition. Workspace data, documents, and their
+full-text search index are stored locally in SQLite with FTS5.
 
-## Development
+## Features
 
-Requirements: Node.js, npm, and the Rust toolchain required by Tauri v2.
+- **Dual-mode prerequisite DAG:** Auto-Layout organizes concepts into
+  prerequisite layers; Free Place lets you arrange nodes and author concepts
+  and dependency edges on an open canvas.
+- **Local Document Vault:** Import PDF, Markdown, and TXT notes, index them
+  locally with SQLite FTS5, and search them with debounced filtering.
+- **AI lessons and worked examples:** Generate structured lessons with KaTeX
+  math and Mermaid diagrams, then append scenario-driven examples using
+  diagrams, math, code, trace tables, or analogies.
+- **Multi-modal assessments:** Practice with multiple-choice, open-ended, and
+  coding questions, with configurable difficulty and mastery progression.
+- **SM-2 Review Queue:** Schedule flashcard reviews to reinforce long-term
+  recall.
+- **Gemini and local AI:** Use Google Gemini or an OpenAI-compatible local
+  server such as Ollama, LM Studio, or Foundry Local.
+- **Themes and reading controls:** Choose Dark or Light palettes, fonts, and
+  lesson depth.
+
+## Technology
+
+React 19, TypeScript, Vite, Tailwind CSS, Tauri 2, Rust, SQLite/FTS5, KaTeX,
+Mermaid, and CodeMirror.
+
+## Prerequisites
+
+- Node.js 22.6 or later and npm.
+- Rust stable and the platform build tools required by Tauri 2. On Windows,
+  this includes the Microsoft C++ Build Tools and WebView2 runtime.
+- An AI provider configured in Noesis Settings. Local OpenAI-compatible
+  servers can be used without an API key; start the server locally and select
+  its base URL and model in Settings.
+
+Windows Smart App Control may warn when launching an unsigned local Tauri
+build. Only run builds you created from source you trust; follow your
+organization's or Windows' security guidance rather than disabling protection
+to bypass a warning.
+
+## Quick start
 
 ```powershell
 npm install
 npm run tauri dev
 ```
 
-Run the frontend checks and production build with:
+In the app, open **Settings → AI & Speed** to configure Gemini or a local
+OpenAI-compatible endpoint. Local model discovery can populate the model
+selector from the configured server.
+
+## GitHub Releases and Auto-Updates
+
+Pushing a `v*.*.*` tag that matches the version in `src-tauri/tauri.conf.json`
+builds Windows x64 and ARM64 MSI/NSIS installers and publishes a signed
+`latest.json` updater manifest. Configure the repository secret
+`TAURI_SIGNING_PRIVATE_KEY` with the private key matching the updater public
+key in the Tauri config; optionally set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+Keep the private key out of the repository. Tauri updater signatures validate
+updates but are not Authenticode publisher signatures, so Windows may still
+show Smart App Control or unknown-publisher warnings.
+
+## Verification
 
 ```powershell
+npx tsc --noEmit
 npm test
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
-
-AI providers and local model context limits are configured in the app's Settings.
-The local context window should match the limit configured in the selected model
-runtime.

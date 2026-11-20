@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatedPresence } from "./AnimatedPresence";
 import {
@@ -13,6 +13,7 @@ import {
   Monitor,
   RefreshCw,
   RotateCcw,
+  Search,
   Sparkles,
   Trash2,
   X,
@@ -25,21 +26,31 @@ import {
   LOCAL_OUTPUT_TOKENS_MIN,
   loadAiSettings,
   saveAiSettings,
+  APP_THEME_OPTIONS,
 } from "../ai/keyStore";
-import { testGeminiConnection } from "../ai/geminiClient";
+import { fetchLocalModels, testGeminiConnection } from "../ai/geminiClient";
 import { ingestLocalFilePath } from "../vault/ingestService";
 import { useNoesisStore, type ActiveModal } from "../store/useNoesisStore";
 import type { DueFlashcard } from "../db/repositories/flashcardRepo";
-import type { StoredDocument } from "../db/repositories/documentRepo";
+import {
+  countDocumentChunks,
+  searchVaultFts,
+  type RetrievedChunk,
+  type StoredDocument,
+} from "../db/repositories/documentRepo";
 import {
   clearGeneratedDiagnostics,
+  countGeneratedDiagnostics,
   compactDatabase,
   getDatabaseStats,
   rebuildVaultIndex,
   type DatabaseStats,
 } from "../db/repositories/maintenanceRepo";
 import type { ReviewGrade } from "../engine/sm2Scheduler";
-import type { CurriculumProgress } from "../ai/curriculumService";
+import type {
+  CurriculumProgress,
+  CurriculumSourceDocument,
+} from "../ai/curriculumService";
 import type {
   QuizAnswer,
   QuizDraft,
@@ -56,38 +67,9 @@ import type {
 import { GEMINI_MODEL_OPTIONS as MODEL_OPTIONS } from "../ai/keyStore";
 import { QuizArena } from "./QuizArena";
 import { RichContent } from "./ui/RichContent";
-
-const THEME_OPTIONS: Array<{
-  id: AppTheme;
-  label: string;
-  swatches: [string, string, string];
-}> = [
-  {
-    id: "daylight",
-    label: "Windows 11 Daylight",
-    swatches: ["#f5f6f3", "#ffffff", "#326a9f"],
-  },
-  {
-    id: "mica-dark",
-    label: "Windows 11 Mica Dark",
-    swatches: ["#202020", "#2c2c2c", "#75a9e0"],
-  },
-  {
-    id: "warm-paper",
-    label: "Warm Paper",
-    swatches: ["#f4efe5", "#fffaf0", "#8a6341"],
-  },
-  {
-    id: "nordic-frost",
-    label: "Nordic Frost",
-    swatches: ["#edf2f5", "#fbfdff", "#507d9d"],
-  },
-  {
-    id: "sage-studio",
-    label: "Sage Studio",
-    swatches: ["#eef1e8", "#fbfcf7", "#687b5d"],
-  },
-];
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
+import type { QuizBatchProgress } from "../ai/quizService";
 
 interface ModalsProps {
   activeModal: ActiveModal;
@@ -106,11 +88,15 @@ interface ModalsProps {
   diagnosticDraft: QuizDraft;
   diagnosticScore: number | null;
   isLoadingDiagnostic: boolean;
+  diagnosticProgress: QuizBatchProgress | null;
   isSubmittingDiagnostic: boolean;
   isConfiguringDiagnostic: boolean;
   diagnosticError: string | null;
   onClose: () => void;
-  onGenerateCurriculum: (topic: string) => Promise<void>;
+  onGenerateCurriculum: (
+    topic: string,
+    sourceDocument?: CurriculumSourceDocument
+  ) => Promise<void>;
   onGradeCard: (card: DueFlashcard, grade: ReviewGrade) => Promise<void>;
   onStartDiagnostic: (nodeId: string) => Promise<void>;
   onConfigureDiagnostic: (nodeId: string) => void;
@@ -150,6 +136,7 @@ export function Modals({
   diagnosticDraft,
   diagnosticScore,
   isLoadingDiagnostic,
+  diagnosticProgress,
   isSubmittingDiagnostic,
   isConfiguringDiagnostic,
   diagnosticError,
@@ -184,6 +171,7 @@ export function Modals({
             onCancel={onCancelCurriculum}
             onClose={onClose}
             onGenerate={onGenerateCurriculum}
+            onRefreshDocuments={onRefreshDocuments}
             onToast={onToast}
           />
         )}
@@ -232,6 +220,7 @@ export function Modals({
           savedDraft={diagnosticDraft}
           savedScore={diagnosticScore}
           isLoading={isLoadingDiagnostic}
+          generationProgress={diagnosticProgress}
           isSubmitting={isSubmittingDiagnostic}
           isConfiguring={isConfiguringDiagnostic}
           error={diagnosticError}
@@ -256,16 +245,24 @@ function NewWorkspaceModal({
   onCancel,
   onClose,
   onGenerate,
+  onRefreshDocuments,
   onToast,
 }: {
   isGenerating: boolean;
   progress: CurriculumProgress | null;
   onCancel: () => void;
   onClose: () => void;
-  onGenerate: (topic: string) => Promise<void>;
+  onGenerate: (
+    topic: string,
+    sourceDocument?: CurriculumSourceDocument
+  ) => Promise<void>;
+  onRefreshDocuments: () => Promise<void>;
   onToast: (msg: string) => void;
 }) {
   const [topic, setTopic] = useState("");
+  const [sourceDocument, setSourceDocument] =
+    useState<CurriculumSourceDocument | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
   const handleClose = () => {
     if (isGenerating && progress?.phase === "Saving curriculum…") return;
     if (isGenerating) onCancel();
@@ -274,11 +271,39 @@ function NewWorkspaceModal({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!topic.trim() || isGenerating) return;
+    if ((!topic.trim() && !sourceDocument) || isGenerating || isImporting) return;
     try {
-      await onGenerate(topic.trim());
+      const goal =
+        topic.trim() ||
+        `Create a course DAG based on ${sourceDocument?.name ?? "the uploaded document"}`;
+      await onGenerate(goal, sourceDocument ?? undefined);
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handlePickSource = async () => {
+    setIsImporting(true);
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "Course Documents", extensions: ["pdf", "md", "txt"] }],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      const result = await ingestLocalFilePath(selected, null, true);
+      if (!result.extractedText) {
+        throw new Error(`No readable text was found in "${result.document.file_name}".`);
+      }
+      setSourceDocument({
+        name: result.document.file_name,
+        text: result.extractedText,
+      });
+      await onRefreshDocuments();
+      onToast(`Loaded ${result.document.file_name} for DAG generation.`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -299,7 +324,7 @@ function NewWorkspaceModal({
         </button>
       </div>
       <p className="mt-2 text-xs leading-5 text-slate-600">
-        Enter a learning goal; Noesis builds its prerequisite graph from your vault.
+        Describe a learning goal or import a course document to build its prerequisite graph.
       </p>
       <form onSubmit={handleSubmit} className="mt-4 space-y-4">
         {isGenerating && (
@@ -336,25 +361,51 @@ function NewWorkspaceModal({
           rows={3}
           value={topic}
           onChange={(e) => setTopic(e.target.value)}
-          placeholder="e.g., Automata Theory & Formal Languages, or C# Memory Management & Span<T>"
+          placeholder="Optional focus, e.g. emphasize learning outcomes or exam topics"
           className="w-full select-text rounded-xl border border-[#dedfdc] bg-[#fbfaf8] p-3 text-sm text-slate-800 placeholder-slate-400 focus:border-[#6f9ab6] focus:outline-none focus:ring-2 focus:ring-[#d9e7ef]"
         />
-        <div className="flex justify-end gap-2">
-          <button
-            type="button"
-            disabled={isGenerating && progress?.phase === "Saving curriculum…"}
-            onClick={handleClose}
-            className="rounded-lg px-4 py-2 text-xs font-medium text-slate-600 transition hover:bg-[#f3f2ee] disabled:opacity-40"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={isGenerating || !topic.trim()}
-            className="flex items-center gap-2 rounded-lg bg-[#245f9e] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#194d83] disabled:opacity-50"
-          >
-            {isGenerating ? "Building Graph..." : "Generate DAG"}
-          </button>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              disabled={isGenerating || isImporting}
+              onClick={() => void handlePickSource()}
+              className="flex items-center gap-2 rounded-lg border border-[#d8dfe2] bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-[#f1f3f2] disabled:opacity-50"
+            >
+              <FileUp className="h-4 w-4" />
+              {isImporting ? "Reading document…" : "Import syllabus / document"}
+            </button>
+            <div className="flex shrink-0 justify-end gap-2">
+              <button
+                type="button"
+                disabled={isGenerating && progress?.phase === "Saving curriculum…"}
+                onClick={handleClose}
+                className="rounded-lg px-4 py-2 text-xs font-medium text-slate-600 transition hover:bg-[#f3f2ee] disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isGenerating || isImporting || (!topic.trim() && !sourceDocument)}
+                className="flex items-center gap-2 rounded-lg bg-[#245f9e] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#194d83] disabled:opacity-50"
+              >
+                {isGenerating ? "Building Graph..." : "Generate DAG"}
+              </button>
+            </div>
+          </div>
+          {sourceDocument && (
+            <div className="truncate text-right text-xs text-slate-600">
+              Using {sourceDocument.name}
+              <button
+                type="button"
+                onClick={() => setSourceDocument(null)}
+                className="ml-2 font-semibold text-[#527a91] hover:underline"
+                aria-label={`Remove ${sourceDocument.name}`}
+              >
+                Remove
+              </button>
+            </div>
+          )}
         </div>
       </form>
     </div>
@@ -561,6 +612,45 @@ function DocumentVaultModal({
   onClose: () => void;
 }) {
   const [isIngesting, setIsIngesting] = useState(false);
+  const [documentToDelete, setDocumentToDelete] = useState<{
+    document: StoredDocument;
+    chunkCount: number;
+  } | null>(null);
+  const [preparingDeleteId, setPreparingDeleteId] = useState<string | null>(
+    null
+  );
+  const [query, setQuery] = useState("");
+  const debouncedQuery = useDebouncedValue(query);
+  const [searchResults, setSearchResults] = useState<RetrievedChunk[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const searchRequestId = useRef(0);
+
+  useEffect(() => {
+    const requestId = ++searchRequestId.current;
+    if (!debouncedQuery.trim()) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    void searchVaultFts(debouncedQuery, 8, workspaceId ?? undefined)
+      .then((results) => {
+        if (requestId === searchRequestId.current) setSearchResults(results);
+      })
+      .catch((error: unknown) => {
+        if (requestId === searchRequestId.current) {
+          onToast(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (requestId === searchRequestId.current) setIsSearching(false);
+      });
+
+    return () => {
+      searchRequestId.current += 1;
+    };
+  }, [debouncedQuery, onToast, workspaceId]);
 
   const handlePickFiles = async () => {
     setIsIngesting(true);
@@ -587,18 +677,32 @@ function DocumentVaultModal({
     }
   };
 
-  const handleRemoveDocument = async (docId: string) => {
+  const requestRemoveDocument = async (document: StoredDocument) => {
+    if (preparingDeleteId) return;
+    setPreparingDeleteId(document.id);
     try {
-      const document = documents.find((item) => item.id === docId);
-      await onRemove(docId);
-      await onRefresh();
-      onToast(`Removed ${document?.file_name ?? "document"} from the local vault.`);
+      const chunkCount = await countDocumentChunks(document.id);
+      setDocumentToDelete({ document, chunkCount });
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPreparingDeleteId(null);
     }
   };
 
+  const confirmRemoveDocument = async () => {
+    if (!documentToDelete) return;
+    await onRemove(documentToDelete.document.id);
+    onToast(
+      `Removed ${documentToDelete.document.file_name} from the local vault.`
+    );
+    void onRefresh().catch((error: unknown) =>
+      onToast(error instanceof Error ? error.message : String(error))
+    );
+  };
+
   return (
+    <>
     <div className="w-full max-w-lg rounded-2xl border border-[#e1dfd9] bg-white p-6 shadow-[0_24px_70px_rgba(27,39,47,0.2)]">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-base font-bold text-[#2c414f]">
@@ -616,6 +720,42 @@ function DocumentVaultModal({
         Index PDFs, Markdown, or text notes locally with SHA-256 deduplication and
         SQLite BM25 full-text search.
       </p>
+
+      <label className="mt-3 flex items-center gap-2 rounded-lg border border-[#dedfdc] bg-[#fbfaf8] px-3 py-2 text-slate-500">
+        <Search className="h-3.5 w-3.5" />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search indexed notes"
+          className="min-w-0 flex-1 bg-transparent text-xs text-slate-800 outline-none placeholder:text-slate-400"
+        />
+        {isSearching && (
+          <span className="text-[10px]" role="status">Searching…</span>
+        )}
+      </label>
+
+      {debouncedQuery.trim() && (
+        <div className="mt-2 max-h-36 space-y-1 overflow-y-auto">
+          {searchResults.map((result) => (
+            <article
+              key={result.chunk_id}
+              className="rounded-lg border border-[#e5e5e0] bg-[#fbfaf8] px-3 py-2"
+            >
+              <p className="text-[10px] font-semibold text-slate-700">
+                {result.file_name}{result.heading ? ` · ${result.heading}` : ""}
+              </p>
+              <p className="mt-1 line-clamp-3 text-[10px] leading-4 text-slate-600">
+                {result.content}
+              </p>
+            </article>
+          ))}
+          {!isSearching && searchResults.length === 0 && (
+            <p className="py-2 text-center text-[10px] text-slate-500">
+              No matching notes.
+            </p>
+          )}
+        </div>
+      )}
 
       <button
         disabled={isIngesting}
@@ -647,16 +787,42 @@ function DocumentVaultModal({
                 </p>
               </div>
               <button
-                onClick={() => void handleRemoveDocument(doc.id)}
-                className="rounded p-1 text-slate-400 transition hover:bg-rose-50 hover:text-rose-700"
+                type="button"
+                disabled={preparingDeleteId !== null}
+                onClick={() => void requestRemoveDocument(doc)}
+                aria-label={`Delete ${doc.file_name}`}
+                className="rounded p-1 text-slate-400 transition hover:bg-rose-50 hover:text-rose-700 disabled:cursor-wait disabled:opacity-50"
               >
-                <Trash2 className="h-3.5 w-3.5" />
+                {preparingDeleteId === doc.id ? (
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="h-3.5 w-3.5" />
+                )}
               </button>
             </div>
           ))
         )}
       </div>
     </div>
+    {documentToDelete && (
+      <ConfirmDeleteModal
+        title="Delete document?"
+        itemName={documentToDelete.document.file_name}
+        description="The source document and its indexed text chunks will be permanently removed from the local vault."
+        impactItems={[
+          {
+            label: "Linked search chunks",
+            value: documentToDelete.chunkCount,
+          },
+        ]}
+        onCancel={() => setDocumentToDelete(null)}
+        onConfirm={confirmRemoveDocument}
+        onError={(error) =>
+          onToast(error instanceof Error ? error.message : String(error))
+        }
+      />
+    )}
+    </>
   );
 }
 
@@ -696,6 +862,7 @@ function SettingsModal({
     String(initial.localTemperature)
   );
   const [localTopP, setLocalTopP] = useState(String(initial.localTopP));
+  const [lessonDepth, setLessonDepth] = useState(initial.lessonDepth);
   const [creativityPreset, setCreativityPreset] =
     useState(initial.creativityPreset);
   const [fastModelSelection, setFastModelSelection] = useState(
@@ -722,8 +889,33 @@ function SettingsModal({
   const [section, setSection] = useState<Section>("ai");
   const [isKeyVisible, setIsKeyVisible] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const [availableLocalModels, setAvailableLocalModels] = useState<string[]>([]);
   const [isMaintaining, setIsMaintaining] = useState(false);
+  const [quizCacheDeleteCount, setQuizCacheDeleteCount] = useState<
+    number | null
+  >(null);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
+
+  useEffect(() => {
+    setPreferences((current) =>
+      current.showAppTutorial === store.preferences.showAppTutorial
+        ? current
+        : {
+            ...current,
+            showAppTutorial: store.preferences.showAppTutorial,
+          }
+    );
+  }, [store.preferences.showAppTutorial]);
+
+  const updateShowGuideOnStartup = (show: boolean) => {
+    setPreferences((current) => ({ ...current, showAppTutorial: show }));
+    void store
+      .setPreferences({ ...store.preferences, showAppTutorial: show })
+      .catch((error) =>
+        onToast(error instanceof Error ? error.message : String(error))
+      );
+  };
   const fastModel =
     fastModelSelection === "custom" ? customFastModel : fastModelSelection;
   const synthesisModel =
@@ -749,6 +941,21 @@ function SettingsModal({
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  const updateAppearance = (mode: "dark" | "light", theme: AppTheme) => {
+    const nextPreferences = {
+      ...preferences,
+      appearanceMode: mode,
+      theme,
+      ...(mode === "dark"
+        ? { lastDarkThemeId: theme }
+        : { lastLightThemeId: theme }),
+    };
+    setPreferences(nextPreferences);
+    void store.setPreferences(nextPreferences).catch((error: unknown) =>
+      onToast(error instanceof Error ? error.message : String(error))
+    );
   };
 
   useEffect(() => {
@@ -804,6 +1011,7 @@ function SettingsModal({
         localMaxOutputTokens: outputTokenValue,
         localTemperature: temperatureValue,
         localTopP: topPValue,
+        lessonDepth,
       });
       await store.setPreferences(preferences);
       onToast("Preferences saved locally.");
@@ -835,6 +1043,24 @@ function SettingsModal({
     }
   };
 
+  const handleFetchLocalModels = async () => {
+    setIsFetchingModels(true);
+    try {
+      const models = await fetchLocalModels(localBaseUrl);
+      setAvailableLocalModels(models);
+      if (models.length > 0 && !localModel.trim()) setLocalModel(models[0]);
+      onToast(
+        models.length
+          ? `Found ${models.length} local model${models.length === 1 ? "" : "s"}.`
+          : "The local endpoint returned no models."
+      );
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsFetchingModels(false);
+    }
+  };
+
   const runMaintenance = async (
     action: () => Promise<void>,
     message: string
@@ -851,14 +1077,30 @@ function SettingsModal({
     }
   };
 
+  const requestClearQuizCache = async () => {
+    try {
+      setQuizCacheDeleteCount(await countGeneratedDiagnostics());
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const confirmClearQuizCache = async () => {
+    await clearGeneratedDiagnostics();
+    onQuizCacheCleared();
+    onToast("Generated quiz cache cleared.");
+    void refreshStats();
+  };
+
   return (
+    <>
     <form
       onSubmit={handleSave}
       className="flex h-[min(680px,88vh)] w-full max-w-[920px] overflow-hidden rounded-2xl border border-[#e1dfd9] bg-white shadow-[0_16px_48px_rgba(27,39,47,0.14)]"
     >
       <aside className="flex w-[218px] shrink-0 flex-col border-r border-[#e9e7e1] bg-[#f8f9f6] p-4">
-        <div className="flex items-center gap-2 px-2 py-2 text-sm font-bold text-[#2c414f]">
-          <KeyRound className="h-4 w-4 text-[#527a91]" />
+        <div className="flex items-center gap-2 px-2 py-2 text-sm font-bold text-[var(--color-ink)]">
+          <KeyRound className="h-4 w-4 text-[var(--color-ink)]" />
           Settings
         </div>
         <nav className="mt-4 space-y-1">
@@ -869,7 +1111,7 @@ function SettingsModal({
               onClick={() => setSection(id)}
               className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium transition ${
                 section === id
-                  ? "bg-white text-[#245f78] shadow-sm ring-1 ring-[#e7e9e4]"
+                  ? "bg-white text-[var(--color-ink)] shadow-sm ring-1 ring-[#e7e9e4]"
                   : "text-slate-600 hover:bg-white/70 hover:text-slate-800"
               }`}
             >
@@ -888,7 +1130,7 @@ function SettingsModal({
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-[#ebe8e2] px-6 py-4">
           <div>
-            <h2 className="text-sm font-bold text-[#2c414f]">
+            <h2 className="text-sm font-bold text-[var(--color-ink)]">
               {sections.find((item) => item.id === section)?.title}
             </h2>
           </div>
@@ -945,7 +1187,7 @@ function SettingsModal({
                         type="button"
                         disabled={isTestingConnection || !apiKey.trim()}
                         onClick={() => void handleConnectionTest()}
-                        className="rounded-lg border border-[#d7e3e5] bg-[#f4f8f7] px-3 text-xs font-semibold text-[#315d62] hover:bg-[#eaf2f0] disabled:opacity-50"
+                        className="rounded-lg border border-[#d7e3e5] bg-[#f4f8f7] px-3 text-xs font-semibold text-[var(--color-ink)] hover:bg-[#eaf2f0] disabled:opacity-50"
                       >
                         {isTestingConnection ? "Testing…" : "Test"}
                       </button>
@@ -1008,6 +1250,9 @@ function SettingsModal({
                       placeholder="http://localhost:11434/v1"
                       className={settingsSelectClass}
                     />
+                    <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                      Foundry Local: run <code>foundry service status</code>. Enter the service URL, /v1 URL, or chat-completions URL; Noesis normalizes model and chat routes.
+                    </p>
                   </SettingsField>
                   <SettingsField label="Local model">
                     <div className="flex gap-2">
@@ -1019,17 +1264,37 @@ function SettingsModal({
                       />
                       <button
                         type="button"
+                        disabled={isFetchingModels || !localBaseUrl.trim()}
+                        onClick={() => void handleFetchLocalModels()}
+                        className="mt-1 shrink-0 rounded-lg border border-[#d7e3e5] bg-[#f4f8f7] px-3 text-xs font-semibold text-[var(--color-ink)] hover:bg-[#eaf2f0] disabled:opacity-50"
+                      >
+                        {isFetchingModels ? "Fetching…" : "Detect"}
+                      </button>
+                      <button
+                        type="button"
                         disabled={
                           isTestingConnection ||
                           !localModel.trim() ||
                           !localBaseUrl.trim()
                         }
                         onClick={() => void handleConnectionTest()}
-                        className="mt-1 rounded-lg border border-[#d7e3e5] bg-[#f4f8f7] px-3 text-xs font-semibold text-[#315d62] hover:bg-[#eaf2f0] disabled:opacity-50"
+                        className="mt-1 rounded-lg border border-[#d7e3e5] bg-[#f4f8f7] px-3 text-xs font-semibold text-[var(--color-ink)] hover:bg-[#eaf2f0] disabled:opacity-50"
                       >
                         {isTestingConnection ? "Testing…" : "Test"}
                       </button>
                     </div>
+                    {availableLocalModels.length > 0 && (
+                      <select
+                        value={availableLocalModels.includes(localModel) ? localModel : ""}
+                        onChange={(event) => setLocalModel(event.target.value)}
+                        className={`${settingsDropdownClass} mt-2`}
+                      >
+                        <option value="">Choose a detected model…</option>
+                        {availableLocalModels.map((model) => (
+                          <option key={model} value={model}>{model}</option>
+                        ))}
+                      </select>
+                    )}
                   </SettingsField>
                   <section className="rounded-xl border border-[#e4e6e1] bg-[#fafaf7] p-4">
                     <h3 className="text-xs font-semibold text-slate-800">
@@ -1099,6 +1364,23 @@ function SettingsModal({
                   </section>
                 </>
               )}
+              <SettingsField label="Lesson length / depth">
+                <select
+                  value={lessonDepth}
+                  onChange={(event) =>
+                    setLessonDepth(
+                      event.target.value as typeof lessonDepth
+                    )
+                  }
+                  className={settingsDropdownClass}
+                >
+                  <option value="concise">Concise · 450–650 words</option>
+                  <option value="standard">Standard · 1,000–1,500 words</option>
+                  <option value="comprehensive">
+                    Comprehensive · 2,000–3,200+ words
+                  </option>
+                </select>
+              </SettingsField>
               <SettingsField label="Creativity preset">
                 <select
                   value={creativityPreset}
@@ -1119,29 +1401,36 @@ function SettingsModal({
 
           {section === "canvas" && (
             <>
+              <SettingsField label="Appearance mode">
+                <SegmentedSetting
+                  value={preferences.appearanceMode}
+                  options={[
+                    ["dark", "Dark"],
+                    ["light", "Light"],
+                  ]}
+                  onChange={(value) => {
+                    const mode = value as "dark" | "light";
+                    updateAppearance(
+                      mode,
+                      mode === "dark"
+                        ? preferences.lastDarkThemeId
+                        : preferences.lastLightThemeId
+                    );
+                  }}
+                />
+              </SettingsField>
               <SettingsField label="Theme">
                 <div className="grid grid-cols-2 gap-2">
-                  {THEME_OPTIONS.map((theme) => (
+                  {APP_THEME_OPTIONS.filter(
+                    (theme) => theme.mode === preferences.appearanceMode
+                  ).map((theme) => (
                     <button
                       key={theme.id}
                       type="button"
                       aria-pressed={preferences.theme === theme.id}
-                      onClick={() => {
-                        const nextPreferences = {
-                          ...preferences,
-                          theme: theme.id,
-                        };
-                        setPreferences(nextPreferences);
-                        void store
-                          .setPreferences(nextPreferences)
-                          .catch((error) =>
-                            onToast(
-                              error instanceof Error
-                                ? error.message
-                                : String(error)
-                            )
-                          );
-                      }}
+                      onClick={() =>
+                        updateAppearance(preferences.appearanceMode, theme.id)
+                      }
                       className={`rounded-xl border p-2 text-left transition ${
                         preferences.theme === theme.id
                           ? "border-[#6f9ab6] ring-2 ring-[#d9e7ef]"
@@ -1163,6 +1452,40 @@ function SettingsModal({
                     </button>
                   ))}
                 </div>
+              </SettingsField>
+              <SettingsField label="Font family">
+                <select
+                  value={preferences.fontFamily}
+                  onChange={(event) =>
+                    setPreferences({
+                      ...preferences,
+                      fontFamily: event.target.value as UserPreferences["fontFamily"],
+                    })
+                  }
+                  className={settingsDropdownClass}
+                >
+                  <option value="system">System Default</option>
+                  <option value="geometric">Modern Geometric</option>
+                  <option value="editorial">Editorial Serif (Reading Comfort)</option>
+                  <option value="hyperlegible">Atkinson Hyperlegible</option>
+                  <option value="monospace">Developer Monospace</option>
+                </select>
+              </SettingsField>
+              <SettingsField label="Reading scale">
+                <SegmentedSetting
+                  value={preferences.readingScale}
+                  options={[
+                    ["compact", "Compact 95%"],
+                    ["default", "Default 100%"],
+                    ["comfortable", "Comfortable 110%"],
+                  ]}
+                  onChange={(value) =>
+                    setPreferences({
+                      ...preferences,
+                      readingScale: value as UserPreferences["readingScale"],
+                    })
+                  }
+                />
               </SettingsField>
               <SettingsField label="Canvas background">
                 <label className="flex items-center justify-between rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] px-3 py-3 text-xs text-slate-700">
@@ -1276,17 +1599,14 @@ function SettingsModal({
                       )} / ${preferences.dailyReviewLimit}`}
                 </p>
               </SettingsField>
-              <SettingsField label="App tutorial">
+              <SettingsField label="Show guide on startup">
                 <label className="flex items-center justify-between rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] px-3 py-3 text-xs text-slate-700">
-                  <span>Show App Tutorial</span>
+                  <span>Show guide on startup</span>
                   <input
                     type="checkbox"
                     checked={preferences.showAppTutorial}
                     onChange={(event) =>
-                      setPreferences({
-                        ...preferences,
-                        showAppTutorial: event.target.checked,
-                      })
+                      updateShowGuideOnStartup(event.target.checked)
                     }
                     className="h-4 w-4 accent-[#326a9f]"
                   />
@@ -1344,18 +1664,8 @@ function SettingsModal({
                   <button
                     type="button"
                     disabled={isMaintaining}
-                    onClick={() => {
-                      if (window.confirm("Clear cached diagnostic quizzes? They will be regenerated when needed.")) {
-                        void runMaintenance(
-                          async () => {
-                            await clearGeneratedDiagnostics();
-                            onQuizCacheCleared();
-                          },
-                          "Generated quiz cache cleared."
-                        );
-                      }
-                    }}
-                    className="col-span-2 rounded-lg border border-[#eadfda] bg-white px-2 py-2 text-[10px] font-semibold text-[#805141] hover:bg-[#fcf7f5] disabled:opacity-50"
+                    onClick={() => void requestClearQuizCache()}
+                    className="col-span-2 rounded-lg border border-[#eadfda] bg-white px-2 py-2 text-[10px] font-semibold text-[var(--color-ink)] hover:bg-[#fcf7f5] disabled:opacity-50"
                   >
                     Clear generated quiz cache
                   </button>
@@ -1382,6 +1692,22 @@ function SettingsModal({
         </footer>
       </div>
     </form>
+    {quizCacheDeleteCount !== null && (
+      <ConfirmDeleteModal
+        title="Clear generated quiz cache?"
+        itemName="Generated diagnostic quizzes"
+        description="Saved quiz records will be permanently removed. You can generate quizzes again when you need them."
+        impactItems={[
+          { label: "Cached quizzes", value: quizCacheDeleteCount },
+        ]}
+        onCancel={() => setQuizCacheDeleteCount(null)}
+        onConfirm={confirmClearQuizCache}
+        onError={(error) =>
+          onToast(error instanceof Error ? error.message : String(error))
+        }
+      />
+    )}
+    </>
   );
 }
 
@@ -1422,7 +1748,7 @@ function SegmentedSetting({
           onClick={() => onChange(option)}
           className={`flex-1 rounded-md px-3 py-2 text-xs font-medium transition ${
             value === option
-              ? "bg-white text-[#285c78] shadow-sm"
+              ? "bg-white text-[var(--color-ink)] shadow-sm"
               : "text-slate-500 hover:text-slate-800"
           }`}
         >
@@ -1445,7 +1771,7 @@ function StatCard({
       <p className="font-mono text-[9px] uppercase tracking-[0.08em] text-slate-500">
         {label}
       </p>
-      <p className="mt-1 text-lg font-semibold text-[#2c414f]">
+      <p className="mt-1 text-lg font-semibold text-[var(--color-ink)]">
         {value ?? "…"}
       </p>
     </div>

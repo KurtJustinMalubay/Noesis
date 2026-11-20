@@ -1,6 +1,6 @@
 import type Database from "@tauri-apps/plugin-sql";
 
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 7;
 
 export async function runMigrations(db: Database): Promise<void> {
   await db.execute("PRAGMA journal_mode = WAL;");
@@ -28,6 +28,14 @@ export async function runMigrations(db: Database): Promise<void> {
         updated_at INTEGER NOT NULL
       );
     `);
+    const workspaceColumns = await db.select<Array<{ name: string }>>(
+      "PRAGMA table_info(workspaces);"
+    );
+    if (!workspaceColumns.some((column) => column.name === "layout_mode")) {
+      await db.execute(
+        "ALTER TABLE workspaces ADD COLUMN layout_mode TEXT NOT NULL DEFAULT 'auto';"
+      );
+    }
 
     await db.execute(`
       CREATE TABLE IF NOT EXISTS nodes (
@@ -217,6 +225,20 @@ export async function runMigrations(db: Database): Promise<void> {
         "ALTER TABLE tutor_threads ADD COLUMN summary_cursor_id TEXT;"
       );
     }
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS lesson_examples (
+        id TEXT PRIMARY KEY NOT NULL,
+        node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+        user_prompt TEXT NOT NULL DEFAULT '',
+        tools_json TEXT NOT NULL DEFAULT '[]',
+        content_markdown TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    await db.execute(
+      "CREATE INDEX IF NOT EXISTS idx_lesson_examples_node ON lesson_examples(node_id, created_at);"
+    );
 
     await db.execute(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION};`);
   } catch (err) {
