@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      (() => {
+        const themes = new Set([
+          "daylight",
+          "mica-dark",
+          "warm-paper",
+          "nordic-frost",
+          "sage-studio",
+        ]);
+        let theme = "daylight";
+        try {
+          const preferences = JSON.parse(
+            localStorage.getItem("noesis.preferences.v1") || "null"
+          );
+          if (themes.has(preferences?.theme)) theme = preferences.theme;
+        } catch {
+          // Use the default theme when saved preferences are unavailable.
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Noesis</title>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
