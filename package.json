@@ -1,0 +1,53 @@
+{
+  "name": "noesis",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "node --experimental-strip-types tests/verify_engines.ts && node --experimental-strip-types tests/verify_streaming.ts && node --experimental-strip-types tests/verify_token_optimizer.ts && node --experimental-strip-types tests/verify_db_batch.ts && node --experimental-strip-types tests/verify_quiz.ts && node --experimental-strip-types tests/verify_rich_content.ts && cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@codemirror/lang-cpp": "^6.0.3",
+    "@codemirror/lang-java": "^6.0.2",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-rust": "^6.0.2",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/legacy-modes": "^6.5.5",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
+    "@tauri-apps/plugin-fs": "^2.7.1",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-sql": "^2.6.0",
+    "@uiw/react-codemirror": "^4.25.12",
+    "katex": "^0.19.1",
+    "lucide-react": "^1.76.0",
+    "mermaid": "^12.3.0",
+    "pdfjs-dist": "^6.5.438",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "zustand": "^5.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^6.0.2",
+    "autoprefixer": "^10.6.2",
+    "postcss": "^8.5.33",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16"
+  }
+}
