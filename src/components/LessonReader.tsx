@@ -11,8 +11,11 @@ import {
   FileText,
   GraduationCap,
   Copy,
+  Maximize2,
+  Minimize2,
   Plus,
   RefreshCw,
+  Shapes,
   Sparkles,
   Trash2,
   X,
@@ -31,6 +34,11 @@ import {
   type LessonExample,
 } from "../db/repositories/lessonExampleRepo";
 import { RichContent } from "./ui/RichContent";
+import { renderMermaidDiagram } from "./ui/mermaidRenderer";
+import {
+  LessonMediaViewer,
+  type LessonMedia,
+} from "./ui/LessonMediaViewer";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 
 const EXAMPLE_TOOLS: Array<{ id: WorkedExampleTool; label: string }> = [
@@ -39,6 +47,7 @@ const EXAMPLE_TOOLS: Array<{ id: WorkedExampleTool; label: string }> = [
   { id: "code", label: "Code Walkthrough" },
   { id: "trace-table", label: "State / Trace Table" },
   { id: "analogy", label: "Real-World Analogy" },
+  { id: "image", label: "Online Image / Illustration" },
 ];
 
 function parseExampleTools(value: string): WorkedExampleTool[] {
@@ -51,7 +60,8 @@ function parseExampleTools(value: string): WorkedExampleTool[] {
         tool === "math" ||
         tool === "code" ||
         tool === "trace-table" ||
-        tool === "analogy"
+        tool === "analogy" ||
+        tool === "image"
     );
   } catch {
     return [];
@@ -71,6 +81,7 @@ interface LessonReaderProps {
   onRetryHydration: () => void;
   onRequestCompletion: (nodeId: string) => void;
   onStartDiagnostic: (nodeId: string) => void;
+  onOpenVisualBoard?: (node: GraphNode) => Promise<void>;
   onToast: (message: string) => void;
 }
 
@@ -87,13 +98,16 @@ export function LessonReader({
   onRetryHydration,
   onRequestCompletion,
   onStartDiagnostic,
+  onOpenVisualBoard,
   onToast,
 }: LessonReaderProps) {
   const [isRendered, setIsRendered] = useState(isOpen);
   const [isVisible, setIsVisible] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
   const mermaidRef = useRef<HTMLDivElement>(null);
   const [mermaidSvg, setMermaidSvg] = useState<string | null>(null);
   const [mermaidError, setMermaidError] = useState(false);
+  const [activeMedia, setActiveMedia] = useState<LessonMedia | null>(null);
   const [examples, setExamples] = useState<LessonExample[]>([]);
   const [exampleToDelete, setExampleToDelete] =
     useState<LessonExample | null>(null);
@@ -101,6 +115,7 @@ export function LessonReader({
   const [examplePrompt, setExamplePrompt] = useState("");
   const [exampleTools, setExampleTools] = useState<WorkedExampleTool[]>([]);
   const [isGeneratingExample, setIsGeneratingExample] = useState(false);
+  const [isOpeningVisualBoard, setIsOpeningVisualBoard] = useState(false);
   const [streamedExample, setStreamedExample] = useState("");
   const exampleAbortRef = useRef<AbortController | null>(null);
   const onToastRef = useRef(onToast);
@@ -110,6 +125,10 @@ export function LessonReader({
 
   useEffect(() => {
     if (!isOpen) setExampleToDelete(null);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) setActiveMedia(null);
   }, [isOpen]);
 
   useEffect(() => {
@@ -234,45 +253,42 @@ export function LessonReader({
     }
   };
 
+  const mermaidCode = (node.mermaid_diagram ?? "")
+    .replace(/^```mermaid\s*/i, "")
+    .replace(/```$/g, "")
+    .trim();
+
+  const openVisualBoard = async () => {
+    if (!onOpenVisualBoard || isOpeningVisualBoard) return;
+    setIsOpeningVisualBoard(true);
+    try {
+      await onOpenVisualBoard(node);
+    } catch (error) {
+      onToast(
+        `Could not open the visual board: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    } finally {
+      setIsOpeningVisualBoard(false);
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     async function renderDiagram() {
-      if (!node.mermaid_diagram) {
+      if (!mermaidCode) {
         setMermaidSvg(null);
         setMermaidError(false);
         return;
       }
       setMermaidError(false);
       try {
-        const { default: mermaid } = await import("mermaid");
-        const themeRoot = document.querySelector<HTMLElement>("[data-theme]");
-        const themeStyles = getComputedStyle(
-          themeRoot ?? document.documentElement
-        );
-        const getToken = (name: string, fallback: string) =>
-          themeStyles.getPropertyValue(name).trim() || fallback;
-        mermaid.initialize({
-          startOnLoad: false,
-          theme: "base",
-          themeVariables: {
-            background: getToken("--color-panel", "#ffffff"),
-            primaryColor: getToken("--color-panel-subtle", "#edf4f6"),
-            primaryTextColor: getToken("--color-ink", "#263b4a"),
-            primaryBorderColor: getToken("--color-border-strong", "#b9cdd5"),
-            lineColor: getToken("--color-accent", "#5e8294"),
-            secondaryColor: getToken("--color-panel", "#f4f7f4"),
-            tertiaryColor: getToken("--color-selected", "#fbf5e9"),
-            fontFamily: getToken("--font-ui", "Inter, Segoe UI, sans-serif"),
-            fontSize: "13px",
-          },
-          securityLevel: "loose",
-        });
-        const cleanCode = node.mermaid_diagram
-          .replace(/^```mermaid\s*/i, "")
-          .replace(/```$/g, "")
-          .trim();
-        const id = `mermaid-${node.id.replace(/[^a-z0-9]/gi, "")}-${Date.now()}`;
-        const { svg } = await mermaid.render(id, cleanCode);
+        const id = `mermaid-${node.id.replace(
+          /[^a-z0-9]/gi,
+          ""
+        )}-${crypto.randomUUID().replace(/-/g, "")}`;
+        const svg = await renderMermaidDiagram(mermaidCode, id);
         if (!cancelled) {
           setMermaidSvg(svg);
           setMermaidError(false);
@@ -288,7 +304,7 @@ export function LessonReader({
     return () => {
       cancelled = true;
     };
-  }, [node.id, node.mermaid_diagram, theme]);
+  }, [node.id, mermaidCode, theme]);
 
   let citations: string[] = [];
   if (node.source_citations) {
@@ -323,6 +339,8 @@ export function LessonReader({
       inert={!isOpen}
       data-tutor-open={companionOpen}
       className={`lesson-reader-panel absolute inset-y-0 right-0 flex h-full max-w-full flex-col overflow-hidden border-l border-[var(--color-border)] bg-[var(--color-panel)] shadow-[-12px_0_30px_rgba(35,51,60,0.12)] ${
+        isExpanded ? "lesson-reader-panel-expanded" : ""
+      } ${
         isVisible ? "lesson-reader-panel-visible" : ""
       }`}
     >
@@ -344,16 +362,48 @@ export function LessonReader({
             <RichContent inline>{node.summary_hint}</RichContent>
           </p>
         </div>
-        <button
-          onClick={onClose}
-          className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
-          aria-label="Close lesson"
-        >
-          <X className="h-4 w-4" />
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          {onOpenVisualBoard && (
+            <button
+              type="button"
+              onClick={() => void openVisualBoard()}
+              disabled={isHydrating || isOpeningVisualBoard}
+              className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-50"
+              aria-label="Open or create this lesson's visual board"
+              title="Open or create this lesson's visual board"
+            >
+              <Shapes className="h-4 w-4" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setIsExpanded((expanded) => !expanded)}
+            className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            aria-label={isExpanded ? "Restore lesson panel size" : "Expand lesson panel"}
+            aria-pressed={isExpanded}
+            title={isExpanded ? "Restore panel size" : "Expand panel"}
+          >
+            {isExpanded ? (
+              <Minimize2 className="h-4 w-4" />
+            ) : (
+              <Maximize2 className="h-4 w-4" />
+            )}
+          </button>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            aria-label="Close lesson"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
       </div>
 
-      <div className="flex-1 space-y-5 overflow-y-auto bg-[var(--color-panel)] px-6 py-6 select-text">
+      <div
+        className={`lesson-reader-content flex-1 space-y-5 overflow-y-auto bg-[var(--color-panel)] px-6 py-6 select-text ${
+          isExpanded ? "lesson-reader-content-expanded" : ""
+        }`}
+      >
         {isHydrating ? (
           <div className="flex h-64 flex-col items-center justify-center text-center">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
@@ -388,20 +438,45 @@ export function LessonReader({
                 <p className="mb-3 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">
                   Concept Architecture
                 </p>
-                <div
-                  ref={mermaidRef}
-                  className="mermaid-wrap flex justify-center overflow-x-auto [&_svg]:max-h-[260px]"
-                  dangerouslySetInnerHTML={{ __html: mermaidSvg }}
-                />
+                <button
+                  type="button"
+                  aria-label="Enlarge concept diagram"
+                  title="Open diagram"
+                  onClick={() =>
+                    setActiveMedia({
+                      kind: "diagram",
+                      svg: mermaidSvg,
+                      title: `${node.title} — Concept Architecture`,
+                    })
+                  }
+                  className="mermaid-wrap flex w-full cursor-zoom-in justify-center overflow-x-auto [&_svg]:max-h-[260px]"
+                >
+                  <div
+                    ref={mermaidRef}
+                    dangerouslySetInnerHTML={{ __html: mermaidSvg }}
+                  />
+                </button>
               </div>
             )}
             {mermaidError && (
-              <p className="rounded-lg border border-[#eadfda] bg-[#fcf7f5] px-3 py-2 text-[11px] text-[#805141]">
-                The concept diagram could not be rendered. The lesson text is still available.
-              </p>
+              <div
+                role="alert"
+                className="rounded-xl border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 p-3 text-[11px] text-[var(--color-ink)]"
+              >
+                <p>
+                  The concept diagram could not be rendered, so its Mermaid
+                  source is shown as a fallback.
+                </p>
+                <pre className="mt-2 max-h-56 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-3 font-mono text-[10px] leading-5 text-[var(--color-ink)]">
+                  <code>{mermaidCode}</code>
+                </pre>
+              </div>
             )}
 
-            <RichContent className="prose lesson-prose prose-sm max-w-[72ch] select-text">
+            <RichContent
+              className="prose lesson-prose prose-sm max-w-[72ch] select-text"
+              onOpenMedia={setActiveMedia}
+            >
               {node.lesson_markdown ?? "_No lesson content generated yet._"}
             </RichContent>
 
@@ -480,7 +555,10 @@ export function LessonReader({
                     )}
                   </div>
                   {streamedExample && (
-                    <RichContent className="prose lesson-prose prose-sm max-w-none border-t border-[var(--color-border)] pt-2">
+                    <RichContent
+                      className="prose lesson-prose prose-sm max-w-none border-t border-[var(--color-border)] pt-2"
+                      onOpenMedia={setActiveMedia}
+                    >
                       {streamedExample}
                     </RichContent>
                   )}
@@ -531,7 +609,10 @@ export function LessonReader({
                       </button>
                     </div>
                   </div>
-                  <RichContent className="prose lesson-prose prose-sm max-w-none">
+                  <RichContent
+                    className="prose lesson-prose prose-sm max-w-none"
+                    onOpenMedia={setActiveMedia}
+                  >
                     {example.content_markdown}
                   </RichContent>
                 </article>
@@ -542,15 +623,39 @@ export function LessonReader({
               <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-4">
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-ink)]">
                   <FileText className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-                  <span>Local Vault Citations</span>
+                  <span>References &amp; Sources</span>
                 </div>
                 <ul className="mt-2 space-y-1.5 text-xs text-[var(--color-muted)]">
-                  {citations.map((c, idx) => (
-                    <li key={idx} className="truncate">
-                      • {c}
-                    </li>
-                  ))}
+                  {citations.map((citation, idx) => {
+                    const linkedCitation = citation.match(
+                      /^(.*) — (https:\/\/\S+)$/
+                    );
+                    return (
+                      <li key={idx} className="break-words">
+                        •{" "}
+                        {linkedCitation ? (
+                          <>
+                            {linkedCitation[1]} —{" "}
+                            <a
+                              href={linkedCitation[2]}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[var(--color-accent)] underline"
+                            >
+                              View source
+                            </a>
+                          </>
+                        ) : (
+                          citation
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
+                <p className="mt-2 text-[10px] leading-4 text-[var(--color-muted)]">
+                  AI-generated lesson; listed references are the available
+                  supporting sources, not a complete list of training data.
+                </p>
               </div>
             )}
           </>
@@ -593,6 +698,12 @@ export function LessonReader({
           )}
         </button>
       </div>
+      {activeMedia && (
+        <LessonMediaViewer
+          media={activeMedia}
+          onClose={() => setActiveMedia(null)}
+        />
+      )}
       {isOpen && exampleToDelete && (
         <ConfirmDeleteModal
           title="Delete worked example?"

@@ -11,6 +11,7 @@ import {
   KeyRound,
   Layers,
   Monitor,
+  Puzzle,
   RefreshCw,
   RotateCcw,
   Search,
@@ -31,6 +32,8 @@ import {
 import { fetchLocalModels, testGeminiConnection } from "../ai/geminiClient";
 import { ingestLocalFilePath } from "../vault/ingestService";
 import { useNoesisStore, type ActiveModal } from "../store/useNoesisStore";
+import { usePluginStore } from "../plugins/pluginStore";
+import { BUILT_IN_PLUGINS } from "../plugins/registry";
 import type { DueFlashcard } from "../db/repositories/flashcardRepo";
 import {
   countDocumentChunks,
@@ -88,6 +91,7 @@ interface ModalsProps {
   diagnosticDraft: QuizDraft;
   diagnosticScore: number | null;
   isLoadingDiagnostic: boolean;
+  isGeneratingDiagnostic: boolean;
   diagnosticProgress: QuizBatchProgress | null;
   isSubmittingDiagnostic: boolean;
   isConfiguringDiagnostic: boolean;
@@ -101,6 +105,7 @@ interface ModalsProps {
   onStartDiagnostic: (nodeId: string) => Promise<void>;
   onConfigureDiagnostic: (nodeId: string) => void;
   onCancelDiagnosticConfiguration: () => void;
+  onCancelDiagnosticGeneration: () => void;
   onGenerateDiagnostic: (
     nodeId: string,
     config: QuizGenerationConfig
@@ -136,6 +141,7 @@ export function Modals({
   diagnosticDraft,
   diagnosticScore,
   isLoadingDiagnostic,
+  isGeneratingDiagnostic,
   diagnosticProgress,
   isSubmittingDiagnostic,
   isConfiguringDiagnostic,
@@ -146,6 +152,7 @@ export function Modals({
   onStartDiagnostic,
   onConfigureDiagnostic,
   onCancelDiagnosticConfiguration,
+  onCancelDiagnosticGeneration,
   onGenerateDiagnostic,
   onSaveDiagnosticDraft,
   onResetDiagnosticAttempt,
@@ -220,12 +227,14 @@ export function Modals({
           savedDraft={diagnosticDraft}
           savedScore={diagnosticScore}
           isLoading={isLoadingDiagnostic}
+          canCancelGeneration={isGeneratingDiagnostic}
           generationProgress={diagnosticProgress}
           isSubmitting={isSubmittingDiagnostic}
           isConfiguring={isConfiguringDiagnostic}
           error={diagnosticError}
           passThreshold={masteryPassThreshold}
           onClose={onClose}
+          onCancelGeneration={onCancelDiagnosticGeneration}
           onConfigure={onConfigureDiagnostic}
           onCancelConfiguration={onCancelDiagnosticConfiguration}
           onGenerate={onGenerateDiagnostic}
@@ -835,18 +844,20 @@ function SettingsModal({
   onClose: () => void;
   onQuizCacheCleared: () => void;
 }) {
-  type Section = "ai" | "canvas" | "study" | "vault";
+  type Section = "ai" | "canvas" | "plugins" | "study" | "vault";
   const sections: Array<{
     id: Section;
     title: string;
     icon: typeof Sparkles;
   }> = [
     { id: "canvas", title: "Appearance & Themes", icon: Monitor },
+    { id: "plugins", title: "Plugins", icon: Puzzle },
     { id: "ai", title: "AI & Speed", icon: Sparkles },
     { id: "study", title: "Study & SM-2", icon: GraduationCap },
     { id: "vault", title: "Vault & Data", icon: HardDrive },
   ];
   const store = useNoesisStore();
+  const pluginStore = usePluginStore();
   const initial = loadAiSettings();
   const [provider, setProvider] = useState<AiProvider>(initial.provider);
   const [apiKey, setApiKey] = useState(initial.apiKey);
@@ -886,7 +897,11 @@ function SettingsModal({
       : initial.synthesisModel
   );
   const [preferences, setPreferences] = useState(store.preferences);
-  const [section, setSection] = useState<Section>("ai");
+  const [enabledPluginIds, setEnabledPluginIds] = useState(
+    pluginStore.enabledPluginIds
+  );
+  const [section, setSection] = useState<Section>("canvas");
+  const [showUnsavedChanges, setShowUnsavedChanges] = useState(false);
   const [isKeyVisible, setIsKeyVisible] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
@@ -896,25 +911,32 @@ function SettingsModal({
     number | null
   >(null);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
-
-  useEffect(() => {
-    setPreferences((current) =>
-      current.showAppTutorial === store.preferences.showAppTutorial
-        ? current
-        : {
-            ...current,
-            showAppTutorial: store.preferences.showAppTutorial,
-          }
-    );
-  }, [store.preferences.showAppTutorial]);
+  const initialDraftSnapshot = useRef<string | null>(null);
+  const draftSnapshot = JSON.stringify({
+    provider,
+    apiKey,
+    localBaseUrl,
+    localModel,
+    localContextWindowTokens,
+    localMaxOutputTokens,
+    localTemperature,
+    localTopP,
+    lessonDepth,
+    creativityPreset,
+    fastModelSelection,
+    customFastModel,
+    synthesisModelSelection,
+    customSynthesisModel,
+    preferences,
+    enabledPluginIds: [...enabledPluginIds].sort(),
+  });
+  if (initialDraftSnapshot.current === null) {
+    initialDraftSnapshot.current = draftSnapshot;
+  }
+  const hasUnsavedChanges = draftSnapshot !== initialDraftSnapshot.current;
 
   const updateShowGuideOnStartup = (show: boolean) => {
     setPreferences((current) => ({ ...current, showAppTutorial: show }));
-    void store
-      .setPreferences({ ...store.preferences, showAppTutorial: show })
-      .catch((error) =>
-        onToast(error instanceof Error ? error.message : String(error))
-      );
   };
   const fastModel =
     fastModelSelection === "custom" ? customFastModel : fastModelSelection;
@@ -953,9 +975,14 @@ function SettingsModal({
         : { lastLightThemeId: theme }),
     };
     setPreferences(nextPreferences);
-    void store.setPreferences(nextPreferences).catch((error: unknown) =>
-      onToast(error instanceof Error ? error.message : String(error))
-    );
+  };
+
+  const requestClose = () => {
+    if (hasUnsavedChanges) {
+      setShowUnsavedChanges(true);
+      return;
+    }
+    onClose();
   };
 
   useEffect(() => {
@@ -1014,6 +1041,7 @@ function SettingsModal({
         lessonDepth,
       });
       await store.setPreferences(preferences);
+      pluginStore.setEnabledPluginIds(enabledPluginIds);
       onToast("Preferences saved locally.");
       onClose();
     } catch (err) {
@@ -1108,10 +1136,11 @@ function SettingsModal({
             <button
               key={id}
               type="button"
+              aria-pressed={section === id}
               onClick={() => setSection(id)}
               className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium transition ${
                 section === id
-                  ? "bg-white text-[var(--color-ink)] shadow-sm ring-1 ring-[#e7e9e4]"
+                  ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm ring-1 ring-[var(--color-accent)]"
                   : "text-slate-600 hover:bg-white/70 hover:text-slate-800"
               }`}
             >
@@ -1136,7 +1165,7 @@ function SettingsModal({
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestClose}
             className="rounded-lg p-1.5 text-slate-400 transition hover:bg-[#f3f2ee] hover:text-slate-700"
             aria-label="Close settings"
           >
@@ -1433,7 +1462,7 @@ function SettingsModal({
                       }
                       className={`rounded-xl border p-2 text-left transition ${
                         preferences.theme === theme.id
-                          ? "border-[#6f9ab6] ring-2 ring-[#d9e7ef]"
+                          ? "border-2 border-[var(--color-accent)] bg-[var(--color-accent-soft)] ring-2 ring-[var(--color-accent)] ring-offset-1"
                           : "border-[#e2e4df] hover:border-[#bfcbd0]"
                       }`}
                     >
@@ -1446,7 +1475,13 @@ function SettingsModal({
                           />
                         ))}
                       </span>
-                      <span className="text-[10px] font-semibold text-slate-700">
+                      <span
+                        className={`text-[10px] font-semibold ${
+                          preferences.theme === theme.id
+                            ? "text-[var(--color-accent)]"
+                            : "text-slate-700"
+                        }`}
+                      >
                         {theme.label}
                       </span>
                     </button>
@@ -1550,6 +1585,46 @@ function SettingsModal({
                 </label>
               </SettingsField>
             </>
+          )}
+
+          {section === "plugins" && (
+            <section className="space-y-3">
+              <p className="text-[11px] leading-5 text-slate-600">
+                Enable built-in workspace tools. Plugin code is bundled with
+                Noesis; custom executable plugins are not supported.
+              </p>
+              {BUILT_IN_PLUGINS.map((plugin) => {
+                const enabled = enabledPluginIds.includes(plugin.id);
+                return (
+                  <label
+                    key={plugin.id}
+                    className="flex items-start justify-between gap-4 rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] px-3 py-3"
+                  >
+                    <span className="min-w-0">
+                      <span className="block text-xs font-semibold text-slate-800">
+                        {plugin.name}
+                      </span>
+                      <span className="mt-1 block text-[10px] leading-4 text-slate-500">
+                        {plugin.description}
+                      </span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      onChange={(event) => {
+                        setEnabledPluginIds((current) =>
+                          event.target.checked
+                            ? [...new Set([...current, plugin.id])]
+                            : current.filter((id) => id !== plugin.id)
+                        );
+                      }}
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-[#326a9f]"
+                      aria-label={`Enable ${plugin.name}`}
+                    />
+                  </label>
+                );
+              })}
+            </section>
           )}
 
           {section === "study" && (
@@ -1678,7 +1753,7 @@ function SettingsModal({
         <footer className="flex justify-end gap-2 border-t border-[#ebe8e2] px-6 py-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestClose}
             className="rounded-lg px-3 py-2 text-xs text-slate-600 transition hover:bg-[#f3f2ee]"
           >
             Cancel
@@ -1706,6 +1781,49 @@ function SettingsModal({
           onToast(error instanceof Error ? error.message : String(error))
         }
       />
+    )}
+    {showUnsavedChanges && (
+      <div
+        className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/40 p-4 backdrop-blur-sm"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) {
+            setShowUnsavedChanges(false);
+          }
+        }}
+      >
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="unsaved-settings-title"
+          className="w-full max-w-[380px] rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-5 text-[var(--color-ink)] shadow-2xl"
+        >
+          <h2
+            id="unsaved-settings-title"
+            className="text-sm font-semibold"
+          >
+            Discard unsaved changes?
+          </h2>
+          <p className="mt-2 text-xs leading-5 text-[var(--color-muted)]">
+            Your settings will stay unchanged unless you save them.
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowUnsavedChanges(false)}
+              className="rounded-lg border border-[var(--color-border)] px-3.5 py-2 text-xs font-semibold text-[var(--color-ink)] hover:bg-[var(--color-hover)]"
+            >
+              Keep editing
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg bg-[#245f9e] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#194d83]"
+            >
+              Discard changes
+            </button>
+          </div>
+        </div>
+      </div>
     )}
     </>
   );
@@ -1745,10 +1863,11 @@ function SegmentedSetting({
         <button
           key={option}
           type="button"
+          aria-pressed={value === option}
           onClick={() => onChange(option)}
           className={`flex-1 rounded-md px-3 py-2 text-xs font-medium transition ${
             value === option
-              ? "bg-white text-[var(--color-ink)] shadow-sm"
+              ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm ring-1 ring-[var(--color-accent)]"
               : "text-slate-500 hover:text-slate-800"
           }`}
         >

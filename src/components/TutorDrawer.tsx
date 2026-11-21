@@ -16,6 +16,7 @@ import {
   LoaderCircle,
   Pencil,
   Plus,
+  Settings2,
   Send,
   Square,
   Trash2,
@@ -74,6 +75,39 @@ type TutorDeleteConfirmation =
       threadTitle: string;
       messageCount: number;
     };
+
+interface TutorChatSettings {
+  askFollowUpQuestions: boolean;
+  preferConciseReplies: boolean;
+}
+
+const TUTOR_SETTINGS_KEY = "noesis.tutor-chat-settings.v1";
+const DEFAULT_TUTOR_SETTINGS: TutorChatSettings = {
+  askFollowUpQuestions: true,
+  preferConciseReplies: false,
+};
+
+function loadTutorChatSettings(): TutorChatSettings {
+  try {
+    const saved: unknown = JSON.parse(
+      localStorage.getItem(TUTOR_SETTINGS_KEY) ?? "null"
+    );
+    if (!saved || typeof saved !== "object") return DEFAULT_TUTOR_SETTINGS;
+    const settings = saved as Partial<TutorChatSettings>;
+    return {
+      askFollowUpQuestions:
+        typeof settings.askFollowUpQuestions === "boolean"
+          ? settings.askFollowUpQuestions
+          : DEFAULT_TUTOR_SETTINGS.askFollowUpQuestions,
+      preferConciseReplies:
+        typeof settings.preferConciseReplies === "boolean"
+          ? settings.preferConciseReplies
+          : DEFAULT_TUTOR_SETTINGS.preferConciseReplies,
+    };
+  } catch {
+    return DEFAULT_TUTOR_SETTINGS;
+  }
+}
 
 function toLessonContext(node: GraphNode): TutorLessonContext {
   return {
@@ -197,6 +231,8 @@ export function TutorDrawer({
     Pick<TutorPayload, "totalTokens" | "savedPercent"> | null
   >(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [chatSettings, setChatSettings] = useState(loadTutorChatSettings);
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const controllerRef = useRef<AbortController | null>(null);
@@ -230,7 +266,18 @@ export function TutorDrawer({
   const onPanelReadyRef = useRef(onPanelReady);
   onPanelReadyRef.current = onPanelReady;
 
-  const isSending = sendingThreadId === activeThreadId;
+  const isSending = Boolean(
+    activeThreadId && sendingThreadId === activeThreadId
+  );
+
+  const updateChatSettings = (settings: TutorChatSettings) => {
+    setChatSettings(settings);
+    try {
+      localStorage.setItem(TUTOR_SETTINGS_KEY, JSON.stringify(settings));
+    } catch (error) {
+      onToast(`Unable to save tutor settings: ${errorMessage(error)}`);
+    }
+  };
 
   const setCurrentThread = (threadId: string | null) => {
     activeThreadIdRef.current = threadId;
@@ -575,6 +622,8 @@ export function TutorDrawer({
           rollingSummary: threads.find((thread) => thread.id === threadId)
             ?.rolling_summary,
           history: conversationHistory,
+          askFollowUpQuestions: chatSettings.askFollowUpQuestions,
+          preferConciseReplies: chatSettings.preferConciseReplies,
           onPayload: setPayloadMetrics,
           onChunk: (chunk) => {
             streamedChunks.push(chunk);
@@ -873,7 +922,27 @@ export function TutorDrawer({
         <div className="flex items-center gap-1">
           <button
             type="button"
-            onClick={() => setIsHistoryOpen((open) => !open)}
+            onClick={() => {
+              setIsHistoryOpen(false);
+              setIsSettingsOpen((open) => !open);
+            }}
+            className={`rounded-lg p-1.5 transition hover:bg-[var(--color-hover)] ${
+              isSettingsOpen
+                ? "text-[var(--color-accent)]"
+                : "text-[var(--color-muted)]"
+            }`}
+            aria-label="Tutor settings"
+            aria-expanded={isSettingsOpen}
+            title="Tutor settings"
+          >
+            <Settings2 className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setIsSettingsOpen(false);
+              setIsHistoryOpen((open) => !open);
+            }}
             className={`rounded-lg p-1.5 transition hover:bg-[var(--color-hover)] ${
               isHistoryOpen
                 ? "text-[var(--color-accent)]"
@@ -907,6 +976,49 @@ export function TutorDrawer({
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
+
+        <AnimatedPresence
+          present={isSettingsOpen}
+          motion="popover"
+          className="absolute right-3 top-full z-30 mt-2 w-64"
+          exitDuration={170}
+        >
+          <div className="motion-popover space-y-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-3 shadow-[0_16px_44px_rgba(31,43,51,0.18)]">
+            <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
+              Tutor behavior
+            </p>
+            <label className="flex items-center justify-between gap-3 text-[11px] text-[var(--color-ink)]">
+              <span>Ask follow-up questions</span>
+              <input
+                type="checkbox"
+                checked={chatSettings.askFollowUpQuestions}
+                onChange={(event) =>
+                  updateChatSettings({
+                    ...chatSettings,
+                    askFollowUpQuestions: event.target.checked,
+                  })
+                }
+                aria-label="Ask follow-up questions"
+                className="accent-[var(--color-accent)]"
+              />
+            </label>
+            <label className="flex items-center justify-between gap-3 text-[11px] text-[var(--color-ink)]">
+              <span>Prefer concise replies</span>
+              <input
+                type="checkbox"
+                checked={chatSettings.preferConciseReplies}
+                onChange={(event) =>
+                  updateChatSettings({
+                    ...chatSettings,
+                    preferConciseReplies: event.target.checked,
+                  })
+                }
+                aria-label="Prefer concise replies"
+                className="accent-[var(--color-accent)]"
+              />
+            </label>
+          </div>
+        </AnimatedPresence>
 
         <AnimatedPresence
           present={isHistoryOpen}

@@ -12,17 +12,24 @@ import type {
   Workspace,
 } from "../types/domain";
 import {
-  deleteWorkspace,
+  getWorkspaceProgressSummaries,
+  archiveWorkspace as archiveWorkspaceRecord,
+  listArchivedWorkspaces,
   listWorkspaces,
+  permanentlyDeleteWorkspace as permanentlyDeleteWorkspaceRecord,
+  restoreWorkspace as restoreWorkspaceRecord,
   updateWorkspaceLayoutMode,
+  type WorkspaceProgressSummary,
 } from "../db/repositories/workspaceRepo";
 import {
-  deleteConceptNode,
+  archiveConceptNode as archiveConceptNodeRecord,
   deleteGraphEdge,
   getWorkspaceGraph,
   hydrateNodeBatch,
   insertConceptNode,
   insertGraphEdge,
+  permanentlyDeleteArchivedConceptNode as permanentlyDeleteArchivedConceptNodeRecord,
+  restoreArchivedConceptNode as restoreArchivedConceptNodeRecord,
   updateConceptNode,
   updateGraphNodeState,
   updateNodePosition,
@@ -90,6 +97,8 @@ export type ActiveModal =
 interface NoesisState {
   // Core entities
   workspaces: Workspace[];
+  archivedWorkspaces: Workspace[];
+  workspaceProgress: Record<string, WorkspaceProgressSummary>;
   activeWorkspaceId: string | null;
   nodes: GraphNode[];
   nodeIndex: Map<string, number>;
@@ -112,6 +121,7 @@ interface NoesisState {
   diagnosticScore: number | null;
   isLoadingDiagnostic: boolean;
   diagnosticProgress: QuizBatchProgress | null;
+  diagnosticAbortController: AbortController | null;
   isSubmittingDiagnostic: boolean;
   isConfiguringDiagnostic: boolean;
   diagnosticError: string | null;
@@ -128,7 +138,9 @@ interface NoesisState {
     sourceDocument?: CurriculumSourceDocument
   ) => Promise<void>;
   cancelCurriculumGeneration: () => void;
-  removeWorkspace: (workspaceId: string) => Promise<void>;
+  archiveWorkspace: (workspaceId: string) => Promise<void>;
+  restoreWorkspace: (workspaceId: string) => Promise<void>;
+  permanentlyDeleteWorkspace: (workspaceId: string) => Promise<void>;
   setCanvasLayoutMode: (mode: CanvasLayoutMode) => Promise<void>;
   moveGraphNode: (nodeId: string, x: number, y: number) => Promise<void>;
   realignGraphGrid: () => Promise<void>;
@@ -143,7 +155,15 @@ interface NoesisState {
     title: string,
     summary: string
   ) => Promise<void>;
-  removeConceptNode: (nodeId: string) => Promise<void>;
+  archiveConceptNode: (nodeId: string) => Promise<void>;
+  restoreArchivedConceptNode: (
+    workspaceId: string,
+    nodeId: string
+  ) => Promise<void>;
+  permanentlyDeleteArchivedConceptNode: (
+    workspaceId: string,
+    nodeId: string
+  ) => Promise<void>;
   connectConceptNodes: (sourceId: string, targetId: string) => Promise<void>;
   disconnectConceptNodes: (sourceId: string, targetId: string) => Promise<void>;
   selectNode: (nodeId: string | null) => Promise<void>;
@@ -155,6 +175,7 @@ interface NoesisState {
     nodeId: string,
     config: QuizGenerationConfig
   ) => Promise<void>;
+  cancelDiagnosticGeneration: () => void;
   saveDiagnosticDraft: (nodeId: string, draft: QuizDraft) => Promise<void>;
   resetDiagnosticAttempt: (nodeId: string) => Promise<void>;
   submitDiagnostic: (
@@ -175,6 +196,8 @@ interface NoesisState {
 
 export const useNoesisStore = create<NoesisState>((set, get) => ({
   workspaces: [],
+  archivedWorkspaces: [],
+  workspaceProgress: {},
   activeWorkspaceId: null,
   nodes: [],
   nodeIndex: new Map(),
@@ -196,6 +219,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   diagnosticScore: null,
   isLoadingDiagnostic: false,
   diagnosticProgress: null,
+  diagnosticAbortController: null,
   isSubmittingDiagnostic: false,
   isConfiguringDiagnostic: false,
   diagnosticError: null,
@@ -205,12 +229,13 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   preferences: loadUserPreferences(),
 
   initAppData: async () => {
-    const [workspaces, documents] = await Promise.all([
+    const [workspaces, archivedWorkspaces, documents] = await Promise.all([
       listWorkspaces(),
+      listArchivedWorkspaces(),
       listDocuments(),
     ]);
 
-    set({ workspaces, documents });
+    set({ workspaces, archivedWorkspaces, documents });
 
     if (workspaces.length > 0) {
       await get().selectWorkspace(workspaces[0].id);
@@ -222,11 +247,13 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   },
 
   selectWorkspace: async (workspaceId: string) => {
-    const [{ nodes, edges }, dueCards, documents] = await Promise.all([
-      getWorkspaceGraph(workspaceId),
-      getDueFlashcards(workspaceId),
-      listDocuments(workspaceId),
-    ]);
+    const [{ nodes, edges }, dueCards, documents, workspaceProgress] =
+      await Promise.all([
+        getWorkspaceGraph(workspaceId),
+        getDueFlashcards(workspaceId),
+        listDocuments(workspaceId),
+        getWorkspaceProgressSummaries(),
+      ]);
 
     const preferences = get().preferences;
     const remainingReviews =
@@ -238,6 +265,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
           );
     set({
       activeWorkspaceId: workspaceId,
+      workspaceProgress,
       nodes,
       nodeIndex: new Map(nodes.map((node, index) => [node.id, index])),
       edges,
@@ -295,12 +323,37 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   cancelCurriculumGeneration: () =>
     get().curriculumAbortController?.abort(),
 
-  removeWorkspace: async (workspaceId: string) => {
-    await deleteWorkspace(workspaceId);
-    const remaining = get().workspaces.filter((w) => w.id !== workspaceId);
-    set({ workspaces: remaining });
+  archiveWorkspace: async (workspaceId: string) => {
+    const workspace = get().workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) {
+      throw new Error("The workspace is no longer available to archive.");
+    }
+    const archivedAt = Date.now();
+    await archiveWorkspaceRecord(workspaceId, archivedAt);
+    const remaining = get().workspaces.filter(
+      (item) => item.id !== workspaceId
+    );
+    const wasActiveWorkspace = get().activeWorkspaceId === workspaceId;
+    set({
+      workspaces: remaining,
+      archivedWorkspaces: [
+        { ...workspace, archived_at: archivedAt },
+        ...get().archivedWorkspaces.filter((item) => item.id !== workspaceId),
+      ],
+      ...(wasActiveWorkspace
+        ? {
+            activeWorkspaceId: null,
+            nodes: [],
+            nodeIndex: new Map(),
+            edges: [],
+            selectedNodeId: null,
+            dueCards: [],
+            documents: [],
+          }
+        : {}),
+    });
 
-    if (get().activeWorkspaceId === workspaceId) {
+    if (wasActiveWorkspace) {
       if (remaining.length > 0) {
         await get().selectWorkspace(remaining[0].id);
       } else {
@@ -316,6 +369,33 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         });
       }
     }
+  },
+
+  restoreWorkspace: async (workspaceId) => {
+    const workspace = get().archivedWorkspaces.find(
+      (item) => item.id === workspaceId
+    );
+    if (!workspace) {
+      throw new Error("The archived workspace is no longer available.");
+    }
+    await restoreWorkspaceRecord(workspaceId);
+    set({
+      workspaces: [...get().workspaces, { ...workspace, archived_at: null }].sort(
+        (left, right) => right.updated_at - left.updated_at
+      ),
+      archivedWorkspaces: get().archivedWorkspaces.filter(
+        (item) => item.id !== workspaceId
+      ),
+    });
+  },
+
+  permanentlyDeleteWorkspace: async (workspaceId) => {
+    await permanentlyDeleteWorkspaceRecord(workspaceId);
+    set({
+      archivedWorkspaces: get().archivedWorkspaces.filter(
+        (item) => item.id !== workspaceId
+      ),
+    });
   },
 
   setCanvasLayoutMode: async (mode) => {
@@ -383,6 +463,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       mermaid_diagram: null,
       source_citations: null,
       updated_at: Date.now(),
+      archived_at: null,
     };
     const edges = get().edges;
     const graphState = recomputeGraphState([...get().nodes, node], edges);
@@ -412,7 +493,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     });
   },
 
-  removeConceptNode: async (nodeId) => {
+  archiveConceptNode: async (nodeId) => {
     const workspaceId = get().activeWorkspaceId;
     const node = get().nodes.find((item) => item.id === nodeId);
     if (!workspaceId || !node || node.workspace_id !== workspaceId) return;
@@ -426,7 +507,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       "auto"
         ? computeSugiyamaLayout(graphState.updatedNodes, nextEdges)
         : graphState.updatedNodes;
-    await deleteConceptNode(nodeId);
+    await archiveConceptNodeRecord(workspaceId, nodeId);
     await updateGraphNodeState(positionedNodes);
     const quizNodeIds = new Set(get().quizNodeIds);
     quizNodeIds.delete(nodeId);
@@ -438,11 +519,52 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         positionedNodes.map((item, index) => [item.id, index])
       ),
       edges: nextEdges,
+      dueCards: get().dueCards.filter((card) => card.node_id !== nodeId),
       selectedNodeId:
         get().selectedNodeId === nodeId ? null : get().selectedNodeId,
       quizNodeIds,
       checkedQuizNodeIds,
     });
+  },
+
+  restoreArchivedConceptNode: async (workspaceId, nodeId) => {
+    if (get().activeWorkspaceId !== workspaceId) {
+      throw new Error("Open the concept's workspace before restoring it.");
+    }
+    await restoreArchivedConceptNodeRecord(workspaceId, nodeId);
+    const { nodes, edges } = await getWorkspaceGraph(workspaceId);
+    const graphState = recomputeGraphState(nodes, edges);
+    const layoutMode = get().workspaces.find(
+      (workspace) => workspace.id === workspaceId
+    )?.layout_mode;
+    const positionedNodes =
+      layoutMode === "auto"
+        ? computeSugiyamaLayout(graphState.updatedNodes, edges)
+        : graphState.updatedNodes;
+    await updateGraphNodeState(positionedNodes);
+    const dueCards = await getDueFlashcards(workspaceId);
+    const preferences = get().preferences;
+    const remainingReviews =
+      preferences.dailyReviewLimit === 0
+        ? dueCards.length
+        : Math.max(
+            0,
+            preferences.dailyReviewLimit - getReviewsCompletedToday()
+          );
+    if (get().activeWorkspaceId !== workspaceId) return;
+    set({
+      nodes: positionedNodes,
+      nodeIndex: new Map(
+        positionedNodes.map((item, index) => [item.id, index])
+      ),
+      edges,
+      dueCards: dueCards.slice(0, remainingReviews),
+      selectedNodeId: null,
+    });
+  },
+
+  permanentlyDeleteArchivedConceptNode: async (workspaceId, nodeId) => {
+    await permanentlyDeleteArchivedConceptNodeRecord(workspaceId, nodeId);
   },
 
   connectConceptNodes: async (sourceId, targetId) => {
@@ -663,15 +785,18 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   ) => {
     const node = get().nodes.find((n) => n.id === nodeId);
     if (!node || get().isLoadingDiagnostic) return;
+    const controller = new AbortController();
     set({
       isLoadingDiagnostic: true,
       diagnosticProgress: null,
       isConfiguringDiagnostic: false,
       diagnosticError: null,
+      diagnosticAbortController: controller,
     });
     try {
       const questions = await generateNodeQuiz(node, config, (progress) =>
-        set({ diagnosticProgress: progress })
+        set({ diagnosticProgress: progress }),
+        controller.signal
       );
       await saveNodeQuiz(nodeId, questions, config);
       const quizNodeIds = new Set(get().quizNodeIds);
@@ -688,15 +813,30 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         isConfiguringDiagnostic: false,
       });
     } catch (err) {
-      set({
-        diagnosticError:
-          err instanceof Error ? err.message : String(err),
-        isConfiguringDiagnostic: true,
-      });
+      if (controller.signal.aborted) {
+        set({
+          diagnosticError: null,
+          isConfiguringDiagnostic: true,
+        });
+        get().showToast("Quiz generation stopped.");
+      } else {
+        set({
+          diagnosticError:
+            err instanceof Error ? err.message : String(err),
+          isConfiguringDiagnostic: true,
+        });
+      }
     } finally {
-      set({ isLoadingDiagnostic: false, diagnosticProgress: null });
+      set({
+        isLoadingDiagnostic: false,
+        diagnosticProgress: null,
+        diagnosticAbortController: null,
+      });
     }
   },
+
+  cancelDiagnosticGeneration: () =>
+    get().diagnosticAbortController?.abort(),
 
   saveDiagnosticDraft: async (nodeId, draft) => {
     await saveNodeQuizDraft(nodeId, draft);

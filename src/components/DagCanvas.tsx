@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Archive,
   CheckCircle2,
   Compass,
   Link2,
@@ -9,7 +10,6 @@ import {
   Plus,
   PlayCircle,
   Sparkles,
-  Trash2,
   X,
   ZoomIn,
   ZoomOut,
@@ -24,8 +24,10 @@ import { DEFAULT_LAYOUT_CONFIG } from "../engine/sugiyamaLayout";
 import type { UserPreferences } from "../ai/keyStore";
 import { stripMathMarkup } from "./ui/normalizeMathMarkdown";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
+import { ArchivedConceptsDialog } from "./ArchivedConceptsDialog";
 
 interface DagCanvasProps {
+  workspaceId: string | null;
   nodes: GraphNode[];
   edges: GraphEdge[];
   layoutMode: CanvasLayoutMode;
@@ -49,7 +51,15 @@ interface DagCanvasProps {
     title: string,
     summary: string
   ) => Promise<void>;
-  onDeleteNode: (nodeId: string) => Promise<void>;
+  onArchiveNode: (nodeId: string) => Promise<void>;
+  onRestoreArchivedNode: (
+    workspaceId: string,
+    nodeId: string
+  ) => Promise<void>;
+  onPermanentlyDeleteArchivedNode: (
+    workspaceId: string,
+    nodeId: string
+  ) => Promise<void>;
   onConnectNodes: (sourceId: string, targetId: string) => Promise<void>;
   onDisconnectNodes: (sourceId: string, targetId: string) => Promise<void>;
   onToast: (message: string | null) => void;
@@ -89,6 +99,7 @@ const EDGE_MIDPOINT_STAGGER = 12;
 const NODE_DRAG_THRESHOLD = 5;
 
 export function DagCanvas({
+  workspaceId,
   nodes,
   edges,
   layoutMode,
@@ -103,7 +114,9 @@ export function DagCanvas({
   onRealignGrid,
   onAddNode,
   onEditNode,
-  onDeleteNode,
+  onArchiveNode,
+  onRestoreArchivedNode,
+  onPermanentlyDeleteArchivedNode,
   onConnectNodes,
   onDisconnectNodes,
   onToast,
@@ -127,6 +140,7 @@ export function DagCanvas({
   const [confirmDeleteNode, setConfirmDeleteNode] = useState<GraphNode | null>(
     null
   );
+  const [showArchivedConcepts, setShowArchivedConcepts] = useState(false);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorTitle, setEditorTitle] = useState("");
   const [editorSummary, setEditorSummary] = useState("");
@@ -283,7 +297,7 @@ export function DagCanvas({
   };
 
   const deleteNode = async (node: GraphNode) => {
-    await onDeleteNode(node.id);
+    await onArchiveNode(node.id);
     setOpenMenuNodeId(null);
   };
 
@@ -348,6 +362,10 @@ export function DagCanvas({
     lastViewRef.current = { layoutKey, layoutMode };
     if (shouldFit) fitGraph();
   }, [layoutKey, layoutMode]);
+
+  useEffect(() => {
+    setShowArchivedConcepts(false);
+  }, [workspaceId]);
 
   useEffect(
     () => () => {
@@ -1280,77 +1298,16 @@ export function DagCanvas({
                     onClick={() => {
                       setConfirmDeleteNode(node);
                     }}
-                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] font-medium text-rose-700 hover:bg-rose-50"
+                    className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    Delete Concept
+                    <Archive className="h-3.5 w-3.5" />
+                    Archive Concept
                   </button>
                 </div>
               )}
             </div>
           );
         })}
-      </div>
-
-      <div
-        data-canvas-toolbar
-        className="absolute left-4 top-4 z-20 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-1 rounded-xl border border-[#e1dfd8] bg-white/95 p-1.5 shadow-[0_5px_18px_rgba(35,51,60,0.09)] backdrop-blur"
-      >
-        <div className="flex items-center rounded-lg bg-[#f2f1ed] p-0.5">
-          <button
-            type="button"
-            onClick={() => void runCanvasAction(() => onSetLayoutMode("auto"))}
-            className={`rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
-              layoutMode === "auto"
-                ? "bg-white text-slate-800 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
-            }`}
-          >
-            Auto-Layout
-          </button>
-          <button
-            type="button"
-            onClick={() => void runCanvasAction(() => onSetLayoutMode("free"))}
-            className={`rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
-              layoutMode === "free"
-                ? "bg-white text-slate-800 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
-            }`}
-          >
-            Free Place
-          </button>
-        </div>
-        {layoutMode === "free" && (
-          <>
-            <button
-              type="button"
-              onClick={() => void resetToAutoLayout()}
-              className="rounded-lg px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 hover:bg-[#f2f1ed]"
-              title="Restore Sugiyama positions and layer backdrops"
-            >
-              Reset to Auto-Layout
-            </button>
-            <button
-              type="button"
-              onClick={() => void realignGrid()}
-              className="rounded-lg px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 hover:bg-[#f2f1ed]"
-              title="Snap free-place nodes to the 16px grid"
-            >
-              Re-align Grid
-            </button>
-          </>
-        )}
-        <button
-          type="button"
-          onClick={() => {
-            const rect = containerRef.current?.getBoundingClientRect();
-            openAddEditor((rect?.width ?? 900) / 2 - 150, 70);
-          }}
-          className="flex items-center gap-1 rounded-lg bg-[var(--color-accent-button)] px-2.5 py-1.5 text-[10px] font-semibold text-white hover:brightness-95"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Add Node
-        </button>
       </div>
 
       {editor && (
@@ -1422,9 +1379,10 @@ export function DagCanvas({
 
       {confirmDeleteNode && (
         <ConfirmDeleteModal
-          title="Delete concept?"
+          mode="archive"
+          title="Archive concept?"
           itemName={confirmDeleteNode.title}
-          description="The concept’s lesson, quiz, flashcards, and saved worked examples will also be deleted if present. Its prerequisite connections will be removed and the remaining graph will be recalculated."
+          description="This removes the concept from the active graph but keeps its lesson, quiz, flashcards, worked examples, and prerequisite connections in this workspace’s Archive. Restore it later or permanently delete it from Archive."
           impactItems={[
             {
               label: "Dependent prerequisite edges",
@@ -1439,18 +1397,27 @@ export function DagCanvas({
               value: confirmDeleteNode.is_hydrated === 1 ? "Yes" : "No",
             },
           ]}
-          deleteLabel="Delete concept"
+          deleteLabel="Archive concept"
           onCancel={() => setConfirmDeleteNode(null)}
           onConfirm={() => deleteNode(confirmDeleteNode)}
           onError={showError}
         />
       )}
+      {showArchivedConcepts && workspaceId && (
+        <ArchivedConceptsDialog
+          workspaceId={workspaceId}
+          onRestore={onRestoreArchivedNode}
+          onPermanentlyDelete={onPermanentlyDeleteArchivedNode}
+          onClose={() => setShowArchivedConcepts(false)}
+          onToast={onToast}
+        />
+      )}
 
       <div
         data-canvas-toolbar
-        className="absolute bottom-4 left-4 z-20 flex items-center gap-1 rounded-xl border border-[#e1dfd8] bg-white/95 p-1.5 shadow-[0_5px_18px_rgba(35,51,60,0.09)] backdrop-blur"
+        className="absolute bottom-4 left-4 z-20 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-1.5 rounded-xl border border-[#e1dfd8] bg-white/95 p-1.5 shadow-[0_5px_18px_rgba(35,51,60,0.09)] backdrop-blur"
       >
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 rounded-lg bg-[#f2f1ed] p-0.5">
           <button
             type="button"
             onClick={() => {
@@ -1497,8 +1464,77 @@ export function DagCanvas({
             Fit to screen
           </button>
         </div>
+        <div className="h-5 w-px bg-[#d8d5ce]" aria-hidden="true" />
+        <div className="flex items-center rounded-lg border border-[#e6e3dd] bg-[#f8f7f4] p-0.5">
+          <button
+            type="button"
+            onClick={() => void runCanvasAction(() => onSetLayoutMode("auto"))}
+            className={`rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
+              layoutMode === "auto"
+                ? "bg-white text-slate-800 shadow-sm"
+                : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            Auto-Layout
+          </button>
+          <button
+            type="button"
+            onClick={() => void runCanvasAction(() => onSetLayoutMode("free"))}
+            className={`rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
+              layoutMode === "free"
+                ? "bg-white text-slate-800 shadow-sm"
+                : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            Free Place
+          </button>
+          {layoutMode === "free" && (
+            <>
+              <button
+                type="button"
+                onClick={() => void resetToAutoLayout()}
+                className="rounded-md px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 hover:bg-[#f2f1ed]"
+                title="Restore Sugiyama positions and layer backdrops"
+              >
+                Reset Layout
+              </button>
+              <button
+                type="button"
+                onClick={() => void realignGrid()}
+                className="rounded-md px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 hover:bg-[#f2f1ed]"
+                title="Snap free-place nodes to the 16px grid"
+              >
+                Re-align Grid
+              </button>
+            </>
+          )}
+        </div>
+        <div className="h-5 w-px bg-[#d8d5ce]" aria-hidden="true" />
+        <div className="flex items-center gap-0.5 rounded-lg border border-[#e6e3dd] bg-[#f8f7f4] p-0.5">
+          <button
+            type="button"
+            onClick={() => {
+              const rect = containerRef.current?.getBoundingClientRect();
+              openAddEditor((rect?.width ?? 900) / 2 - 150, 70);
+            }}
+            className="flex items-center gap-1 rounded-md bg-[var(--color-accent-button)] px-2.5 py-1.5 text-[10px] font-semibold text-white hover:brightness-95"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add Node
+          </button>
+          <button
+            type="button"
+            disabled={!workspaceId}
+            onClick={() => setShowArchivedConcepts(true)}
+            className="flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+            title="View archived concepts"
+          >
+            <Archive className="h-3.5 w-3.5" />
+            Archived concepts
+          </button>
+        </div>
       </div>
-      <div className="absolute bottom-4 right-4 z-20 rounded-lg border border-[#e1dfd8] bg-white/90 px-3 py-2 text-[10px] text-slate-500 shadow-sm">
+      <div className="absolute right-4 top-4 z-20 rounded-lg border border-[#e1dfd8] bg-white/90 px-3 py-2 text-[10px] text-slate-500 shadow-sm">
         <span className="inline-flex items-center gap-1">
           <Link2 className="h-3 w-3" />
           Hover to trace lineage

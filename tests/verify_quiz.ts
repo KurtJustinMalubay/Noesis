@@ -5,12 +5,49 @@ import {
   gradeSubjectiveBatch,
   parseQuizPayload,
 } from "../src/ai/quizService.ts";
+import type { GraphNode } from "../src/types/domain.ts";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
 }
 
 async function run(): Promise<void> {
+  const cancelledNode: GraphNode = {
+    id: "cancelled-node",
+    workspace_id: "workspace",
+    title: "Test topic",
+    summary_hint: "A test topic.",
+    status: "unlocked",
+    mastery_score: 0,
+    in_degree_unmastered: 0,
+    layer_index: 0,
+    pos_x: 0,
+    pos_y: 0,
+    is_hydrated: 1,
+    lesson_markdown: "A test lesson.",
+    mermaid_diagram: null,
+    source_citations: null,
+    updated_at: 0,
+  };
+  const cancelledController = new AbortController();
+  cancelledController.abort();
+  let generationAborted = false;
+  try {
+    await generateNodeQuiz(
+      cancelledNode,
+      { formats: ["coding"], count: 3, language: "JavaScript" },
+      undefined,
+      cancelledController.signal
+    );
+  } catch (error) {
+    generationAborted =
+      error instanceof DOMException && error.name === "AbortError";
+  }
+  assert(
+    generationAborted,
+    "cancelled quiz generation should stop before making a model request"
+  );
+
   const parsed = parseQuizPayload(
     '```json\n[{"id":"q1","type":"mcq","prompt":"Which is $2 + 2$?","options":["3","4","5","6"],"answerIndex":1,"explanation":"Four."},{"id":"bad","type":"mcq","prompt":"bad","options":["A"],"answerIndex":0,"explanation":"invalid"}]\n```',
     "node-1"

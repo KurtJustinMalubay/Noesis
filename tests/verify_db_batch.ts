@@ -128,14 +128,19 @@ async function run(): Promise<void> {
   );
   assert(
     migrationSql.includes("idx_nodes_workspace_layer") &&
+    migrationSql.includes("idx_nodes_workspace_archived") &&
       migrationSql.includes("idx_flashcards_next_review") &&
       migrationSql.includes("idx_tutor_messages_thread_seq") &&
+      migrationSql.includes("idx_plugin_boards_scope") &&
+      migrationSql.includes("CREATE TABLE IF NOT EXISTS plugin_boards") &&
+      migrationSql.includes("ALTER TABLE workspaces ADD COLUMN archived_at") &&
+      migrationSql.includes("ALTER TABLE nodes ADD COLUMN archived_at") &&
       migrationSql.includes("rolling_summary TEXT") &&
       migrationSql.includes("node_quizzes ADD COLUMN updated_at") &&
       migrationSql.includes("node_quizzes ADD COLUMN config_json") &&
       migrationSql.includes("node_quizzes ADD COLUMN draft_json") &&
       migrationSql.includes("node_quizzes ADD COLUMN score"),
-    "schema should create performance indexes, rolling tutor memory, and quiz persistence fields"
+    "schema should create performance indexes, rolling tutor memory, plugin boards, and quiz persistence fields"
   );
   assert(
     !migrationStatements.some((sql) => /^\s*(BEGIN|COMMIT)\b/i.test(sql)),

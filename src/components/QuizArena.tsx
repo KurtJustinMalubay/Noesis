@@ -18,6 +18,7 @@ import {
   RotateCcw,
   Save,
   Sparkles,
+  Square,
   X,
 } from "lucide-react";
 import { loadQuizPreferences, saveQuizPreferences } from "../ai/quizService";
@@ -67,12 +68,14 @@ interface QuizArenaProps {
   savedDraft: QuizDraft;
   savedScore: number | null;
   isLoading: boolean;
+  canCancelGeneration: boolean;
   generationProgress: QuizBatchProgress | null;
   isSubmitting: boolean;
   isConfiguring: boolean;
   error: string | null;
   passThreshold: number;
   onClose: () => void;
+  onCancelGeneration: () => void;
   onConfigure: (nodeId: string) => void;
   onCancelConfiguration: () => void;
   onGenerate: (nodeId: string, config: QuizGenerationConfig) => Promise<void>;
@@ -101,12 +104,14 @@ export function QuizArena({
   savedDraft,
   savedScore,
   isLoading,
+  canCancelGeneration,
   generationProgress,
   isSubmitting,
   isConfiguring,
   error,
   passThreshold,
   onClose,
+  onCancelGeneration,
   onConfigure,
   onCancelConfiguration,
   onGenerate,
@@ -426,6 +431,16 @@ export function QuizArena({
                 }}
               />
             </div>
+          )}
+          {canCancelGeneration && (
+            <button
+              type="button"
+              onClick={onCancelGeneration}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-2 text-[11px] font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+            >
+              <Square className="h-3 w-3 fill-current" />
+              Stop generation
+            </button>
           )}
         </div>
       ) : isConfiguring ? (

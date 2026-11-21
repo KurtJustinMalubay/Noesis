@@ -10,6 +10,11 @@ full-text search index are stored locally in SQLite with FTS5.
 - **Dual-mode prerequisite DAG:** Auto-Layout organizes concepts into
   prerequisite layers; Free Place lets you arrange nodes and author concepts
   and dependency edges on an open canvas.
+- **Workspace tools:** Enable built-in tools in **Settings → Plugins**. The
+  first tool is Excalidraw, with locally saved boards scoped to a workspace or
+  an individual concept. Open a concept's existing board or create an editable
+  board from its lesson diagram, with workspace-area fullscreen that retains
+  app navigation and app-matched dark mode.
 - **Local Document Vault:** Import PDF, Markdown, and TXT notes, index them
   locally with SQLite FTS5, and search them with debounced filtering.
 - **AI lessons and worked examples:** Generate structured lessons with KaTeX
@@ -19,6 +24,9 @@ full-text search index are stored locally in SQLite with FTS5.
   coding questions, with configurable difficulty and mastery progression.
 - **SM-2 Review Queue:** Schedule flashcard reviews to reinforce long-term
   recall.
+- **Recoverable Archive:** Move whole workspaces out of Recent or archive
+  individual concepts within a workspace; restore them later or permanently
+  delete them from their archive.
 - **Gemini and local AI:** Use Google Gemini or an OpenAI-compatible local
   server such as Ollama, LM Studio, or Foundry Local.
 - **Themes and reading controls:** Choose Dark or Light palettes, fonts, and
@@ -64,6 +72,9 @@ key in the Tauri config; optionally set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 Keep the private key out of the repository. Tauri updater signatures validate
 updates but are not Authenticode publisher signatures, so Windows may still
 show Smart App Control or unknown-publisher warnings.
+The release workflow uses the generated `.sig` sidecars to create the updater
+manifest, then publishes only the installers and `latest.json`; signatures
+remain embedded in the manifest rather than appearing as separate downloads.
 
 ## Verification
 

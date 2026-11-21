@@ -17,6 +17,7 @@ export async function getDueFlashcards(
      FROM flashcards f
      JOIN nodes n ON n.id = f.node_id
      WHERE n.workspace_id = $1
+       AND n.archived_at IS NULL
        AND f.next_review_at <= $2
      ORDER BY f.next_review_at ASC`,
     [workspaceId, nowMs]

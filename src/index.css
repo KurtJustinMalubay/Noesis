@@ -759,8 +759,10 @@ button:disabled {
     opacity: 0;
     transition:
       transform 300ms var(--ease-spring),
-      opacity 300ms var(--ease-spring);
-    will-change: transform, opacity;
+      opacity 300ms var(--ease-spring),
+      width 300ms var(--ease-spring),
+      min-width 300ms var(--ease-spring);
+    will-change: transform, opacity, width;
   }
 
   .lesson-reader-panel-visible {
@@ -771,6 +773,41 @@ button:disabled {
 
   .lesson-reader-panel-visible[data-tutor-open="true"] {
     transform: translate3d(calc(0px - var(--tutor-panel-width)), 0, 0);
+  }
+
+  .lesson-reader-panel-expanded {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .lesson-reader-panel-expanded[data-tutor-open="true"] {
+    width: calc(100% - var(--tutor-panel-width));
+  }
+
+  .lesson-reader-content-expanded > * {
+    width: 100%;
+    max-width: 100ch;
+    margin-inline: auto;
+  }
+
+  .lesson-reader-content-expanded .lesson-prose {
+    max-width: min(100%, 90ch);
+  }
+
+  .workspace-view-enter {
+    animation: workspace-view-enter-animation 240ms var(--ease-spring) both;
+  }
+
+  @keyframes workspace-view-enter-animation {
+    from {
+      opacity: 0;
+      transform: translate3d(8px, 0, 0);
+    }
+
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
   }
 
   .motion-presence[data-motion="toast"] {
@@ -1046,12 +1083,15 @@ button:disabled {
     overflow-y: hidden;
   }
 
-  [data-theme] button:not([class*="text-white"]):not(:disabled):hover {
+  [data-theme]
+    button:not([class*="text-white"]):not(:disabled):not([aria-pressed="true"]):hover {
     color: var(--color-ink) !important;
     background-color: var(--color-hover) !important;
   }
 
-  [data-theme] button:not([class*="text-white"]):not(:disabled):hover * {
+  [data-theme]
+    button:not([class*="text-white"]):not(:disabled):not([aria-pressed="true"]):hover
+    * {
     color: var(--color-ink) !important;
   }
 
@@ -1086,6 +1126,19 @@ button:disabled {
 
 button {
   transition-property: transform, opacity;
+}
+
+.workspace-loading-indicator {
+  animation: workspace-loading-slide 1.25s ease-in-out infinite;
+}
+
+@keyframes workspace-loading-slide {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(300%);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1125,5 +1178,10 @@ button {
   .boot-splash-progress-indicator {
     animation: none;
     transform: translate3d(160%, 0, 0);
+  }
+
+  .workspace-loading-indicator {
+    animation: none;
+    transform: translateX(80%);
   }
 }

@@ -210,6 +210,7 @@ export function buildInitialGraphNodes(
       mermaid_diagram: null,
       source_citations: null,
       updated_at: now,
+      archived_at: null,
     };
   });
 }

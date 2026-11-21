@@ -93,6 +93,27 @@ jobs:
       - name: Create updater manifest
         run: node scripts/create-updater-manifest.mjs latest.json updater-assets
 
+      - name: Stage public release assets without signature sidecars
+        shell: pwsh
+        run: |
+          $releaseAssets = "release-assets"
+          New-Item -ItemType Directory -Path $releaseAssets | Out-Null
+          $installers = @(Get-ChildItem updater-assets -Recurse -File | Where-Object {
+            $_.Extension -in @(".msi", ".exe")
+          })
+          if ($installers.Count -eq 0) {
+            throw "No MSI or NSIS installer files were found."
+          }
+          $assetNames = @{}
+          foreach ($installer in $installers) {
+            if ($assetNames.ContainsKey($installer.Name)) {
+              throw "Duplicate release asset name: $($installer.Name)"
+            }
+            $assetNames[$installer.Name] = $true
+            Copy-Item -LiteralPath $installer.FullName -Destination $releaseAssets
+          }
+          Copy-Item -LiteralPath latest.json -Destination $releaseAssets
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -100,5 +121,4 @@ jobs:
           overwrite_files: true
           fail_on_unmatched_files: true
           files: |
-            updater-assets/**/*
-            latest.json
+            release-assets/*

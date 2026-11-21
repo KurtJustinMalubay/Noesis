@@ -33,7 +33,23 @@ async function run(): Promise<void> {
   const version = sqlite.prepare("PRAGMA user_version").get() as {
     user_version: number;
   };
-  assert(version.user_version === 7, "migrations should advance the schema to v7");
+  assert(version.user_version === 9, "migrations should advance the schema to v9");
+  const pluginBoardColumns = sqlite
+    .prepare("PRAGMA table_info(plugin_boards)")
+    .all() as Array<{ name: string; notnull: number }>;
+  assert(
+    pluginBoardColumns.some(
+      (column) => column.name === "scene_json" && column.notnull === 1
+    ),
+    "plugin boards should persist serialized scene data"
+  );
+  const pluginBoardIndex = sqlite
+    .prepare("PRAGMA index_list(plugin_boards)")
+    .all() as Array<{ name: string }>;
+  assert(
+    pluginBoardIndex.some((index) => index.name === "idx_plugin_boards_scope"),
+    "plugin boards should have a scope lookup index"
+  );
   const workspaceColumns = sqlite
     .prepare("PRAGMA table_info(workspaces)")
     .all() as Array<{ name: string; dflt_value: string | null }>;
@@ -43,6 +59,38 @@ async function run(): Promise<void> {
   assert(
     layoutMode?.dflt_value === "'auto'",
     "new and existing workspaces should default to Auto-Layout"
+  );
+  assert(
+    workspaceColumns.some((column) => column.name === "archived_at"),
+    "workspaces should support recoverable archiving"
+  );
+  sqlite
+    .prepare("UPDATE workspaces SET archived_at = ? WHERE id = ?")
+    .run(2000, "legacy-workspace");
+  const archivedWorkspaceCount = sqlite
+    .prepare(
+      "SELECT COUNT(*) AS count FROM workspaces WHERE archived_at IS NOT NULL"
+    )
+    .get() as { count: number };
+  const activeWorkspaceCount = sqlite
+    .prepare(
+      "SELECT COUNT(*) AS count FROM workspaces WHERE archived_at IS NULL"
+    )
+    .get() as { count: number };
+  assert(
+    archivedWorkspaceCount.count === 1 && activeWorkspaceCount.count === 0,
+    "archiving a workspace should retain it without listing it as active"
+  );
+  sqlite
+    .prepare("UPDATE workspaces SET archived_at = NULL WHERE id = ?")
+    .run("legacy-workspace");
+  assert(
+    (sqlite
+      .prepare(
+        "SELECT COUNT(*) AS count FROM workspaces WHERE archived_at IS NULL"
+      )
+      .get() as { count: number }).count === 1,
+    "restoring a workspace should make it active again"
   );
   const legacyMode = sqlite
     .prepare("SELECT layout_mode FROM workspaces WHERE id = ?")
@@ -74,12 +122,55 @@ async function run(): Promise<void> {
       "INSERT INTO nodes (id, workspace_id, title, summary_hint, updated_at) VALUES (?, ?, ?, ?, ?)"
     )
     .run("custom-node", "workspace", "Custom concept", "User-authored", 2);
+  sqlite
+    .prepare(
+      `INSERT INTO plugin_boards
+        (id, workspace_id, plugin_id, node_id, title, scene_json,
+         created_at, updated_at, last_opened_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      "workspace-board",
+      "workspace",
+      "excalidraw",
+      null,
+      "Workspace board",
+      '{"elements":[],"appState":{},"files":{}}',
+      1,
+      1,
+      1
+    );
+  sqlite
+    .prepare(
+      `INSERT INTO plugin_boards
+        (id, workspace_id, plugin_id, node_id, title, scene_json,
+         created_at, updated_at, last_opened_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      "node-board",
+      "workspace",
+      "excalidraw",
+      "node",
+      "Concept board",
+      '{"elements":[],"appState":{},"files":{}}',
+      1,
+      1,
+      1
+    );
   const customNode = sqlite
     .prepare("SELECT title, is_hydrated FROM nodes WHERE id = ?")
     .get("custom-node") as { title: string; is_hydrated: number };
   assert(
     customNode.title === "Custom concept" && customNode.is_hydrated === 0,
     "migrated node schema should support unhydrated custom concepts"
+  );
+  const nodeArchiveColumn = sqlite
+    .prepare("PRAGMA table_info(nodes)")
+    .all() as Array<{ name: string }>;
+  assert(
+    nodeArchiveColumn.some((column) => column.name === "archived_at"),
+    "nodes should support recoverable archiving"
   );
   sqlite
     .prepare(
@@ -122,7 +213,78 @@ async function run(): Promise<void> {
     "worked examples should support update and delete"
   );
 
-  sqlite.prepare("DELETE FROM nodes WHERE id = ?").run("node");
+  sqlite
+    .prepare("UPDATE nodes SET archived_at = ? WHERE id = ?")
+    .run(3000, "node");
+  assert(
+    (sqlite
+      .prepare(
+        "SELECT COUNT(*) AS count FROM nodes WHERE workspace_id = ? AND archived_at IS NULL"
+      )
+      .get("workspace") as { count: number }).count === 1,
+    "archived concepts should be excluded from the active workspace graph"
+  );
+  assert(
+    (sqlite
+      .prepare(
+        `SELECT COUNT(*) AS count FROM edges e
+         JOIN nodes source ON source.id = e.source_id
+         JOIN nodes target ON target.id = e.target_id
+         WHERE e.workspace_id = ?
+           AND source.archived_at IS NULL AND target.archived_at IS NULL`
+      )
+      .get("workspace") as { count: number }).count === 0 &&
+      (sqlite
+        .prepare(
+          `SELECT COUNT(*) AS count FROM plugin_boards b
+           LEFT JOIN nodes n ON n.id = b.node_id
+           WHERE b.workspace_id = ?
+             AND (b.node_id IS NULL OR n.archived_at IS NULL)`
+        )
+        .get("workspace") as { count: number }).count === 1,
+    "archived concept edges and boards should be hidden from active workspace views"
+  );
+  assert(
+    (sqlite
+      .prepare("SELECT COUNT(*) AS count FROM lesson_examples WHERE node_id = ?")
+      .get("node") as { count: number }).count === 1 &&
+      (sqlite
+        .prepare(
+          "SELECT COUNT(*) AS count FROM edges WHERE source_id = ? OR target_id = ?"
+        )
+        .get("node", "node") as { count: number }).count === 1 &&
+      (sqlite
+        .prepare("SELECT COUNT(*) AS count FROM plugin_boards WHERE node_id = ?")
+        .get("node") as { count: number }).count === 1,
+    "archiving a concept should preserve its examples, edges, and board"
+  );
+  sqlite.prepare("UPDATE nodes SET archived_at = NULL WHERE id = ?").run("node");
+  assert(
+    (sqlite
+      .prepare("SELECT COUNT(*) AS count FROM nodes WHERE id = ? AND archived_at IS NULL")
+      .get("node") as { count: number }).count === 1,
+    "restoring a concept should make it active again"
+  );
+  assert(
+    (sqlite
+      .prepare(
+        `SELECT COUNT(*) AS count FROM edges e
+         JOIN nodes source ON source.id = e.source_id
+         JOIN nodes target ON target.id = e.target_id
+         WHERE e.workspace_id = ?
+           AND source.archived_at IS NULL AND target.archived_at IS NULL`
+      )
+      .get("workspace") as { count: number }).count === 1,
+    "restoring a concept should restore its prerequisite connections"
+  );
+  sqlite
+    .prepare(
+      "UPDATE nodes SET archived_at = ? WHERE id = ?"
+    )
+    .run(4000, "node");
+  sqlite
+    .prepare("DELETE FROM nodes WHERE id = ? AND archived_at IS NOT NULL")
+    .run("node");
   const afterCascade = sqlite
     .prepare("SELECT id FROM lesson_examples WHERE node_id = ?")
     .all("node");
@@ -134,9 +296,17 @@ async function run(): Promise<void> {
     edgesAfterCascade.length === 0,
     "node deletion should cascade to incident prerequisite edges"
   );
+  const boardsAfterCascade = sqlite
+    .prepare("SELECT id FROM plugin_boards ORDER BY id")
+    .all() as Array<{ id: string }>;
+  assert(
+    boardsAfterCascade.length === 1 &&
+      boardsAfterCascade[0].id === "workspace-board",
+    "node boards should cascade with their concept while workspace boards remain"
+  );
 
   sqlite.close();
-  console.log("✓ SQLite v7 layout-mode and worked-example migration tests passed!");
+  console.log("✓ SQLite v9 archive, workspace, example, and plugin-board tests passed!");
 }
 
 run().catch((error) => {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, LoaderCircle, Trash2 } from "lucide-react";
+import { AlertTriangle, Archive, LoaderCircle, Trash2 } from "lucide-react";
 
 export interface DeleteImpactItem {
   label: string;
@@ -12,6 +12,7 @@ interface ConfirmDeleteModalProps {
   itemName: string;
   description: ReactNode;
   impactItems?: DeleteImpactItem[];
+  mode?: "archive" | "delete";
   deleteLabel?: string;
   onCancel: () => void;
   onConfirm: () => Promise<void>;
@@ -23,6 +24,7 @@ export function ConfirmDeleteModal({
   itemName,
   description,
   impactItems = [],
+  mode = "delete",
   deleteLabel = "Delete",
   onCancel,
   onConfirm,
@@ -106,8 +108,18 @@ export function ConfirmDeleteModal({
         className="confirm-delete-panel w-full max-w-[420px] rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 text-[var(--text-primary)] shadow-[0_24px_80px_rgba(0,0,0,0.28)] sm:p-6"
       >
         <div className="flex items-start gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-700">
-            <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+          <span
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${
+              mode === "archive"
+                ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                : "bg-rose-100 text-rose-700"
+            }`}
+          >
+            {mode === "archive" ? (
+              <Archive className="h-5 w-5" aria-hidden="true" />
+            ) : (
+              <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+            )}
           </span>
           <div className="min-w-0 pt-0.5">
             <h2
@@ -117,11 +129,11 @@ export function ConfirmDeleteModal({
               {title}
             </h2>
             <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">
-              Permanently delete{" "}
+              {mode === "archive" ? "Move" : "Permanently delete"}{" "}
               <strong className="break-words font-semibold text-[var(--text-primary)]">
                 {itemName}
               </strong>
-              ?
+              {mode === "archive" ? " to Archive?" : "?"}
             </p>
           </div>
         </div>
@@ -165,14 +177,24 @@ export function ConfirmDeleteModal({
             type="button"
             onClick={() => void handleConfirm()}
             disabled={isDeleting}
-            className="inline-flex min-w-[92px] items-center justify-center gap-1.5 rounded-lg bg-rose-700 px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-rose-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70"
+            className={`inline-flex min-w-[92px] items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold text-white transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70 ${
+              mode === "archive"
+                ? "bg-[var(--color-accent-button)] hover:brightness-95 focus-visible:ring-[var(--color-accent)]"
+                : "bg-rose-700 hover:bg-rose-800 focus-visible:ring-rose-400"
+            }`}
           >
             {isDeleting ? (
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            ) : mode === "archive" ? (
+              <Archive className="h-3.5 w-3.5" aria-hidden />
             ) : (
               <Trash2 className="h-3.5 w-3.5" aria-hidden />
             )}
-            {isDeleting ? "Deleting…" : deleteLabel}
+            {isDeleting
+              ? mode === "archive"
+                ? "Archiving…"
+                : "Deleting…"
+              : deleteLabel}
           </button>
         </div>
       </div>

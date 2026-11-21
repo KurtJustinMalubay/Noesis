@@ -64,12 +64,150 @@ export interface CurriculumSourceDocument {
   text: string;
 }
 
+interface CommonsImage {
+  title: string;
+  imageUrl: string;
+  sourceUrl: string;
+  attribution: string;
+}
+
+interface CommonsSearchResult {
+  image: CommonsImage | null;
+  warning: string | null;
+}
+
+async function searchCommonsImage(
+  query: string,
+  signal?: AbortSignal
+): Promise<CommonsImage | null> {
+  const searchUrl = new URL("https://commons.wikimedia.org/w/api.php");
+  searchUrl.search = new URLSearchParams({
+    action: "query",
+    generator: "search",
+    gsrsearch: query,
+    gsrnamespace: "6",
+    gsrlimit: "1",
+    prop: "imageinfo",
+    iiprop: "url|extmetadata",
+    iiurlwidth: "1200",
+    format: "json",
+    origin: "*",
+  }).toString();
+  const controller = new AbortController();
+  const abortSearch = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", abortSearch, { once: true });
+  const timeout = window.setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(searchUrl, {
+      signal: controller.signal,
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new Error(`Wikimedia Commons returned HTTP ${response.status}.`);
+    }
+    const payload: unknown = await response.json();
+    if (!payload || typeof payload !== "object") return null;
+    const queryData = (payload as Record<string, unknown>).query;
+    if (!queryData || typeof queryData !== "object") return null;
+    const pages = (queryData as Record<string, unknown>).pages;
+    if (!pages || typeof pages !== "object") return null;
+    const page = Object.values(pages as Record<string, unknown>).find(
+      (value) => value && typeof value === "object"
+    ) as Record<string, unknown> | undefined;
+    const imageInfo = Array.isArray(page?.imageinfo) ? page.imageinfo[0] : null;
+    if (!imageInfo || typeof imageInfo !== "object") return null;
+    const info = imageInfo as Record<string, unknown>;
+    if (
+      typeof info.thumburl !== "string" ||
+      typeof info.descriptionurl !== "string" ||
+      typeof page?.title !== "string"
+    ) {
+      return null;
+    }
+    const imageUrl = new URL(info.thumburl);
+    const sourceUrl = new URL(info.descriptionurl);
+    if (imageUrl.protocol !== "https:" || sourceUrl.protocol !== "https:") {
+      return null;
+    }
+    const metadata =
+      info.extmetadata && typeof info.extmetadata === "object"
+        ? (info.extmetadata as Record<
+            string,
+            { value?: unknown; shortName?: unknown }
+          >)
+        : {};
+    const creator =
+      typeof metadata.Artist?.value === "string"
+        ? metadata.Artist.value.replace(/<[^>]*>/g, "").trim()
+        : "";
+    const license =
+      typeof metadata.LicenseShortName?.value === "string"
+        ? metadata.LicenseShortName.value.trim()
+        : "";
+    const title = page.title.replace(/^File:/i, "");
+    return {
+      title,
+      imageUrl: imageUrl.toString(),
+      sourceUrl: sourceUrl.toString(),
+      attribution: `${title}${creator ? ` — ${creator}` : ""}${
+        license ? ` (${license})` : ""
+      }`,
+    };
+  } finally {
+    window.clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortSearch);
+  }
+}
+
+async function searchCommonsImageSafely(
+  query: string,
+  signal?: AbortSignal
+): Promise<CommonsSearchResult> {
+  try {
+    return { image: await searchCommonsImage(query, signal), warning: null };
+  } catch {
+    return {
+      image: null,
+      warning: "Online image search was unavailable; generated content has no image.",
+    };
+  }
+}
+
+function insertLessonImage(
+  markdown: string,
+  image: CommonsImage,
+  includeAttribution = false
+): string {
+  const alt = image.title.replace(/[\[\]\r\n]/g, " ").trim();
+  const url = image.imageUrl.replace(/[()]/g, (character) =>
+    character === "(" ? "%28" : "%29"
+  );
+  const attribution = image.attribution.replace(
+    /([\\`*_{}\[\]()#+.!|>~-])/g,
+    "\\$1"
+  );
+  const sourceUrl = image.sourceUrl.replace(/\)/g, "%29");
+  const imageMarkdown = `![${alt}](${url})${
+    includeAttribution
+      ? `\n\n*Image: [${attribution}](<${sourceUrl}>) · Wikimedia Commons*`
+      : ""
+  }`;
+  const headingMatch = markdown.match(/^#{1,2}\s+.+(?:\r?\n|$)/);
+  if (!headingMatch) return `${imageMarkdown}\n\n${markdown}`;
+  const headingEnd = headingMatch[0].length;
+  return `${markdown.slice(0, headingEnd)}\n${imageMarkdown}\n\n${markdown.slice(
+    headingEnd
+  )}`;
+}
+
 export type WorkedExampleTool =
   | "mermaid"
   | "math"
   | "code"
   | "trace-table"
-  | "analogy";
+  | "analogy"
+  | "image";
 
 export async function generateWorkedExample(
   node: GraphNode,
@@ -95,11 +233,19 @@ export async function generateWorkedExample(
     code: "Include a commented code walkthrough and a sample input/output trace.",
     "trace-table": "Include a Markdown state or execution trace table.",
     analogy: "Include a concise real-world analogy and explain where it does and does not apply.",
+    image:
+      "A relevant online Wikimedia Commons illustration will be added when one is available; do not claim details about an image you cannot see.",
   };
   const selectedInstructions = tools.length
     ? tools.map((tool) => toolInstructions[tool]).join("\n")
     : "Choose the most useful worked-example format for this concept.";
-  return streamGeminiText(
+  const imageResultPromise = tools.includes("image")
+    ? searchCommonsImageSafely(
+      `${node.title} ${userPrompt.split(/\s+/).slice(0, 6).join(" ")}`,
+      options.signal
+      )
+    : Promise.resolve({ image: null, warning: null });
+  const generatedExample = await streamGeminiText(
     {
       tier: "synthesis",
       systemInstruction:
@@ -110,6 +256,15 @@ export async function generateWorkedExample(
     },
     options.onChunk ?? (() => {})
   );
+  if (!tools.includes("image")) return generatedExample;
+  const imageResult = await imageResultPromise;
+  if (imageResult.image) {
+    return insertLessonImage(generatedExample, imageResult.image, true);
+  }
+  if (imageResult.warning) {
+    return `${generatedExample}\n\n> ${imageResult.warning}`;
+  }
+  return generatedExample;
 }
 
 export async function summarizeTutorThread(
@@ -214,6 +369,7 @@ export async function generateWorkspaceCurriculum(
       ? `Goal: ${topicPrompt}\nUploaded course document: ${sourceDocument.name}\nDocument text:\n${sourceContext}`
       : `Goal: ${topicPrompt}\nLocal excerpts:\n${vaultContext}`,
     maxOutputTokens: 2048,
+    timeoutMs: 120_000,
     signal,
     jsonSchema: {
       type: "OBJECT",
@@ -315,6 +471,7 @@ export async function generateWorkspaceCurriculum(
     layout_mode: "auto",
     created_at: now,
     updated_at: now,
+    archived_at: null,
   };
 
   onProgress?.({
@@ -481,6 +638,7 @@ export async function hydrateNodeContent(
       )
     )
   );
+  const imageResultPromise = searchCommonsImageSafely(node.title);
 
   const vaultContext =
     vaultHits.length > 0
@@ -490,7 +648,7 @@ export async function hydrateNodeContent(
   const lessonRequest: GeminiRequestOptions = {
     tier: "synthesis",
     systemInstruction:
-      `Teach from first principles. ${lessonDepthInstructions} Use \\frac{numerator}{denominator} for every fraction and never use TeX \\over. Return the complete lesson as raw Markdown only, with clear headings, worked examples, and an optional valid Mermaid diagram in a fenced mermaid block. Do not wrap the lesson in JSON.`,
+      `Teach from first principles. ${lessonDepthInstructions} Use \\frac{numerator}{denominator} for every fraction and never use TeX \\over. Return the complete lesson as raw Markdown only, with clear headings, worked examples, and one valid Mermaid flowchart in a fenced mermaid block. Use simple alphanumeric node IDs and quote node labels. Do not wrap the lesson in JSON.`,
     userPrompt: `Course: ${workspaceTitle}\nTopic Node: ${node.title}\nScope: ${node.summary_hint}\n\nLocal Vault Context:\n${vaultContext}`,
     maxOutputTokens: lessonTokenBudgets[lessonDepth],
   };
@@ -502,10 +660,42 @@ export async function hydrateNodeContent(
   const mermaidMatch = generatedLesson.match(
     /```mermaid\s*\r?\n([\s\S]*?)```/i
   );
-  const mermaidDiagram = mermaidMatch?.[1]?.trim() ?? "";
-  const lessonMarkdown = mermaidMatch
+  let mermaidDiagram = mermaidMatch?.[1]?.trim() ?? "";
+  let lessonMarkdown = mermaidMatch
     ? generatedLesson.replace(mermaidMatch[0], "").trim()
     : generatedLesson;
+  if (!mermaidDiagram) {
+    try {
+      const diagramResponse = await generateGeminiText({
+        tier: "fast",
+        temperature: 0.1,
+        maxOutputTokens: 400,
+        timeoutMs: 45_000,
+        systemInstruction:
+          "Return only a valid Mermaid flowchart using flowchart TD. Use simple alphanumeric node IDs, quote every node label, and connect 3-6 key ideas. No markdown fences or prose.",
+        userPrompt: `Create a concept diagram for "${node.title}". Scope: ${node.summary_hint}\nLesson:\n${lessonMarkdown.slice(0, 2500)}`,
+      });
+      mermaidDiagram = diagramResponse
+        .replace(/^```(?:mermaid)?\s*/i, "")
+        .replace(/```$/g, "")
+        .trim();
+    } catch (error) {
+      citations.push(
+        `Concept diagram generation was unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+  const imageResult = await imageResultPromise;
+  if (imageResult.image) {
+    lessonMarkdown = insertLessonImage(lessonMarkdown, imageResult.image);
+    citations.push(
+      `Illustration: ${imageResult.image.attribution} — ${imageResult.image.sourceUrl}`
+    );
+  } else if (imageResult.warning) {
+    citations.push(imageResult.warning);
+  }
   const flashcardSchema: Record<string, unknown> = {
     type: "ARRAY",
     items: {
@@ -598,6 +788,8 @@ export async function askGroundedTutor(
       content: string;
       attached_lesson_title?: string | null;
     }>;
+    askFollowUpQuestions?: boolean;
+    preferConciseReplies?: boolean;
   } = {}
 ): Promise<{
   reply: string;
@@ -642,7 +834,15 @@ export async function askGroundedTutor(
 
   const reply = await streamGeminiText({
     tier: "fast",
-    systemInstruction: `${payload.systemInstruction}\nFor mathematical fractions, use \\frac{numerator}{denominator}; never use TeX \\over.`,
+    systemInstruction: `${payload.systemInstruction}\nFor mathematical fractions, use \\frac{numerator}{denominator}; never use TeX \\over.${
+      options.askFollowUpQuestions === false
+        ? "\nDo not end replies with follow-up questions or invitations to continue unless clarification is essential."
+        : ""
+    }${
+      options.preferConciseReplies
+        ? "\nPrefer concise, direct replies and avoid unnecessary detail."
+        : ""
+    }`,
     userPrompt: payload.userPrompt,
     maxOutputTokens: outputTokenBudget,
     signal: options.signal,

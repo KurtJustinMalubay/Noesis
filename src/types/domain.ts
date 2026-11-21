@@ -8,6 +8,7 @@ export interface Workspace {
   layout_mode: CanvasLayoutMode;
   created_at: number;
   updated_at: number;
+  archived_at: number | null;
 }
 
 export interface GraphNode {
@@ -26,6 +27,7 @@ export interface GraphNode {
   mermaid_diagram: string | null;
   source_citations: string | null; // JSON array string
   updated_at: number;
+  archived_at: number | null;
 }
 
 export interface GraphEdge {

@@ -342,7 +342,8 @@ function getLocalQuizBatches(
 export async function generateNodeQuiz(
   node: GraphNode,
   config: QuizGenerationConfig,
-  onProgress?: (progress: QuizBatchProgress) => void
+  onProgress?: (progress: QuizBatchProgress) => void,
+  signal?: AbortSignal
 ): Promise<QuizQuestion[]> {
   if (config.formats.length === 0) {
     throw new Error("Select at least one question format.");
@@ -374,15 +375,22 @@ export async function generateNodeQuiz(
     "Return one JSON object with a questions array, never a root array or markdown. Generate lesson-grounded questions in the exact requested difficulty quotas and order Easy, then Medium, then Hard. Label each question easy, medium, or hard. Easy is foundational recall/direct single-step application; Medium is conceptual reasoning/multi-step problem solving; Hard is edge cases, synthesis, proofs, or complex debugging. Every question must include every schema field. For MCQ, provide exactly four distinct options and answerIndex 0-3. For open-ended, provide rubric and referenceAnswer. For coding, provide rubric, referenceAnswer, starterCode, testCases, and language. Use empty strings and [] for fields not used by that question type; use answerIndex 0 when it is not an MCQ.";
   let questions: QuizQuestion[] = [];
   let lastError = "The generated quiz did not contain valid questions.";
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw new DOMException("Quiz generation stopped.", "AbortError");
+    }
+  };
 
   if (loadAiSettings().provider === "openai-compatible") {
     const batches = getLocalQuizBatches(expectedCounts);
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+      throwIfAborted();
       const batchCounts = batches[batchIndex];
       let batchQuestions: QuizQuestion[] = [];
       onProgress?.({ completed: batchIndex, total: batches.length });
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
+        throwIfAborted();
         const missing = getMissingQuestionCounts(batchQuestions, batchCounts);
         if (missing.size === 0) break;
         const existingQuestions = [...questions, ...batchQuestions]
@@ -405,6 +413,7 @@ export async function generateNodeQuiz(
             systemInstruction,
             userPrompt: batchPrompt,
             jsonSchema: QUESTION_SCHEMA,
+            signal,
           });
           const additions = selectQuestionsForCounts(
             normalizeQuizQuestions(raw, node.id, {
@@ -430,6 +439,7 @@ export async function generateNodeQuiz(
             config.language
           );
         } catch (error) {
+          if (signal?.aborted) throw error;
           lastError = error instanceof Error ? error.message : String(error);
           if (attempt === 1) {
             throw new Error(
@@ -456,6 +466,7 @@ export async function generateNodeQuiz(
   }
 
   for (let attempt = 0; attempt < 2 && questions.length === 0; attempt += 1) {
+    throwIfAborted();
     try {
       const raw = await generateGeminiJson<unknown>({
         tier: "fast",
@@ -467,6 +478,7 @@ export async function generateNodeQuiz(
             ? prompt
             : `${prompt}\n\nThe previous response could not be used: ${lastError} Return one complete JSON object with exactly ${config.count} valid questions and the requested format counts.`,
         jsonSchema: QUESTION_SCHEMA,
+        signal,
       });
       questions = selectQuestionsForCounts(
         normalizeQuizQuestions(raw, node.id, {
@@ -480,6 +492,7 @@ export async function generateNodeQuiz(
         throw new Error("The model returned no valid requested question formats.");
       }
     } catch (error) {
+      if (signal?.aborted) throw error;
       lastError = error instanceof Error ? error.message : String(error);
       if (attempt === 1) {
         throw new Error(
@@ -490,6 +503,7 @@ export async function generateNodeQuiz(
   }
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    throwIfAborted();
     const missing = getMissingQuestionCounts(questions, expectedCounts);
     if (missing.size === 0) {
       onProgress?.({ completed: 1, total: 1 });
@@ -515,6 +529,7 @@ export async function generateNodeQuiz(
         systemInstruction,
         userPrompt: completionPrompt,
         jsonSchema: QUESTION_SCHEMA,
+        signal,
       });
       const additions = selectQuestionsForCounts(
         normalizeQuizQuestions(raw, node.id, {
@@ -545,6 +560,7 @@ export async function generateNodeQuiz(
         lastError = `The model still omitted: ${describeMissingQuestions(remaining)}.`;
       }
     } catch (error) {
+      if (signal?.aborted) throw error;
       lastError = error instanceof Error ? error.message : String(error);
     }
   }

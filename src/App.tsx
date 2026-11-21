@@ -1,7 +1,24 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { Bot, Maximize2, Minimize2 } from "lucide-react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import {
+  BookOpen,
+  Bot,
+  Maximize2,
+  Minimize2,
+  Moon,
+  Network,
+  Shapes,
+  Sun,
+} from "lucide-react";
 import { getDb } from "./db/client";
 import { useNoesisStore } from "./store/useNoesisStore";
+import { usePluginStore } from "./plugins/pluginStore";
+import { EXCALIDRAW_PLUGIN_ID } from "./plugins/registry";
 import { DagCanvas } from "./components/DagCanvas";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { AppGuide } from "./components/AppGuide";
@@ -10,6 +27,10 @@ import { BootSplash } from "./components/BootSplash";
 import { UpdateIndicator } from "./components/UpdateIndicator";
 import type { GraphNode } from "./types/domain";
 import { getWorkspaceDeletionSummary } from "./db/repositories/workspaceRepo";
+import {
+  createPluginBoard,
+  listPluginBoards,
+} from "./db/repositories/pluginBoardRepo";
 import {
   setNativeFullscreen,
   toggleNativeFullscreen,
@@ -30,6 +51,11 @@ const Modals = lazy(() =>
     default: module.Modals,
   }))
 );
+const ExcalidrawWorkspace = lazy(() =>
+  import("./components/ExcalidrawWorkspace").then((module) => ({
+    default: module.ExcalidrawWorkspace,
+  }))
+);
 
 export default function App() {
   const [dbReady, setDbReady] = useState(false);
@@ -37,6 +63,9 @@ export default function App() {
   const [hasOpenedTutor, setHasOpenedTutor] = useState(false);
   const [tutorPanelReady, setTutorPanelReady] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mainView, setMainView] = useState<"graph" | "excalidraw">("graph");
+  const [isExcalidrawFullscreen, setIsExcalidrawFullscreen] = useState(false);
+  const [isExcalidrawLessonOpen, setIsExcalidrawLessonOpen] = useState(false);
   const [sidebarMotion, setSidebarMotion] = useState<
     "collapse" | "expand" | null
   >(null);
@@ -49,11 +78,20 @@ export default function App() {
   const launchFullscreenApplied = useRef(false);
   const lastSelectedNodeRef = useRef<GraphNode | null>(null);
   const store = useNoesisStore();
+  const activeWorkspaceIdRef = useRef(store.activeWorkspaceId);
+  const enabledPluginIds = usePluginStore((state) => state.enabledPluginIds);
+  const excalidrawEnabled = enabledPluginIds.includes(EXCALIDRAW_PLUGIN_ID);
   const toggleSidebar = () => {
     const nextCollapsed = !sidebarCollapsedRef.current;
     sidebarCollapsedRef.current = nextCollapsed;
     setSidebarCollapsed(nextCollapsed);
-    setSidebarMotion(nextCollapsed ? "collapse" : "expand");
+    setSidebarMotion(
+      mainView === "excalidraw"
+        ? null
+        : nextCollapsed
+          ? "collapse"
+          : "expand"
+    );
   };
 
   useEffect(() => {
@@ -119,6 +157,31 @@ export default function App() {
   }, [store.activeModal]);
 
   useEffect(() => {
+    if (!excalidrawEnabled) setMainView("graph");
+  }, [excalidrawEnabled]);
+
+  useEffect(() => {
+    if (activeWorkspaceIdRef.current === store.activeWorkspaceId) return;
+    activeWorkspaceIdRef.current = store.activeWorkspaceId;
+    setMainView("graph");
+    setIsExcalidrawFullscreen(false);
+  }, [store.activeWorkspaceId]);
+
+  useEffect(() => {
+    if (mainView !== "excalidraw") setIsExcalidrawFullscreen(false);
+  }, [mainView]);
+
+  useEffect(() => {
+    if (mainView === "excalidraw") setSidebarMotion(null);
+  }, [mainView]);
+
+  useEffect(() => {
+    if (mainView === "excalidraw") {
+      setIsExcalidrawLessonOpen(Boolean(store.selectedNodeId));
+    }
+  }, [mainView, store.selectedNodeId]);
+
+  useEffect(() => {
     if (isGuideOpen) setHasOpenedGuide(true);
   }, [isGuideOpen]);
 
@@ -143,6 +206,102 @@ export default function App() {
       .catch((error) =>
         store.showToast(error instanceof Error ? error.message : String(error))
       );
+  };
+  const toggleAppearanceMode = () => {
+    const appearanceMode =
+      store.preferences.appearanceMode === "dark" ? "light" : "dark";
+    void store
+      .setPreferences({
+        ...store.preferences,
+        appearanceMode,
+        theme:
+          appearanceMode === "dark"
+            ? store.preferences.lastDarkThemeId
+            : store.preferences.lastLightThemeId,
+      })
+      .catch((error) =>
+        store.showToast(error instanceof Error ? error.message : String(error))
+      );
+  };
+  const openLessonVisualBoard = async (node: GraphNode) => {
+    const boards = await listPluginBoards(
+      node.workspace_id,
+      EXCALIDRAW_PLUGIN_ID
+    );
+    const existingBoard = boards.find((board) => board.node_id === node.id);
+    if (!existingBoard) {
+      const { convertToExcalidrawElements } =
+        await import("@excalidraw/excalidraw");
+      type SceneElements = ReturnType<typeof convertToExcalidrawElements>;
+      const createTextStarter = () =>
+        convertToExcalidrawElements([
+          {
+            type: "text",
+            x: 120,
+            y: 100,
+            text: node.title,
+            fontSize: 32,
+          },
+          {
+            type: "text",
+            x: 120,
+            y: 170,
+            text: node.summary_hint || "Add a visual explanation for this lesson.",
+            fontSize: 18,
+          },
+        ]);
+      let elements: SceneElements;
+      let files: Record<string, unknown> = {};
+      let conversionError: string | null = null;
+      const mermaidDefinition = node.mermaid_diagram
+        ?.replace(/^```mermaid\s*/i, "")
+        .replace(/```$/g, "")
+        .trim();
+
+      if (mermaidDefinition) {
+        try {
+          const { parseMermaidToExcalidraw } = await import(
+            "@excalidraw/mermaid-to-excalidraw"
+          );
+          const converted = await parseMermaidToExcalidraw(mermaidDefinition);
+          elements = convertToExcalidrawElements(converted.elements);
+          files = converted.files ?? {};
+        } catch (error) {
+          elements = createTextStarter();
+          conversionError =
+            error instanceof Error ? error.message : String(error);
+        }
+      } else {
+        elements = createTextStarter();
+      }
+
+      const createdAt = Date.now();
+      await createPluginBoard({
+        id: crypto.randomUUID(),
+        workspace_id: node.workspace_id,
+        plugin_id: EXCALIDRAW_PLUGIN_ID,
+        node_id: node.id,
+        title: `${node.title} visual`,
+        scene_json: JSON.stringify({
+          elements,
+          appState: {},
+          files,
+        }),
+        created_at: createdAt,
+      });
+      store.showToast(
+        conversionError
+          ? `Diagram conversion failed; created a text-based board instead: ${conversionError}`
+          : mermaidDefinition
+            ? "Created an editable board from the lesson diagram."
+            : "Created a visual starter board from the lesson."
+      );
+    } else {
+      store.showToast("Opened this lesson's visual board.");
+    }
+
+    setIsExcalidrawFullscreen(false);
+    setMainView("excalidraw");
   };
 
   const activeWorkspace =
@@ -178,13 +337,23 @@ export default function App() {
             <WorkspaceSidebar
               collapsed={sidebarCollapsed}
               workspaces={store.workspaces}
+              archivedWorkspaces={store.archivedWorkspaces}
+              workspaceProgress={store.workspaceProgress}
               activeWorkspaceId={store.activeWorkspaceId}
               nodes={store.nodes}
               dueCount={store.dueCards.length}
               documentCount={store.documents.length}
               onToggle={toggleSidebar}
-              onSelect={(id) => store.selectWorkspace(id)}
-              onDelete={(id) => store.removeWorkspace(id)}
+              onSelect={(id) => {
+                if (id !== store.activeWorkspaceId) {
+                  setMainView("graph");
+                  setIsExcalidrawFullscreen(false);
+                }
+                return store.selectWorkspace(id);
+              }}
+              onArchive={store.archiveWorkspace}
+              onRestore={store.restoreWorkspace}
+              onPermanentlyDelete={store.permanentlyDeleteWorkspace}
               onGetDeleteSummary={getWorkspaceDeletionSummary}
               onNewDag={() => store.setActiveModal("new_workspace")}
               onVault={() => store.setActiveModal("vault")}
@@ -196,127 +365,268 @@ export default function App() {
 
             <div
               className="flex min-w-0 flex-1 flex-col"
-              data-sidebar-motion={sidebarMotion ?? undefined}
+              data-sidebar-motion={
+                mainView === "excalidraw"
+                  ? undefined
+                  : sidebarMotion ?? undefined
+              }
+              onAnimationEnd={(event) => {
+                const motion = event.currentTarget.dataset.sidebarMotion;
+                if (
+                  event.target === event.currentTarget &&
+                  motion &&
+                  event.animationName === `sidebar-shift-${motion}`
+                ) {
+                  setSidebarMotion(null);
+                }
+              }}
             >
         <header className="app-topbar z-10 flex h-14 shrink-0 items-center justify-between border-b border-[var(--color-border)] px-5">
-          <div className="flex min-w-0 items-center gap-4">
-            <div className="min-w-0">
-              <h1 className="truncate text-[13px] font-semibold">
-                {activeWorkspace?.title ?? "Learning studio"}
-              </h1>
-              {activeWorkspace && (
-                <p className="text-[10px] text-[var(--color-muted)]">
-                  {masteredCount} of {store.nodes.length} mastered
-                </p>
+            <div className="flex min-w-0 items-center gap-4">
+              <div className="min-w-0">
+                <h1 className="truncate text-[13px] font-semibold">
+                  {activeWorkspace?.title ?? "Learning studio"}
+                </h1>
+                {activeWorkspace && (
+                  <p className="text-[10px] text-[var(--color-muted)]">
+                    {masteredCount} of {store.nodes.length} mastered
+                  </p>
+                )}
+              </div>
+              {store.nodes.length > 0 && (
+                <div className="hidden h-1.5 w-24 overflow-hidden rounded-full bg-[var(--color-border)] sm:block">
+                  <div
+                    className="h-full origin-left rounded-full bg-[var(--color-success)] transition-transform duration-300 ease-[var(--ease-spring)]"
+                    style={{
+                      width: "100%",
+                      transform: `scaleX(${masteredCount / store.nodes.length})`,
+                    }}
+                  />
+                </div>
+              )}
+              {excalidrawEnabled && (
+                <nav
+                  aria-label="Workspace views"
+                  className="flex shrink-0 items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-1"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setMainView("graph")}
+                    aria-pressed={mainView === "graph"}
+                    className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
+                      mainView === "graph"
+                        ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                        : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+                    }`}
+                  >
+                    <Network className="h-3.5 w-3.5" />
+                    Graph
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMainView("excalidraw")}
+                    aria-pressed={mainView === "excalidraw"}
+                    className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
+                      mainView === "excalidraw"
+                        ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                        : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+                    }`}
+                  >
+                    <Shapes className="h-3.5 w-3.5" />
+                    Excalidraw
+                  </button>
+                  {mainView === "excalidraw" && lessonNode && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setIsExcalidrawLessonOpen((open) => !open)
+                      }
+                      aria-pressed={isExcalidrawLessonOpen}
+                      className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
+                        isExcalidrawLessonOpen
+                          ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                          : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+                      }`}
+                    >
+                      <BookOpen className="h-3.5 w-3.5" />
+                      Lesson
+                    </button>
+                  )}
+                  {mainView === "excalidraw" && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setIsExcalidrawFullscreen((fullscreen) => !fullscreen)
+                      }
+                      aria-pressed={isExcalidrawFullscreen}
+                      className="rounded-md px-2.5 py-1.5 text-[10px] font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                    >
+                      {isExcalidrawFullscreen
+                        ? "Restore canvas"
+                        : "Expand canvas"}
+                    </button>
+                  )}
+                </nav>
               )}
             </div>
-            {store.nodes.length > 0 && (
-              <div className="hidden h-1.5 w-24 overflow-hidden rounded-full bg-[var(--color-border)] sm:block">
-                <div
-                  className="h-full origin-left rounded-full bg-[var(--color-success)] transition-transform duration-300 ease-[var(--ease-spring)]"
-                  style={{
-                    width: "100%",
-                    transform: `scaleX(${masteredCount / store.nodes.length})`,
-                  }}
-                />
-              </div>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <UpdateIndicator onToast={store.showToast} />
-            <button
-              type="button"
-              data-guide="tutor"
-              onClick={() => {
-                setHasOpenedTutor(true);
-                store.setTutorOpen(!store.isTutorOpen);
-              }}
-              className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-[11px] font-semibold transition ${
-                store.isTutorOpen
-                  ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-                  : "border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] hover:bg-[var(--color-hover)]"
-              }`}
-            >
-              <Bot className="h-3.5 w-3.5" />
-              Tutor
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                void toggleNativeFullscreen()
-                  .then(setIsFullscreen)
-                  .catch((error) =>
-                    store.showToast(
-                      error instanceof Error ? error.message : String(error)
+            <div className="flex items-center gap-2">
+              <UpdateIndicator onToast={store.showToast} />
+              <button
+                type="button"
+                onClick={toggleAppearanceMode}
+                className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-2 text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                aria-label={
+                  store.preferences.appearanceMode === "dark"
+                    ? "Switch to light mode"
+                    : "Switch to dark mode"
+                }
+                title={
+                  store.preferences.appearanceMode === "dark"
+                    ? "Switch to light mode"
+                    : "Switch to dark mode"
+                }
+              >
+                {store.preferences.appearanceMode === "dark" ? (
+                  <Sun className="h-3.5 w-3.5" />
+                ) : (
+                  <Moon className="h-3.5 w-3.5" />
+                )}
+              </button>
+              <button
+                type="button"
+                data-guide="tutor"
+                onClick={() => {
+                  setHasOpenedTutor(true);
+                  store.setTutorOpen(!store.isTutorOpen);
+                }}
+                className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-[11px] font-semibold transition ${
+                  store.isTutorOpen
+                    ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                    : "border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] hover:bg-[var(--color-hover)]"
+                }`}
+              >
+                <Bot className="h-3.5 w-3.5" />
+                Tutor
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void toggleNativeFullscreen()
+                    .then(setIsFullscreen)
+                    .catch((error) =>
+                      store.showToast(
+                        error instanceof Error ? error.message : String(error)
+                      )
                     )
-                  )
-              }
-              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-2 text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
-              aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-              title={isFullscreen ? "Exit fullscreen (F11)" : "Fullscreen (F11)"}
-            >
-              {isFullscreen ? (
-                <Minimize2 className="h-3.5 w-3.5" />
-              ) : (
-                <Maximize2 className="h-3.5 w-3.5" />
-              )}
-            </button>
-          </div>
+                }
+                className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-2 text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                title={
+                  isFullscreen ? "Exit fullscreen (F11)" : "Fullscreen (F11)"
+                }
+              >
+                {isFullscreen ? (
+                  <Minimize2 className="h-3.5 w-3.5" />
+                ) : (
+                  <Maximize2 className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
         </header>
 
         <main className="relative flex min-h-0 flex-1 overflow-x-hidden overflow-y-hidden">
-          {store.nodes.length === 0 ? (
-            <div
-              data-guide="canvas"
-              className="flex flex-1 flex-col items-center justify-center p-8 text-center"
-            >
-              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--color-muted)]">
-                Learning studio
-              </p>
-              <h2 className="mt-3 text-xl font-semibold tracking-tight">
-                No curriculum yet
-              </h2>
-              <div className="mt-5 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => store.setActiveModal("new_workspace")}
-                  className="rounded-lg bg-[var(--color-accent-button)] px-4 py-2.5 text-xs font-semibold text-white transition hover:brightness-95"
+          <div
+            key={mainView}
+            className={`flex h-full min-h-0 min-w-0 flex-1 ${
+              mainView === "excalidraw" ? "" : "workspace-view-enter"
+            }`}
+          >
+            {mainView === "excalidraw" ? (
+              activeWorkspace ? (
+                <Suspense
+                  fallback={
+                    <div className="flex flex-1 items-center justify-center text-xs text-[var(--color-muted)]">
+                      Loading Excalidraw…
+                    </div>
+                  }
                 >
-                  New DAG
-                </button>
-                <button
-                  type="button"
-                  onClick={() => store.setActiveModal("vault")}
-                  className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2.5 text-xs font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                  <ExcalidrawWorkspace
+                    workspaceId={activeWorkspace.id}
+                    selectedNode={selectedNode}
+                    nodes={store.nodes}
+                    appearanceMode={store.preferences.appearanceMode}
+                    isFullscreen={isExcalidrawFullscreen}
+                    onSelectNode={(nodeId) => store.selectNode(nodeId)}
+                    onToast={store.showToast}
+                  />
+                </Suspense>
+              ) : (
+                <div className="flex flex-1 items-center justify-center p-8 text-center">
+                  <p className="max-w-sm text-xs leading-5 text-[var(--color-muted)]">
+                    Select or create a workspace before opening Excalidraw boards.
+                  </p>
+                </div>
+              )
+            ) : (
+              store.nodes.length === 0 ? (
+                <div
+                  data-guide="canvas"
+                  className="flex flex-1 flex-col items-center justify-center p-8 text-center"
                 >
-                  Add notes
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div data-guide="canvas" className="min-w-0 flex-1">
-              <DagCanvas
-                nodes={store.nodes}
-                edges={store.edges}
-                layoutMode={activeWorkspace?.layout_mode ?? "auto"}
-                selectedNodeId={store.selectedNodeId}
-                showDots={store.preferences.showCanvasDots}
-                edgeRouting={store.preferences.edgeRouting}
-                nodeDensity={store.preferences.nodeDensity}
-                onSelectNode={(id) => store.selectNode(id)}
-                quizNodeIds={store.quizNodeIds}
-                onSetLayoutMode={store.setCanvasLayoutMode}
-                onMoveNode={store.moveGraphNode}
-                onRealignGrid={store.realignGraphGrid}
-                onAddNode={store.addConceptNode}
-                onEditNode={store.editConceptNode}
-                onDeleteNode={store.removeConceptNode}
-                onConnectNodes={store.connectConceptNodes}
-                onDisconnectNodes={store.disconnectConceptNodes}
-                onToast={store.showToast}
-              />
-            </div>
-          )}
+                  <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--color-muted)]">
+                    Learning studio
+                  </p>
+                  <h2 className="mt-3 text-xl font-semibold tracking-tight">
+                    No curriculum yet
+                  </h2>
+                  <div className="mt-5 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => store.setActiveModal("new_workspace")}
+                      className="rounded-lg bg-[var(--color-accent-button)] px-4 py-2.5 text-xs font-semibold text-white transition hover:brightness-95"
+                    >
+                      New DAG
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => store.setActiveModal("vault")}
+                      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2.5 text-xs font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                    >
+                      Add notes
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div data-guide="canvas" className="min-w-0 flex-1">
+                  <DagCanvas
+                    workspaceId={activeWorkspace?.id ?? null}
+                    nodes={store.nodes}
+                    edges={store.edges}
+                    layoutMode={activeWorkspace?.layout_mode ?? "auto"}
+                    selectedNodeId={store.selectedNodeId}
+                    showDots={store.preferences.showCanvasDots}
+                    edgeRouting={store.preferences.edgeRouting}
+                    nodeDensity={store.preferences.nodeDensity}
+                    onSelectNode={(id) => store.selectNode(id)}
+                    quizNodeIds={store.quizNodeIds}
+                    onSetLayoutMode={store.setCanvasLayoutMode}
+                    onMoveNode={store.moveGraphNode}
+                    onRealignGrid={store.realignGraphGrid}
+                    onAddNode={store.addConceptNode}
+                    onEditNode={store.editConceptNode}
+                    onArchiveNode={store.archiveConceptNode}
+                    onRestoreArchivedNode={store.restoreArchivedConceptNode}
+                    onPermanentlyDeleteArchivedNode={
+                      store.permanentlyDeleteArchivedConceptNode
+                    }
+                    onConnectNodes={store.connectConceptNodes}
+                    onDisconnectNodes={store.disconnectConceptNodes}
+                    onToast={store.showToast}
+                  />
+                </div>
+              )
+            )}
+          </div>
 
           <div
             className="right-drawer-track pointer-events-none absolute inset-0 z-20 overflow-hidden"
@@ -327,7 +637,11 @@ export default function App() {
                 <LessonReader
                   node={lessonNode}
                   theme={store.preferences.theme}
-                  isOpen={Boolean(selectedNode)}
+                  isOpen={
+                    mainView === "graph"
+                      ? Boolean(selectedNode)
+                      : isExcalidrawLessonOpen
+                  }
                   companionOpen={store.isTutorOpen && tutorPanelReady}
                   isHydrating={store.hydratingNodeIds.has(lessonNode.id)}
                   hydrationError={
@@ -337,7 +651,13 @@ export default function App() {
                   isQuizAvailabilityLoaded={store.checkedQuizNodeIds.has(
                     lessonNode.id
                   )}
-                  onClose={() => store.selectNode(null)}
+                  onClose={() => {
+                    if (mainView === "graph") {
+                      void store.selectNode(null);
+                    } else {
+                      setIsExcalidrawLessonOpen(false);
+                    }
+                  }}
                   onRetryHydration={() =>
                     void store.selectNode(lessonNode.id)
                   }
@@ -346,7 +666,12 @@ export default function App() {
                       store.setActiveModal("completion");
                     }
                   }}
-                  onStartDiagnostic={(id) => store.openDiagnosticForNode(id)}
+                  onStartDiagnostic={(id) =>
+                    store.openDiagnosticForNode(id)
+                  }
+                  onOpenVisualBoard={
+                    excalidrawEnabled ? openLessonVisualBoard : undefined
+                  }
                   onToast={(message) => store.showToast(message)}
                 />
               </Suspense>
@@ -356,8 +681,13 @@ export default function App() {
               <Suspense fallback={null}>
                 <TutorDrawer
                   isOpen={store.isTutorOpen}
-                  activeLesson={selectedNode}
-                  activeNodeTitle={selectedNode?.title}
+                  activeLesson={
+                    mainView === "excalidraw" ? lessonNode : selectedNode
+                  }
+                  activeNodeTitle={
+                    (mainView === "excalidraw" ? lessonNode : selectedNode)
+                      ?.title
+                  }
                   workspaceId={store.activeWorkspaceId}
                   onPanelReady={() => setTutorPanelReady(true)}
                   onToast={store.showToast}
@@ -400,6 +730,7 @@ export default function App() {
             diagnosticDraft={store.diagnosticDraft}
             diagnosticScore={store.diagnosticScore}
             isLoadingDiagnostic={store.isLoadingDiagnostic}
+            isGeneratingDiagnostic={Boolean(store.diagnosticAbortController)}
             diagnosticProgress={store.diagnosticProgress}
             isSubmittingDiagnostic={store.isSubmittingDiagnostic}
             isConfiguringDiagnostic={store.isConfiguringDiagnostic}
@@ -418,6 +749,9 @@ export default function App() {
             }
             onCancelDiagnosticConfiguration={() =>
               store.cancelDiagnosticConfiguration()
+            }
+            onCancelDiagnosticGeneration={() =>
+              store.cancelDiagnosticGeneration()
             }
             onGenerateDiagnostic={(nodeId, config) =>
               store.generateConfiguredDiagnostic(nodeId, config)

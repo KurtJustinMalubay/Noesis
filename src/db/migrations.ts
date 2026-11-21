@@ -1,6 +1,6 @@
 import type Database from "@tauri-apps/plugin-sql";
 
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 9;
 
 export async function runMigrations(db: Database): Promise<void> {
   await db.execute("PRAGMA journal_mode = WAL;");
@@ -25,7 +25,8 @@ export async function runMigrations(db: Database): Promise<void> {
         title TEXT NOT NULL,
         root_domain TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        archived_at INTEGER
       );
     `);
     const workspaceColumns = await db.select<Array<{ name: string }>>(
@@ -34,6 +35,11 @@ export async function runMigrations(db: Database): Promise<void> {
     if (!workspaceColumns.some((column) => column.name === "layout_mode")) {
       await db.execute(
         "ALTER TABLE workspaces ADD COLUMN layout_mode TEXT NOT NULL DEFAULT 'auto';"
+      );
+    }
+    if (!workspaceColumns.some((column) => column.name === "archived_at")) {
+      await db.execute(
+        "ALTER TABLE workspaces ADD COLUMN archived_at INTEGER;"
       );
     }
 
@@ -53,12 +59,22 @@ export async function runMigrations(db: Database): Promise<void> {
         lesson_markdown TEXT,
         mermaid_diagram TEXT,
         source_citations TEXT,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        archived_at INTEGER
       );
     `);
 
+    const nodeColumns = await db.select<Array<{ name: string }>>(
+      "PRAGMA table_info(nodes);"
+    );
+    if (!nodeColumns.some((column) => column.name === "archived_at")) {
+      await db.execute("ALTER TABLE nodes ADD COLUMN archived_at INTEGER;");
+    }
     await db.execute(
       "CREATE INDEX IF NOT EXISTS idx_nodes_workspace ON nodes(workspace_id);"
+    );
+    await db.execute(
+      "CREATE INDEX IF NOT EXISTS idx_nodes_workspace_archived ON nodes(workspace_id, archived_at);"
     );
     await db.execute(
       "CREATE INDEX IF NOT EXISTS idx_nodes_workspace_layer ON nodes(workspace_id, layer_index);"
@@ -238,6 +254,23 @@ export async function runMigrations(db: Database): Promise<void> {
     `);
     await db.execute(
       "CREATE INDEX IF NOT EXISTS idx_lesson_examples_node ON lesson_examples(node_id, created_at);"
+    );
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS plugin_boards (
+        id TEXT PRIMARY KEY NOT NULL,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        plugin_id TEXT NOT NULL,
+        node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        scene_json TEXT NOT NULL DEFAULT '{"elements":[],"appState":{},"files":{}}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_opened_at INTEGER NOT NULL
+      );
+    `);
+    await db.execute(
+      "CREATE INDEX IF NOT EXISTS idx_plugin_boards_scope ON plugin_boards(workspace_id, plugin_id, node_id);"
     );
 
     await db.execute(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION};`);

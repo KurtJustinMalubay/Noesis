@@ -80,11 +80,18 @@ export async function getWorkspaceGraph(workspaceId: string): Promise<{
   const db = await getDb();
   const [nodes, edges] = await Promise.all([
     db.select<GraphNode[]>(
-      "SELECT * FROM nodes WHERE workspace_id = $1 ORDER BY layer_index ASC, pos_x ASC",
+      `SELECT * FROM nodes
+       WHERE workspace_id = $1 AND archived_at IS NULL
+       ORDER BY layer_index ASC, pos_x ASC`,
       [workspaceId]
     ),
     db.select<GraphEdge[]>(
-      "SELECT * FROM edges WHERE workspace_id = $1",
+      `SELECT e.* FROM edges e
+       JOIN nodes source ON source.id = e.source_id
+       JOIN nodes target ON target.id = e.target_id
+       WHERE e.workspace_id = $1
+         AND source.archived_at IS NULL
+         AND target.archived_at IS NULL`,
       [workspaceId]
     ),
   ]);
@@ -217,11 +224,69 @@ export async function updateConceptNode(
   );
 }
 
-export async function deleteConceptNode(nodeId: string): Promise<void> {
+export async function archiveConceptNode(
+  workspaceId: string,
+  nodeId: string,
+  archivedAt = Date.now()
+): Promise<void> {
   const db = await getDb();
-  await serializeDbWrite(() =>
-    db.execute("DELETE FROM nodes WHERE id = $1", [nodeId])
+  const result = await serializeDbWrite(() =>
+    db.execute(
+      `UPDATE nodes
+       SET archived_at = $1, updated_at = $1
+       WHERE workspace_id = $2 AND id = $3 AND archived_at IS NULL`,
+      [archivedAt, workspaceId, nodeId]
+    )
   );
+  if (result.rowsAffected === 0) {
+    throw new Error("The concept could not be moved to Archive.");
+  }
+}
+
+export async function listArchivedConceptNodes(
+  workspaceId: string
+): Promise<GraphNode[]> {
+  const db = await getDb();
+  return db.select<GraphNode[]>(
+    `SELECT * FROM nodes
+     WHERE workspace_id = $1 AND archived_at IS NOT NULL
+     ORDER BY archived_at DESC, title COLLATE NOCASE ASC`,
+    [workspaceId]
+  );
+}
+
+export async function restoreArchivedConceptNode(
+  workspaceId: string,
+  nodeId: string
+): Promise<void> {
+  const db = await getDb();
+  const result = await serializeDbWrite(() =>
+    db.execute(
+      `UPDATE nodes
+       SET archived_at = NULL, updated_at = $1
+       WHERE workspace_id = $2 AND id = $3 AND archived_at IS NOT NULL`,
+      [Date.now(), workspaceId, nodeId]
+    )
+  );
+  if (result.rowsAffected === 0) {
+    throw new Error("The archived concept could not be restored.");
+  }
+}
+
+export async function permanentlyDeleteArchivedConceptNode(
+  workspaceId: string,
+  nodeId: string
+): Promise<void> {
+  const db = await getDb();
+  const result = await serializeDbWrite(() =>
+    db.execute(
+      "DELETE FROM nodes WHERE workspace_id = $1 AND id = $2 AND archived_at IS NOT NULL",
+      [workspaceId, nodeId]
+    )
+  );
+  if (result.rowsAffected === 0) {
+    throw new Error("The archived concept no longer exists.");
+  }
 }
 
 export async function insertGraphEdge(edge: GraphEdge): Promise<void> {

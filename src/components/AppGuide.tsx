@@ -24,6 +24,7 @@ const STEPS = [
     points: [
       "Import local PDF, Markdown, and TXT files through Document Vault. Notes are indexed locally with SQLite FTS5 and searchable after a 400 ms debounce.",
       "Use New DAG with a topic prompt or an uploaded syllabus to create a prerequisite-first concept graph.",
+      "Archive a workspace from Recent or archive a concept from its DAG toolbar. Restore archived items later, or permanently delete them from their archive.",
       "Vault sources can ground lessons and tutor answers with citations.",
     ],
   },

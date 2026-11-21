@@ -154,6 +154,7 @@ export async function listTutorThreads(
   const rows = await db.select<TutorThreadRow[]>(
     `${THREAD_SELECT}
      WHERE t.workspace_id IS $1
+       AND (t.node_id IS NULL OR n.archived_at IS NULL)
      ORDER BY t.updated_at DESC, t.id DESC`,
     [workspaceId]
   );
