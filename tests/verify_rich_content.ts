@@ -30,6 +30,18 @@ assert(
     normalizedFractions.includes(String.raw`\frac{A}{B}`),
   "infix TeX fractions inside math delimiters should normalize to standard frac commands"
 );
+const normalizedInlineStyle = normalizeMathMarkdown(
+  String.raw`Inline $\dfrac{C^*}{\epsilon}$ and \(\displaystyle\frac{C^*}{\epsilon}\); display $$\dfrac{1}{2}$$ and \[\displaystyle\frac{1}{2}\].`
+);
+assert(
+  normalizedInlineStyle.includes(String.raw`$\frac{C^*}{\epsilon}$`) &&
+    normalizedInlineStyle.includes(
+      String.raw`$\textstyle\frac{C^*}{\epsilon}$`
+    ) &&
+    normalizedInlineStyle.includes(String.raw`$$\dfrac{1}{2}$$`) &&
+    normalizedInlineStyle.includes(String.raw`$$\displaystyle\frac{1}{2}$$`),
+  "inline math should not force display-style fractions, while display equations retain their chosen style"
+);
 assert(
   stripMathMarkup(String.raw`Language \(\Sigma^*\) with \$5 and \(\emptyset\)`) ===
     "Language Σ^* with $5 and ∅",

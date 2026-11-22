@@ -79,6 +79,7 @@ interface LessonReaderProps {
   isQuizAvailabilityLoaded: boolean;
   onClose: () => void;
   onRetryHydration: () => void;
+  onRegenerateLesson: () => void;
   onRequestCompletion: (nodeId: string) => void;
   onStartDiagnostic: (nodeId: string) => void;
   onOpenVisualBoard?: (node: GraphNode) => Promise<void>;
@@ -96,6 +97,7 @@ export function LessonReader({
   isQuizAvailabilityLoaded,
   onClose,
   onRetryHydration,
+  onRegenerateLesson,
   onRequestCompletion,
   onStartDiagnostic,
   onOpenVisualBoard,
@@ -114,6 +116,8 @@ export function LessonReader({
   const [isExampleComposerOpen, setIsExampleComposerOpen] = useState(false);
   const [examplePrompt, setExamplePrompt] = useState("");
   const [exampleTools, setExampleTools] = useState<WorkedExampleTool[]>([]);
+  const [isRegenerationConfirmationOpen, setIsRegenerationConfirmationOpen] =
+    useState(false);
   const [isGeneratingExample, setIsGeneratingExample] = useState(false);
   const [isOpeningVisualBoard, setIsOpeningVisualBoard] = useState(false);
   const [streamedExample, setStreamedExample] = useState("");
@@ -130,6 +134,10 @@ export function LessonReader({
   useEffect(() => {
     if (!isOpen) setActiveMedia(null);
   }, [isOpen]);
+
+  useEffect(() => {
+    setIsRegenerationConfirmationOpen(false);
+  }, [node.id]);
 
   useEffect(() => {
     enterFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
@@ -408,10 +416,10 @@ export function LessonReader({
           <div className="flex h-64 flex-col items-center justify-center text-center">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
             <p className="mt-3 text-sm font-medium text-[var(--color-ink)]">
-              Synthesizing First-Principles Lesson & Flashcards...
+              Generating lesson content...
             </p>
             <p className="mt-1 text-xs text-[var(--color-muted)]">
-              Grounding with local FTS5 vault excerpts
+              Grounding with relevant local sources
             </p>
           </div>
         ) : (
@@ -473,6 +481,63 @@ export function LessonReader({
               </div>
             )}
 
+            {node.is_hydrated === 1 && (
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-[var(--color-ink)]">
+                  Lesson
+                </h3>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setIsRegenerationConfirmationOpen((open) => !open)
+                  }
+                  disabled={isHydrating}
+                  aria-expanded={isRegenerationConfirmationOpen}
+                  aria-controls="lesson-regeneration-confirmation"
+                  title="Replace the lesson, diagram, and references. Saved examples, quizzes, and flashcards are kept."
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2 text-[11px] font-semibold text-[var(--color-accent)] transition hover:bg-[var(--color-hover)] disabled:cursor-wait disabled:opacity-50"
+                  aria-label="Regenerate lesson"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Regenerate lesson
+                </button>
+              </div>
+            )}
+            {isRegenerationConfirmationOpen && (
+              <div
+                id="lesson-regeneration-confirmation"
+                role="group"
+                aria-label="Confirm lesson regeneration"
+                className="space-y-3 rounded-xl border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 p-3"
+              >
+                <p className="text-xs leading-5 text-[var(--color-ink)]">
+                  Regenerate this lesson? The lesson, diagram, and references
+                  will be replaced. Worked examples, quizzes, and flashcard
+                  progress will be kept.
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setIsRegenerationConfirmationOpen(false)
+                    }
+                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsRegenerationConfirmationOpen(false);
+                      onRegenerateLesson();
+                    }}
+                    className="rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-panel)] transition hover:brightness-95"
+                  >
+                    Confirm regenerate
+                  </button>
+                </div>
+              </div>
+            )}
             <RichContent
               className="prose lesson-prose prose-sm max-w-[72ch] select-text"
               onOpenMedia={setActiveMedia}

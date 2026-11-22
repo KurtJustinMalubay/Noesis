@@ -329,6 +329,10 @@ button:disabled {
     border-color: currentColor;
   }
 
+  .lesson-prose .katex .mfrac {
+    margin-inline: 0.08em;
+  }
+
   .katex .frac-line {
     border-bottom-style: solid !important;
     border-bottom-width: 0.06em !important;

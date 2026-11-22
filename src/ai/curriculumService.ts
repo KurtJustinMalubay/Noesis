@@ -11,6 +11,11 @@ import {
   minifyContextText,
   type TutorPayload,
 } from "./tokenOptimizer";
+import {
+  extractLessonImageRequest,
+  isLessonImageTitleRelevant,
+  replaceLessonImageRequest,
+} from "./lessonImageMarkers";
 import { searchVaultFts } from "../db/repositories/documentRepo";
 import { createWorkspace } from "../db/repositories/workspaceRepo";
 import {
@@ -86,7 +91,7 @@ async function searchCommonsImage(
     generator: "search",
     gsrsearch: query,
     gsrnamespace: "6",
-    gsrlimit: "1",
+    gsrlimit: "5",
     prop: "imageinfo",
     iiprop: "url|extmetadata",
     iiurlwidth: "1200",
@@ -112,48 +117,52 @@ async function searchCommonsImage(
     if (!queryData || typeof queryData !== "object") return null;
     const pages = (queryData as Record<string, unknown>).pages;
     if (!pages || typeof pages !== "object") return null;
-    const page = Object.values(pages as Record<string, unknown>).find(
-      (value) => value && typeof value === "object"
-    ) as Record<string, unknown> | undefined;
-    const imageInfo = Array.isArray(page?.imageinfo) ? page.imageinfo[0] : null;
-    if (!imageInfo || typeof imageInfo !== "object") return null;
-    const info = imageInfo as Record<string, unknown>;
-    if (
-      typeof info.thumburl !== "string" ||
-      typeof info.descriptionurl !== "string" ||
-      typeof page?.title !== "string"
-    ) {
-      return null;
+    for (const candidate of Object.values(pages as Record<string, unknown>)) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const page = candidate as Record<string, unknown>;
+      if (typeof page.title !== "string") continue;
+      const title = page.title.replace(/^File:/i, "");
+      if (!isLessonImageTitleRelevant(query, title)) continue;
+
+      const imageInfo = Array.isArray(page.imageinfo) ? page.imageinfo[0] : null;
+      if (!imageInfo || typeof imageInfo !== "object") continue;
+      const info = imageInfo as Record<string, unknown>;
+      if (
+        typeof info.thumburl !== "string" ||
+        typeof info.descriptionurl !== "string"
+      ) {
+        continue;
+      }
+      const imageUrl = new URL(info.thumburl);
+      const sourceUrl = new URL(info.descriptionurl);
+      if (imageUrl.protocol !== "https:" || sourceUrl.protocol !== "https:") {
+        continue;
+      }
+      const metadata =
+        info.extmetadata && typeof info.extmetadata === "object"
+          ? (info.extmetadata as Record<
+              string,
+              { value?: unknown; shortName?: unknown }
+            >)
+          : {};
+      const creator =
+        typeof metadata.Artist?.value === "string"
+          ? metadata.Artist.value.replace(/<[^>]*>/g, "").trim()
+          : "";
+      const license =
+        typeof metadata.LicenseShortName?.value === "string"
+          ? metadata.LicenseShortName.value.trim()
+          : "";
+      return {
+        title,
+        imageUrl: imageUrl.toString(),
+        sourceUrl: sourceUrl.toString(),
+        attribution: `${title}${creator ? ` — ${creator}` : ""}${
+          license ? ` (${license})` : ""
+        }`,
+      };
     }
-    const imageUrl = new URL(info.thumburl);
-    const sourceUrl = new URL(info.descriptionurl);
-    if (imageUrl.protocol !== "https:" || sourceUrl.protocol !== "https:") {
-      return null;
-    }
-    const metadata =
-      info.extmetadata && typeof info.extmetadata === "object"
-        ? (info.extmetadata as Record<
-            string,
-            { value?: unknown; shortName?: unknown }
-          >)
-        : {};
-    const creator =
-      typeof metadata.Artist?.value === "string"
-        ? metadata.Artist.value.replace(/<[^>]*>/g, "").trim()
-        : "";
-    const license =
-      typeof metadata.LicenseShortName?.value === "string"
-        ? metadata.LicenseShortName.value.trim()
-        : "";
-    const title = page.title.replace(/^File:/i, "");
-    return {
-      title,
-      imageUrl: imageUrl.toString(),
-      sourceUrl: sourceUrl.toString(),
-      attribution: `${title}${creator ? ` — ${creator}` : ""}${
-        license ? ` (${license})` : ""
-      }`,
-    };
+    return null;
   } finally {
     window.clearTimeout(timeout);
     signal?.removeEventListener("abort", abortSearch);
@@ -179,6 +188,19 @@ function insertLessonImage(
   image: CommonsImage,
   includeAttribution = false
 ): string {
+  const imageMarkdown = formatLessonImage(image, includeAttribution);
+  const headingMatch = markdown.match(/^#{1,2}\s+.+(?:\r?\n|$)/);
+  if (!headingMatch) return `${imageMarkdown}\n\n${markdown}`;
+  const headingEnd = headingMatch[0].length;
+  return `${markdown.slice(0, headingEnd)}\n${imageMarkdown}\n\n${markdown.slice(
+    headingEnd
+  )}`;
+}
+
+function formatLessonImage(
+  image: CommonsImage,
+  includeAttribution = false
+): string {
   const alt = image.title.replace(/[\[\]\r\n]/g, " ").trim();
   const url = image.imageUrl.replace(/[()]/g, (character) =>
     character === "(" ? "%28" : "%29"
@@ -193,12 +215,7 @@ function insertLessonImage(
       ? `\n\n*Image: [${attribution}](<${sourceUrl}>) · Wikimedia Commons*`
       : ""
   }`;
-  const headingMatch = markdown.match(/^#{1,2}\s+.+(?:\r?\n|$)/);
-  if (!headingMatch) return `${imageMarkdown}\n\n${markdown}`;
-  const headingEnd = headingMatch[0].length;
-  return `${markdown.slice(0, headingEnd)}\n${imageMarkdown}\n\n${markdown.slice(
-    headingEnd
-  )}`;
+  return imageMarkdown;
 }
 
 export type WorkedExampleTool =
@@ -600,17 +617,13 @@ function mapCompactCurriculum(
   };
 }
 
-/**
- * Hydrates a single DAG node with a structured lesson, Mermaid diagram, and SM-2 flashcards.
- */
-export async function hydrateNodeContent(
+export async function generateLessonMaterial(
   node: GraphNode,
   workspaceTitle: string
 ): Promise<{
   lessonMarkdown: string;
   mermaidDiagram: string;
   citations: string[];
-  flashcards: Flashcard[];
 }> {
   const lessonDepth = loadAiSettings().lessonDepth;
   const lessonDepthInstructions = {
@@ -638,8 +651,6 @@ export async function hydrateNodeContent(
       )
     )
   );
-  const imageResultPromise = searchCommonsImageSafely(node.title);
-
   const vaultContext =
     vaultHits.length > 0
       ? vaultHits.map((h) => `[${h.file_name}] ${h.content}`).join("\n\n")
@@ -648,7 +659,7 @@ export async function hydrateNodeContent(
   const lessonRequest: GeminiRequestOptions = {
     tier: "synthesis",
     systemInstruction:
-      `Teach from first principles. ${lessonDepthInstructions} Use \\frac{numerator}{denominator} for every fraction and never use TeX \\over. Return the complete lesson as raw Markdown only, with clear headings, worked examples, and one valid Mermaid flowchart in a fenced mermaid block. Use simple alphanumeric node IDs and quote node labels. Do not wrap the lesson in JSON.`,
+      `Teach from first principles. ${lessonDepthInstructions} Use \\frac{numerator}{denominator} for every fraction and never use TeX \\over. Return the complete lesson as raw Markdown only, with clear headings, worked examples, and one valid Mermaid flowchart in a fenced mermaid block. Use simple alphanumeric node IDs and quote node labels. Do not wrap the lesson in JSON. Only request an online image when a specific real-world visual materially helps explain a concept; never add a decorative image or image to the opening just to fill space. When one is useful, put [[NOESIS_IMAGE: concise specific subject]] on its own line at the point in the lesson where it is discussed. Request at most one image, and do not request an image for a concept that is better explained by the diagram or equations.`,
     userPrompt: `Course: ${workspaceTitle}\nTopic Node: ${node.title}\nScope: ${node.summary_hint}\n\nLocal Vault Context:\n${vaultContext}`,
     maxOutputTokens: lessonTokenBudgets[lessonDepth],
   };
@@ -664,6 +675,10 @@ export async function hydrateNodeContent(
   let lessonMarkdown = mermaidMatch
     ? generatedLesson.replace(mermaidMatch[0], "").trim()
     : generatedLesson;
+  const imageRequest = extractLessonImageRequest(lessonMarkdown);
+  const imageResultPromise = imageRequest
+    ? searchCommonsImageSafely(imageRequest.query)
+    : Promise.resolve({ image: null, warning: null });
   if (!mermaidDiagram) {
     try {
       const diagramResponse = await generateGeminiText({
@@ -687,15 +702,42 @@ export async function hydrateNodeContent(
       );
     }
   }
-  const imageResult = await imageResultPromise;
-  if (imageResult.image) {
-    lessonMarkdown = insertLessonImage(lessonMarkdown, imageResult.image);
-    citations.push(
-      `Illustration: ${imageResult.image.attribution} — ${imageResult.image.sourceUrl}`
+  if (imageRequest) {
+    const imageResult = await imageResultPromise;
+    lessonMarkdown = replaceLessonImageRequest(
+      lessonMarkdown,
+      imageRequest.marker,
+      imageResult.image ? formatLessonImage(imageResult.image) : ""
     );
-  } else if (imageResult.warning) {
-    citations.push(imageResult.warning);
+    if (imageResult.image) {
+      citations.push(
+        `Illustration: ${imageResult.image.attribution} — ${imageResult.image.sourceUrl}`
+      );
+    } else if (imageResult.warning) {
+      citations.push(imageResult.warning);
+    }
   }
+  return {
+    lessonMarkdown,
+    mermaidDiagram,
+    citations,
+  };
+}
+
+/**
+ * Hydrates a single DAG node with a structured lesson, Mermaid diagram, and SM-2 flashcards.
+ */
+export async function hydrateNodeContent(
+  node: GraphNode,
+  workspaceTitle: string
+): Promise<{
+  lessonMarkdown: string;
+  mermaidDiagram: string;
+  citations: string[];
+  flashcards: Flashcard[];
+}> {
+  const { lessonMarkdown, mermaidDiagram, citations } =
+    await generateLessonMaterial(node, workspaceTitle);
   const flashcardSchema: Record<string, unknown> = {
     type: "ARRAY",
     items: {
@@ -771,7 +813,7 @@ export async function hydrateNodeContent(
 }
 
 /**
- * Grounded Socratic tutor chat grounded in local FTS5 vault chunks + active node context.
+ * Context-aware tutor or assistant chat grounded in local sources and lesson context.
  */
 export async function askGroundedTutor(
   userMessage: string,
@@ -782,6 +824,7 @@ export async function askGroundedTutor(
     onChunk?: (text: string) => void;
     onPayload?: (payload: Pick<TutorPayload, "totalTokens" | "savedPercent">) => void;
     lessonContext?: TutorLessonContext | null;
+    interactionStyle?: "tutor" | "assistant";
     rollingSummary?: string | null;
     history?: Array<{
       role: "user" | "assistant";
@@ -815,6 +858,7 @@ export async function askGroundedTutor(
       : 1200;
   const payload = buildTutorPayload({
     provider: aiSettings.provider,
+    interactionStyle: options.interactionStyle,
     localContextWindowTokens: aiSettings.localContextWindowTokens,
     outputTokenBudget,
     userMessage,

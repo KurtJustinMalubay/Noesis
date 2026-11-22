@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { Download, LoaderCircle, RefreshCw } from "lucide-react";
@@ -15,6 +15,9 @@ export function UpdateIndicator({ onToast }: UpdateIndicatorProps) {
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [contentLength, setContentLength] = useState<number | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
+  const [isMicrosoftStoreInstall, setIsMicrosoftStoreInstall] = useState<
+    boolean | null
+  >(null);
   const checkInFlight = useRef(false);
   const initialCheckStarted = useRef(false);
   const installInFlight = useRef(false);
@@ -50,10 +53,37 @@ export function UpdateIndicator({ onToast }: UpdateIndicatorProps) {
   };
 
   useEffect(() => {
-    if (initialCheckStarted.current) return;
+    let active = true;
+    if (!isTauri()) return;
+    void invoke<boolean>("is_microsoft_store_install")
+      .then((isStoreInstall) => {
+        if (active) setIsMicrosoftStoreInstall(isStoreInstall);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        const message =
+          error instanceof Error ? error.message : String(error);
+        setCheckError(message);
+        setIsMicrosoftStoreInstall(true);
+        onToast(
+          "Could not verify the app's update channel. Automatic updates are disabled to avoid conflicting with Microsoft Store updates."
+        );
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      isMicrosoftStoreInstall !== false ||
+      initialCheckStarted.current
+    ) {
+      return;
+    }
     initialCheckStarted.current = true;
     void checkForUpdate(false);
-  }, []);
+  }, [isMicrosoftStoreInstall]);
 
   const installUpdate = async (available: Update) => {
     if (installInFlight.current || checkInFlight.current) return;
@@ -86,7 +116,7 @@ export function UpdateIndicator({ onToast }: UpdateIndicatorProps) {
     }
   };
 
-  if (!isTauri()) return null;
+  if (!isTauri() || isMicrosoftStoreInstall !== false) return null;
 
   const label = isInstalling
     ? contentLength

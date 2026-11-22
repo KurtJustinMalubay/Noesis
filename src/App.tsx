@@ -499,6 +499,9 @@ export default function App() {
                   setHasOpenedTutor(true);
                   store.setTutorOpen(!store.isTutorOpen);
                 }}
+                aria-pressed={store.isTutorOpen}
+                aria-label={store.isTutorOpen ? "Close tutor" : "Open tutor"}
+                title={store.isTutorOpen ? "Close tutor" : "Open tutor"}
                 className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-[11px] font-semibold transition ${
                   store.isTutorOpen
                     ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
@@ -659,7 +662,12 @@ export default function App() {
                     }
                   }}
                   onRetryHydration={() =>
-                    void store.selectNode(lessonNode.id)
+                    lessonNode.is_hydrated === 1
+                      ? void store.regenerateNodeLesson(lessonNode.id)
+                      : void store.selectNode(lessonNode.id)
+                  }
+                  onRegenerateLesson={() =>
+                    void store.regenerateNodeLesson(lessonNode.id)
                   }
                   onRequestCompletion={(id) => {
                     if (store.selectedNodeId === id) {
@@ -690,6 +698,7 @@ export default function App() {
                   }
                   workspaceId={store.activeWorkspaceId}
                   onPanelReady={() => setTutorPanelReady(true)}
+                  onClose={() => store.setTutorOpen(false)}
                   onToast={store.showToast}
                 />
               </Suspense>

@@ -151,6 +151,27 @@ export async function hydrateNodeBatch(
   });
 }
 
+export async function updateNodeLessonContent(
+  nodeId: string,
+  lessonMarkdown: string,
+  mermaidDiagram: string | null,
+  citationsJson: string | null
+): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute(
+      `UPDATE nodes
+       SET is_hydrated = 1,
+           lesson_markdown = $1,
+           mermaid_diagram = $2,
+           source_citations = $3,
+           updated_at = $4
+       WHERE id = $5`,
+      [lessonMarkdown, mermaidDiagram, citationsJson, Date.now(), nodeId]
+    )
+  );
+}
+
 export async function updateNodesStatusBatch(
   updates: Array<{
     id: string;

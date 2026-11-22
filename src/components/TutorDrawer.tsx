@@ -55,6 +55,7 @@ interface TutorDrawerProps {
   activeNodeTitle?: string;
   workspaceId: string | null;
   onPanelReady: () => void;
+  onClose: () => void;
   onToast: (message: string | null) => void;
 }
 
@@ -77,12 +78,14 @@ type TutorDeleteConfirmation =
     };
 
 interface TutorChatSettings {
+  interactionStyle: "tutor" | "assistant";
   askFollowUpQuestions: boolean;
   preferConciseReplies: boolean;
 }
 
 const TUTOR_SETTINGS_KEY = "noesis.tutor-chat-settings.v1";
 const DEFAULT_TUTOR_SETTINGS: TutorChatSettings = {
+  interactionStyle: "tutor",
   askFollowUpQuestions: true,
   preferConciseReplies: false,
 };
@@ -95,6 +98,8 @@ function loadTutorChatSettings(): TutorChatSettings {
     if (!saved || typeof saved !== "object") return DEFAULT_TUTOR_SETTINGS;
     const settings = saved as Partial<TutorChatSettings>;
     return {
+      interactionStyle:
+        settings.interactionStyle === "assistant" ? "assistant" : "tutor",
       askFollowUpQuestions:
         typeof settings.askFollowUpQuestions === "boolean"
           ? settings.askFollowUpQuestions
@@ -205,6 +210,7 @@ export function TutorDrawer({
   activeNodeTitle,
   workspaceId,
   onPanelReady,
+  onClose,
   onToast,
 }: TutorDrawerProps) {
   const [isRendered, setIsRendered] = useState(isOpen);
@@ -619,6 +625,7 @@ export function TutorDrawer({
         {
           signal: controller.signal,
           lessonContext: attachedLesson,
+          interactionStyle: chatSettings.interactionStyle,
           rollingSummary: threads.find((thread) => thread.id === threadId)
             ?.rolling_summary,
           history: conversationHistory,
@@ -912,10 +919,15 @@ export function TutorDrawer({
           </div>
           <div className="min-w-0">
             <h3 className="text-xs font-bold text-[var(--color-ink)]">
-              Socratic Tutor
+              {chatSettings.interactionStyle === "tutor"
+                ? "Socratic Tutor"
+                : "AI Assistant"}
             </h3>
             <p className="max-w-[170px] truncate text-[10px] text-[var(--color-muted)]">
-              {activeThread?.title ?? "Grounded in your local vault"}
+              {activeThread?.title ??
+                (chatSettings.interactionStyle === "tutor"
+                  ? "Guided learning · local sources"
+                  : "Direct answers · local sources")}
             </p>
           </div>
         </div>
@@ -931,9 +943,9 @@ export function TutorDrawer({
                 ? "text-[var(--color-accent)]"
                 : "text-[var(--color-muted)]"
             }`}
-            aria-label="Tutor settings"
+            aria-label="Chat settings"
             aria-expanded={isSettingsOpen}
-            title="Tutor settings"
+            title="Chat settings"
           >
             <Settings2 className="h-4 w-4" />
           </button>
@@ -975,6 +987,15 @@ export function TutorDrawer({
           >
             <Trash2 className="h-3.5 w-3.5" />
           </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            aria-label="Close tutor panel"
+            title="Close tutor"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
 
         <AnimatedPresence
@@ -985,7 +1006,48 @@ export function TutorDrawer({
         >
           <div className="motion-popover space-y-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-3 shadow-[0_16px_44px_rgba(31,43,51,0.18)]">
             <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
-              Tutor behavior
+              Chat behavior
+            </p>
+            <div className="grid grid-cols-2 gap-1 rounded-lg bg-[var(--color-panel-subtle)] p-1">
+              <button
+                type="button"
+                aria-pressed={chatSettings.interactionStyle === "tutor"}
+                onClick={() =>
+                  updateChatSettings({
+                    ...chatSettings,
+                    interactionStyle: "tutor",
+                  })
+                }
+                className={`rounded-md px-2 py-2 text-[10px] font-semibold transition ${
+                  chatSettings.interactionStyle === "tutor"
+                    ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
+                    : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+                }`}
+              >
+                Socratic tutor
+              </button>
+              <button
+                type="button"
+                aria-pressed={chatSettings.interactionStyle === "assistant"}
+                onClick={() =>
+                  updateChatSettings({
+                    ...chatSettings,
+                    interactionStyle: "assistant",
+                  })
+                }
+                className={`rounded-md px-2 py-2 text-[10px] font-semibold transition ${
+                  chatSettings.interactionStyle === "assistant"
+                    ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
+                    : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+                }`}
+              >
+                AI assistant
+              </button>
+            </div>
+            <p className="text-[10px] leading-4 text-[var(--color-muted)]">
+              {chatSettings.interactionStyle === "tutor"
+                ? "Guides you with questions and explanations."
+                : "Answers directly without forcing a tutoring style."}
             </p>
             <label className="flex items-center justify-between gap-3 text-[11px] text-[var(--color-ink)]">
               <span>Ask follow-up questions</span>
@@ -1140,7 +1202,19 @@ export function TutorDrawer({
           </div>
         ) : messages.length === 0 ? (
           <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-4 text-xs leading-5 text-[var(--color-muted)]">
-            Ask about a concept or your notes.
+            <p className="font-medium text-[var(--color-ink)]">
+              {chatSettings.interactionStyle === "tutor"
+                ? "What would you like to learn?"
+                : "What can I help you with?"}
+            </p>
+            <p className="mt-1.5">
+              {chatSettings.interactionStyle === "tutor"
+                ? "Ask about a concept or your notes. Switch to AI assistant in settings for direct answers."
+                : "Ask anything, or attach a lesson to include it as context."}
+            </p>
+            <p className="mt-2 text-[10px]">
+              Close this panel with the X button or the Tutor button in the top bar.
+            </p>
           </div>
         ) : (
           messages.map((message, index) => (
@@ -1217,9 +1291,17 @@ export function TutorDrawer({
                 event.currentTarget.form?.requestSubmit();
               }
             }}
-            placeholder="Ask about this concept..."
+            placeholder={
+              chatSettings.interactionStyle === "tutor"
+                ? "Ask about a concept..."
+                : "Ask anything..."
+            }
             disabled={isLoadingThread}
-            aria-label="Ask about this concept"
+            aria-label={
+              chatSettings.interactionStyle === "tutor"
+                ? "Ask about this concept"
+                : "Ask the AI assistant"
+            }
             className="min-h-[40px] max-h-[124px] min-w-0 flex-1 resize-none select-text rounded-lg border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3 py-2.5 text-xs leading-5 text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent-soft)] disabled:opacity-60"
           />
           {isSending ? (

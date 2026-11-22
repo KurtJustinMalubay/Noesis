@@ -16,6 +16,7 @@ export interface TutorContextMessage {
 
 export interface TutorPayloadInput {
   provider: AiProvider;
+  interactionStyle?: "tutor" | "assistant";
   localContextWindowTokens?: number;
   outputTokenBudget?: number;
   userMessage: string;
@@ -350,7 +351,12 @@ export function buildTutorPayload(input: TutorPayloadInput): TutorPayload {
     historyTokens = estimateTokens(summaryPart);
   }
   for (const message of [...recentMessages].reverse()) {
-    const prefix = message.role === "user" ? "Student: " : "Tutor: ";
+    const prefix =
+      message.role === "user"
+        ? "Student: "
+        : input.interactionStyle === "assistant"
+          ? "Assistant: "
+          : "Tutor: ";
     const remaining =
       budget.history - historyTokens - estimateTokens(prefix);
     if (remaining <= 0) break;
@@ -362,7 +368,9 @@ export function buildTutorPayload(input: TutorPayloadInput): TutorPayload {
   }
 
   const systemInstruction = minifyContextText(
-    "Be a concise Socratic study partner. Guide first-principles understanding and ground answers in the attached lesson and local sources."
+    input.interactionStyle === "assistant"
+      ? "Be a helpful AI assistant. Answer the user's request directly and naturally; explain reasoning when useful. Use the attached lesson and local sources as context without forcing a tutoring or Socratic style."
+      : "Be a concise Socratic study partner. Guide first-principles understanding and ground answers in the attached lesson and local sources."
   );
   const query = truncateAtParagraphBoundary(
     input.userMessage,

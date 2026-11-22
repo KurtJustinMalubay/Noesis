@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "noesis"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "futures-util",
  "libsqlite3-sys",
@@ -2561,6 +2561,8 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-sql",
  "tauri-plugin-updater",
+ "windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

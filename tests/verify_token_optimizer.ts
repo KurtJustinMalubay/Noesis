@@ -77,6 +77,19 @@ assert(
     localPayload.savedPercent > 0,
   "Tutor payload telemetry should report bounded, reduced context"
 );
+const assistantPayload = buildTutorPayload({
+  provider: "openai-compatible",
+  interactionStyle: "assistant",
+  userMessage: "Give me a direct explanation.",
+  vaultChunks: [],
+  history: [{ role: "assistant", content: "Earlier answer." }],
+});
+assert(
+  assistantPayload.systemInstruction.includes("without forcing a tutoring") &&
+    assistantPayload.userPrompt.includes("Assistant: Earlier answer") &&
+    !assistantPayload.userPrompt.includes("Tutor: Earlier answer"),
+  "AI assistant mode should use direct-answer guidance and assistant history labels"
+);
 const oversizedPayload = buildTutorPayload({
   provider: "openai-compatible",
   userMessage: "Question ".repeat(800),

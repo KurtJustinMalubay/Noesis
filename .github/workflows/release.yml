@@ -71,10 +71,71 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  build-store:
+    name: Build Microsoft Store MSIX (${{ matrix.store_arch }})
+    runs-on: windows-2022
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - store_arch: x64
+            target: x86_64-pc-windows-msvc
+            vcvars: amd64
+          - store_arch: arm64
+            target: aarch64-pc-windows-msvc
+            vcvars: amd64_arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build unbundled Tauri executable
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do set "VS_PATH=%%i"
+          if not defined VS_PATH exit /b 1
+          call "%VS_PATH%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b 1
+          call npm run tauri -- build --target ${{ matrix.target }} --no-bundle --ci
+
+      - name: Package architecture-specific MSIX
+        shell: pwsh
+        env:
+          STORE_ARCH: ${{ matrix.store_arch }}
+          TARGET: ${{ matrix.target }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          $executable = Join-Path $PWD "src-tauri/target/$env:TARGET/release/noesis.exe"
+          $output = Join-Path $PWD "store-msix/Noesis-$env:STORE_ARCH.msix"
+          & ./scripts/package-store-msix.ps1 `
+            -Architecture $env:STORE_ARCH `
+            -Version $env:RELEASE_VERSION `
+            -ExecutablePath $executable `
+            -OutputPath $output
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-msix-${{ matrix.store_arch }}
+          path: store-msix/*.msix
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: Publish release and updater manifest
     runs-on: windows-latest
-    needs: build
+    needs: [build, build-store]
+    if: ${{ needs.build.result == 'success' && needs.build-store.result == 'success' }}
     permissions:
       contents: write
     steps:
@@ -89,6 +150,49 @@ jobs:
         with:
           name: windows-aarch64
           path: updater-assets/aarch64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: store-msix-x64
+          path: store-msix/x64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: store-msix-arm64
+          path: store-msix/arm64
+
+      - name: Bundle MSIX packages for Store submission
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^v?(?<major>[1-9]\d*)\.(?<minor>\d+)\.(?<patch>\d+)$') {
+            throw "Release tag '$env:RELEASE_VERSION' must be a stable three-part version."
+          }
+          $packageVersion = "$($Matches.major).$($Matches.minor).$($Matches.patch).0"
+          $bundleInput = "store-msix-bundle"
+          New-Item -ItemType Directory -Path $bundleInput | Out-Null
+          Copy-Item -LiteralPath "store-msix/x64/Noesis-x64.msix" -Destination $bundleInput
+          Copy-Item -LiteralPath "store-msix/arm64/Noesis-arm64.msix" -Destination $bundleInput
+
+          $windowsKits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+          $makeAppx = Get-ChildItem -LiteralPath $windowsKits -Filter "MakeAppx.exe" -File -Recurse |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1
+          if (-not $makeAppx) {
+            throw "MakeAppx.exe was not found in the Windows 10 SDK."
+          }
+
+          New-Item -ItemType Directory -Path "store-assets" | Out-Null
+          $bundlePath = "store-assets/Noesis-$packageVersion.msixbundle"
+          & $makeAppx.FullName bundle /d $bundleInput /p $bundlePath /bv $packageVersion /o
+          if ($LASTEXITCODE -ne 0) {
+            throw "MakeAppx failed to bundle the Store packages (exit code $LASTEXITCODE)."
+          }
+          $uploadZipPath = "$bundlePath.zip"
+          $uploadPath = "store-assets/Noesis-$packageVersion.msixupload"
+          Compress-Archive -LiteralPath $bundlePath -DestinationPath $uploadZipPath
+          Move-Item -LiteralPath $uploadZipPath -Destination $uploadPath
 
       - name: Create updater manifest
         run: node scripts/create-updater-manifest.mjs latest.json updater-assets
@@ -113,6 +217,8 @@ jobs:
             Copy-Item -LiteralPath $installer.FullName -Destination $releaseAssets
           }
           Copy-Item -LiteralPath latest.json -Destination $releaseAssets
+          Copy-Item -Path "store-assets/Noesis-*.msixbundle" -Destination $releaseAssets
+          Copy-Item -Path "store-assets/Noesis-*.msixupload" -Destination $releaseAssets
 
       - uses: softprops/action-gh-release@v2
         with:

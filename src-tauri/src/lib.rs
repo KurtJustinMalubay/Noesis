@@ -4,6 +4,8 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::ipc::Channel;
 
+mod store_distribution;
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -185,7 +187,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             local_ai_request,
-            local_ai_stream
+            local_ai_stream,
+            store_distribution::is_microsoft_store_install
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

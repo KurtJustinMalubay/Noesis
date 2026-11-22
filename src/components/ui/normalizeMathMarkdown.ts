@@ -6,6 +6,12 @@ function normalizeLatexCommands(expression: string): string {
   return expression.replace(/\\\\(?=[A-Za-z])/g, "\\");
 }
 
+function normalizeInlineFractionStyle(expression: string): string {
+  return expression
+    .replace(/\\dfrac\b/g, "\\frac")
+    .replace(/\\displaystyle\b/g, "\\textstyle");
+}
+
 function hasWrappingBraces(value: string): boolean {
   if (!value.startsWith("{") || !value.endsWith("}")) return false;
   let depth = 0;
@@ -117,17 +123,25 @@ export function normalizeMathMarkdown(markdown: string): string {
 
   normalized = normalized
     .replace(/\\\(([\s\S]*?)\\\)/g, (_match, expression: string) =>
-      `$${normalizeLatexCommands(expression)}$`
+      `$${normalizeInlineFractionStyle(
+        normalizeLatexCommands(expression)
+      )}$`
     )
     .replace(/\\\[([\s\S]*?)\\\]/g, (_match, expression: string) =>
       `$$${normalizeLatexCommands(expression)}$$`
     )
     .replace(
       /(?<!\\)(\${1,2})([\s\S]*?)(?<!\\)\1/g,
-      (_match, delimiter: string, expression: string) =>
-        `${delimiter}${normalizeOverFractions(
-          normalizeLatexCommands(expression)
-        )}${delimiter}`
+      (_match, delimiter: string, expression: string) => {
+        const normalizedExpression = normalizeLatexCommands(expression);
+        const fractionStyleNormalized =
+          delimiter === "$"
+            ? normalizeInlineFractionStyle(normalizedExpression)
+            : normalizedExpression;
+        return `${delimiter}${normalizeOverFractions(
+          fractionStyleNormalized
+        )}${delimiter}`;
+      }
     );
 
   return normalized.replace(

@@ -76,6 +76,29 @@ The release workflow uses the generated `.sig` sidecars to create the updater
 manifest, then publishes only the installers and `latest.json`; signatures
 remain embedded in the manifest rather than appearing as separate downloads.
 
+## Microsoft Store (MSIX)
+
+The same `v*.*.*` release workflow also builds a multi-architecture
+`Noesis-<version>.msixbundle` for x64 and ARM64, along with a
+`Noesis-<version>.msixupload` containing that bundle for Partner Center
+submission. Both are published as separate GitHub release assets and are not
+included in `latest.json`. The upload file does not include symbol files, so
+Partner Center crash analytics will not have the app's symbols.
+Partner Center signs Store submissions; the package identity and visual assets
+are defined in `src-tauri/windows/Package.appxmanifest.template`.
+
+Noesis checks the Windows package signature kind before enabling its updater.
+Store-signed packages rely on Microsoft Store updates. Unpackaged installers
+and non-Store-signed packages retain the in-app updater. If the signature
+check fails, the updater stays disabled rather than risk conflicting with
+Store-managed updates.
+
+The package targets Windows 10 version 1809 or later and uses the installed
+Evergreen WebView2 Runtime. Windows 11 includes that runtime, and most Windows
+10 devices have it; test the MSIX on a clean Windows 10 machine before
+submission. Partner Center performs official package certification; the
+optional Windows App Certification Kit is deprecated.
+
 ## Verification
 
 ```powershell

@@ -32,6 +32,7 @@ import {
   restoreArchivedConceptNode as restoreArchivedConceptNodeRecord,
   updateConceptNode,
   updateGraphNodeState,
+  updateNodeLessonContent,
   updateNodePosition,
   updateNodesStatusBatch,
 } from "../db/repositories/graphRepo";
@@ -49,6 +50,7 @@ import {
 } from "../db/repositories/documentRepo";
 import {
   generateWorkspaceCurriculum,
+  generateLessonMaterial,
   hydrateNodeContent,
 } from "../ai/curriculumService";
 import {
@@ -167,6 +169,7 @@ interface NoesisState {
   connectConceptNodes: (sourceId: string, targetId: string) => Promise<void>;
   disconnectConceptNodes: (sourceId: string, targetId: string) => Promise<void>;
   selectNode: (nodeId: string | null) => Promise<void>;
+  regenerateNodeLesson: (nodeId: string) => Promise<void>;
   markNodeMastered: (nodeId: string, score?: number) => Promise<void>;
   openDiagnosticForNode: (nodeId: string) => Promise<void>;
   configureDiagnosticForNode: (nodeId: string) => void;
@@ -706,6 +709,59 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         remainingHydrations.delete(node.id);
         set({ hydratingNodeIds: remainingHydrations });
       }
+    }
+  },
+
+  regenerateNodeLesson: async (nodeId) => {
+    if (get().hydratingNodeIds.has(nodeId)) return;
+    const node = get().nodes.find((item) => item.id === nodeId);
+    if (!node) return;
+
+    const workspace = get().workspaces.find(
+      (item) => item.id === node.workspace_id
+    );
+    const hydratingNodeIds = new Set(get().hydratingNodeIds);
+    hydratingNodeIds.add(nodeId);
+    const hydrationErrors = new Map(get().hydrationErrors);
+    hydrationErrors.delete(nodeId);
+    set({ hydratingNodeIds, hydrationErrors });
+
+    try {
+      const generated = await generateLessonMaterial(
+        node,
+        workspace?.title ?? "Noesis Course"
+      );
+      await updateNodeLessonContent(
+        nodeId,
+        generated.lessonMarkdown,
+        generated.mermaidDiagram || null,
+        JSON.stringify(generated.citations)
+      );
+      set((state) => ({
+        nodes: state.nodes.map((item) =>
+          item.id === nodeId
+            ? {
+                ...item,
+                is_hydrated: 1,
+                lesson_markdown: generated.lessonMarkdown,
+                mermaid_diagram: generated.mermaidDiagram || null,
+                source_citations: JSON.stringify(generated.citations),
+              }
+            : item
+        ),
+      }));
+      get().showToast("Lesson regenerated.");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to regenerate lesson.";
+      const nextErrors = new Map(get().hydrationErrors);
+      nextErrors.set(nodeId, message);
+      set({ hydrationErrors: nextErrors });
+      get().showToast(message);
+    } finally {
+      const remainingHydrations = new Set(get().hydratingNodeIds);
+      remainingHydrations.delete(nodeId);
+      set({ hydratingNodeIds: remainingHydrations });
     }
   },
 

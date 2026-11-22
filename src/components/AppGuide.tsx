@@ -60,7 +60,7 @@ const STEPS = [
       "Practice until concepts are mastered, ask follow-up questions, and revisit flashcards when they are due.",
     points: [
       "Assess with MCQ, open-ended, or coding questions—up to 12 per quiz—at Easy, Medium, Hard, or Hybrid difficulty. Passing unlocks dependent concepts.",
-      "Ask questions in the persistent Tutor Drawer. Replies can use the active lesson and cite your Document Vault sources.",
+      "Use the Tutor button to open or close the chat. In chat settings, choose Socratic Tutor for guided learning or AI Assistant for direct answers. Replies can use the active lesson and cite your Document Vault sources.",
       "Use the daily SM-2 Review Queue to reinforce long-term recall.",
     ],
   },
