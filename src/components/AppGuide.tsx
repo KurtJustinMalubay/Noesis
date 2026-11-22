@@ -17,13 +17,13 @@ const STEPS = [
   },
   {
     target: "new-dag",
-    category: "Build your curriculum",
-    title: "Bring in notes, then create a DAG",
+    category: "Build your workspace",
+    title: "Bring in notes, then create a workspace",
     description:
-      "Ground lessons and tutor answers in your own material, then generate a curriculum with prerequisites in the right order.",
+      "Organize concepts in a workspace. Build the graph yourself or let AI draft a starting point.",
     points: [
       "Import local PDF, Markdown, and TXT files through Document Vault. Notes are indexed locally with SQLite FTS5 and searchable after a 400 ms debounce.",
-      "Use New DAG with a topic prompt or an uploaded syllabus to create a prerequisite-first concept graph.",
+      "Use New Workspace → Start manually to create a blank graph, or choose Generate with AI to draft one from a topic or uploaded syllabus.",
       "Archive a workspace from Recent or archive a concept from its DAG toolbar. Restore archived items later, or permanently delete them from their archive.",
       "Vault sources can ground lessons and tutor answers with citations.",
     ],

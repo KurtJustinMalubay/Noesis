@@ -37,7 +37,7 @@ interface WorkspaceSidebarProps {
   onRestore: (id: string) => Promise<void>;
   onPermanentlyDelete: (id: string) => Promise<void>;
   onGetDeleteSummary: (id: string) => Promise<WorkspaceDeletionSummary>;
-  onNewDag: () => void;
+  onNewWorkspace: () => void;
   onVault: () => void;
   onReview: () => void;
   onGuide: () => void;
@@ -60,7 +60,7 @@ export function WorkspaceSidebar({
   onRestore,
   onPermanentlyDelete,
   onGetDeleteSummary,
-  onNewDag,
+  onNewWorkspace,
   onVault,
   onReview,
   onGuide,
@@ -257,11 +257,11 @@ export function WorkspaceSidebar({
           data-guide="new-dag"
           data-sidebar-new
           data-collapsed={collapsed}
-          onClick={onNewDag}
+          onClick={onNewWorkspace}
           className={`relative flex h-10 w-full items-center overflow-hidden rounded-xl bg-[var(--color-accent-button)] text-[11px] font-semibold text-white hover:brightness-95 active:scale-[0.99] ${
             collapsed ? "justify-center" : "gap-2.5 px-3"
           }`}
-          title="New DAG"
+          title="New workspace"
         >
           <Plus className="sidebar-new-icon h-4 w-4 shrink-0" />
           <span
@@ -272,7 +272,7 @@ export function WorkspaceSidebar({
             }`}
             aria-hidden={collapsed}
           >
-            New DAG
+            New Workspace
           </span>
         </button>
       </div>
@@ -293,7 +293,7 @@ export function WorkspaceSidebar({
               onChange={(event) => setQuery(event.target.value)}
               tabIndex={collapsed ? -1 : 0}
               placeholder={
-                showArchivedWorkspaces ? "Search archive" : "Search curricula"
+                showArchivedWorkspaces ? "Search archive" : "Search workspaces"
               }
               className="min-w-0 flex-1 select-text bg-transparent text-xs text-[var(--color-ink)] outline-none placeholder:text-[var(--color-muted)]"
             />
@@ -530,7 +530,7 @@ export function WorkspaceSidebar({
                         void requestWorkspaceAction(workspace, "archive")
                       }
                       className="mr-1 rounded p-1 text-[var(--color-muted)] opacity-0 transition hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)] group-hover:opacity-100 focus-visible:opacity-100 disabled:cursor-wait disabled:opacity-50"
-                      title="Archive curriculum"
+                      title="Archive workspace"
                       aria-label={`Archive ${workspace.title}`}
                     >
                       {loadingWorkspaceAction?.id === workspace.id &&
@@ -546,7 +546,7 @@ export function WorkspaceSidebar({
             })}
             {!collapsed && filteredWorkspaces.length === 0 && (
               <p className="px-2 py-4 text-[11px] text-[var(--color-muted)]">
-                {workspaces.length ? "No matches" : "No curricula yet"}
+                {workspaces.length ? "No matches" : "No workspaces yet"}
               </p>
             )}
           </>

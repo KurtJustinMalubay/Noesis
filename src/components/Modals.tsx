@@ -97,6 +97,7 @@ interface ModalsProps {
   isConfiguringDiagnostic: boolean;
   diagnosticError: string | null;
   onClose: () => void;
+  onCreateWorkspace: (title: string, rootDomain?: string) => Promise<void>;
   onGenerateCurriculum: (
     topic: string,
     sourceDocument?: CurriculumSourceDocument
@@ -147,6 +148,7 @@ export function Modals({
   isConfiguringDiagnostic,
   diagnosticError,
   onClose,
+  onCreateWorkspace,
   onGenerateCurriculum,
   onGradeCard,
   onStartDiagnostic,
@@ -177,6 +179,7 @@ export function Modals({
             progress={curriculumProgress}
             onCancel={onCancelCurriculum}
             onClose={onClose}
+            onCreateWorkspace={onCreateWorkspace}
             onGenerate={onGenerateCurriculum}
             onRefreshDocuments={onRefreshDocuments}
             onToast={onToast}
@@ -253,6 +256,7 @@ function NewWorkspaceModal({
   progress,
   onCancel,
   onClose,
+  onCreateWorkspace,
   onGenerate,
   onRefreshDocuments,
   onToast,
@@ -261,6 +265,7 @@ function NewWorkspaceModal({
   progress: CurriculumProgress | null;
   onCancel: () => void;
   onClose: () => void;
+  onCreateWorkspace: (title: string, rootDomain?: string) => Promise<void>;
   onGenerate: (
     topic: string,
     sourceDocument?: CurriculumSourceDocument
@@ -268,6 +273,9 @@ function NewWorkspaceModal({
   onRefreshDocuments: () => Promise<void>;
   onToast: (msg: string) => void;
 }) {
+  const [creationMode, setCreationMode] = useState<"manual" | "ai">("manual");
+  const [workspaceTitle, setWorkspaceTitle] = useState("");
+  const [rootDomain, setRootDomain] = useState("");
   const [topic, setTopic] = useState("");
   const [sourceDocument, setSourceDocument] =
     useState<CurriculumSourceDocument | null>(null);
@@ -280,11 +288,16 @@ function NewWorkspaceModal({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!topic.trim() && !sourceDocument) || isGenerating || isImporting) return;
+    if (isGenerating || isImporting) return;
     try {
+      if (creationMode === "manual") {
+        await onCreateWorkspace(workspaceTitle, rootDomain);
+        return;
+      }
+      if (!topic.trim() && !sourceDocument) return;
       const goal =
         topic.trim() ||
-        `Create a course DAG based on ${sourceDocument?.name ?? "the uploaded document"}`;
+        `Create a workspace based on ${sourceDocument?.name ?? "the uploaded document"}`;
       await onGenerate(goal, sourceDocument ?? undefined);
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err));
@@ -308,7 +321,7 @@ function NewWorkspaceModal({
         text: result.extractedText,
       });
       await onRefreshDocuments();
-      onToast(`Loaded ${result.document.file_name} for DAG generation.`);
+      onToast(`Loaded ${result.document.file_name} for workspace generation.`);
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err));
     } finally {
@@ -317,29 +330,62 @@ function NewWorkspaceModal({
   };
 
   return (
-    <div className="w-full max-w-lg rounded-2xl border border-[#e1dfd9] bg-white p-6 shadow-[0_24px_70px_rgba(27,39,47,0.2)]">
+    <div className="w-full max-w-lg rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-6 text-[var(--color-ink)] shadow-[0_24px_70px_rgba(27,39,47,0.2)]">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 text-base font-bold text-[#2c414f]">
-          <Sparkles className="h-5 w-5 text-[#527a91]" />
-          <span>Synthesize Knowledge DAG</span>
+        <div className="flex items-center gap-2 text-base font-bold text-[var(--color-ink)]">
+          <Layers className="h-5 w-5 text-[var(--color-accent)]" />
+          <span>Create a Workspace</span>
         </div>
         <button
           type="button"
           disabled={isGenerating && progress?.phase === "Saving curriculum…"}
           onClick={handleClose}
-          className="rounded-lg p-1 text-slate-400 transition hover:bg-[#f3f2ee] hover:text-slate-700 disabled:opacity-40"
+          className="rounded-lg p-1 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:opacity-40"
+          aria-label="Close create workspace dialog"
         >
           <X className="h-4 w-4" />
         </button>
       </div>
-      <p className="mt-2 text-xs leading-5 text-slate-600">
-        Describe a learning goal or import a course document to build its prerequisite graph.
+      <p className="mt-2 text-xs leading-5 text-[var(--color-muted)]">
+        Start with an empty concept map or have AI draft a learning path for you.
       </p>
       <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+        <div
+          className="grid grid-cols-2 gap-1 rounded-xl bg-[var(--color-panel-subtle)] p-1"
+          role="group"
+          aria-label="Workspace creation method"
+        >
+          <button
+            type="button"
+            aria-pressed={creationMode === "manual"}
+            disabled={isGenerating || isImporting}
+            onClick={() => setCreationMode("manual")}
+            className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+              creationMode === "manual"
+                ? "bg-[var(--color-panel)] text-[var(--color-accent)] shadow-sm"
+                : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+            }`}
+          >
+            Start manually
+          </button>
+          <button
+            type="button"
+            aria-pressed={creationMode === "ai"}
+            disabled={isGenerating || isImporting}
+            onClick={() => setCreationMode("ai")}
+            className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+              creationMode === "ai"
+                ? "bg-[var(--color-panel)] text-[var(--color-accent)] shadow-sm"
+                : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+            }`}
+          >
+            Generate with AI
+          </button>
+        </div>
         {isGenerating && (
-          <div className="rounded-xl border border-[#dbe5e8] bg-[#f7faf9] p-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-[#31556a]">
-              <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#3978a8] border-t-transparent" />
+          <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-[var(--color-ink)]">
+              <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
               {progress?.phase ?? "Drafting prerequisite structure…"}
             </div>
             {progress?.nodeTitles.length ? (
@@ -347,7 +393,7 @@ function NewWorkspaceModal({
                 {progress.nodeTitles.map((title) => (
                   <span
                     key={title}
-                    className="rounded-full border border-[#dce5e4] bg-white px-2 py-1 text-[10px] text-slate-600"
+                    className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel)] px-2 py-1 text-[10px] text-[var(--color-muted)]"
                   >
                     {title}
                   </span>
@@ -358,7 +404,7 @@ function NewWorkspaceModal({
               <button
                 type="button"
                 onClick={onCancel}
-                className="mt-3 flex items-center gap-1.5 rounded-lg border border-[#d8dfe2] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 transition hover:bg-[#f1f3f2]"
+                className="mt-3 flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
               >
                 <X className="h-3 w-3" />
                 Stop generation
@@ -366,55 +412,103 @@ function NewWorkspaceModal({
             )}
           </div>
         )}
-        <textarea
-          rows={3}
-          value={topic}
-          onChange={(e) => setTopic(e.target.value)}
-          placeholder="Optional focus, e.g. emphasize learning outcomes or exam topics"
-          className="w-full select-text rounded-xl border border-[#dedfdc] bg-[#fbfaf8] p-3 text-sm text-slate-800 placeholder-slate-400 focus:border-[#6f9ab6] focus:outline-none focus:ring-2 focus:ring-[#d9e7ef]"
-        />
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <button
-              type="button"
-              disabled={isGenerating || isImporting}
-              onClick={() => void handlePickSource()}
-              className="flex items-center gap-2 rounded-lg border border-[#d8dfe2] bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:bg-[#f1f3f2] disabled:opacity-50"
-            >
-              <FileUp className="h-4 w-4" />
-              {isImporting ? "Reading document…" : "Import syllabus / document"}
-            </button>
-            <div className="flex shrink-0 justify-end gap-2">
-              <button
-                type="button"
-                disabled={isGenerating && progress?.phase === "Saving curriculum…"}
-                onClick={handleClose}
-                className="rounded-lg px-4 py-2 text-xs font-medium text-slate-600 transition hover:bg-[#f3f2ee] disabled:opacity-40"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={isGenerating || isImporting || (!topic.trim() && !sourceDocument)}
-                className="flex items-center gap-2 rounded-lg bg-[#245f9e] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#194d83] disabled:opacity-50"
-              >
-                {isGenerating ? "Building Graph..." : "Generate DAG"}
-              </button>
-            </div>
+        {creationMode === "manual" ? (
+          <div className="space-y-3">
+            <label className="block text-xs font-semibold text-[var(--color-ink)]">
+              Workspace name
+              <input
+                autoFocus
+                value={workspaceTitle}
+                onChange={(event) => setWorkspaceTitle(event.target.value)}
+                maxLength={120}
+                required
+                placeholder="e.g. Introduction to Architecture"
+                className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-canvas)] p-3 text-sm font-normal text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent-soft)]"
+              />
+            </label>
+            <label className="block text-xs font-semibold text-[var(--color-ink)]">
+              Subject{" "}
+              <span className="font-normal text-[var(--color-muted)]">
+                (optional)
+              </span>
+              <input
+                value={rootDomain}
+                onChange={(event) => setRootDomain(event.target.value)}
+                maxLength={120}
+                placeholder="e.g. Architecture"
+                className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-canvas)] p-3 text-sm font-normal text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent-soft)]"
+              />
+            </label>
+            <p className="text-[11px] leading-5 text-[var(--color-muted)]">
+              You’ll start with a blank graph. Add concepts and connect their
+              prerequisites as you go.
+            </p>
           </div>
-          {sourceDocument && (
-            <div className="truncate text-right text-xs text-slate-600">
-              Using {sourceDocument.name}
-              <button
-                type="button"
-                onClick={() => setSourceDocument(null)}
-                className="ml-2 font-semibold text-[#527a91] hover:underline"
-                aria-label={`Remove ${sourceDocument.name}`}
-              >
-                Remove
-              </button>
+        ) : (
+          <>
+            <textarea
+              rows={3}
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder="Describe a subject or learning goal, e.g. Fundamentals of architecture"
+              className="w-full select-text rounded-xl border border-[var(--color-border)] bg-[var(--color-canvas)] p-3 text-sm text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent-soft)]"
+            />
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  disabled={isGenerating || isImporting}
+                  onClick={() => void handlePickSource()}
+                  className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2 text-xs font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)] disabled:opacity-50"
+                >
+                  <FileUp className="h-4 w-4" />
+                  {isImporting
+                    ? "Reading document…"
+                    : "Import syllabus / document"}
+                </button>
+                {sourceDocument && (
+                  <div className="truncate text-right text-xs text-[var(--color-muted)]">
+                    Using {sourceDocument.name}
+                    <button
+                      type="button"
+                      onClick={() => setSourceDocument(null)}
+                      className="ml-2 font-semibold text-[var(--color-accent)] hover:underline"
+                      aria-label={`Remove ${sourceDocument.name}`}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
-          )}
+          </>
+        )}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            disabled={isGenerating && progress?.phase === "Saving curriculum…"}
+            onClick={handleClose}
+            className="rounded-lg px-4 py-2 text-xs font-medium text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={
+              isGenerating ||
+              isImporting ||
+              (creationMode === "manual"
+                ? !workspaceTitle.trim()
+                : !topic.trim() && !sourceDocument)
+            }
+            className="flex items-center gap-2 rounded-lg bg-[var(--color-accent-button)] px-4 py-2 text-xs font-semibold text-white transition hover:brightness-95 disabled:opacity-50"
+          >
+            {isGenerating
+              ? "Generating workspace…"
+              : creationMode === "manual"
+                ? "Create workspace"
+                : "Generate workspace"}
+          </button>
         </div>
       </form>
     </div>

@@ -12,6 +12,7 @@ import type {
   Workspace,
 } from "../types/domain";
 import {
+  createWorkspace,
   getWorkspaceProgressSummaries,
   archiveWorkspace as archiveWorkspaceRecord,
   listArchivedWorkspaces,
@@ -135,6 +136,7 @@ interface NoesisState {
   // Actions
   initAppData: () => Promise<void>;
   selectWorkspace: (workspaceId: string) => Promise<void>;
+  createManualWorkspace: (title: string, rootDomain?: string) => Promise<void>;
   generateNewCurriculum: (
     topicPrompt: string,
     sourceDocument?: CurriculumSourceDocument
@@ -280,6 +282,31 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     });
   },
 
+  createManualWorkspace: async (title, rootDomain) => {
+    const cleanTitle = title.trim();
+    if (!cleanTitle) {
+      throw new Error("Workspace name is required.");
+    }
+
+    const now = Date.now();
+    const workspace: Workspace = {
+      id: crypto.randomUUID(),
+      title: cleanTitle,
+      root_domain: rootDomain?.trim() || "General",
+      layout_mode: "free",
+      created_at: now,
+      updated_at: now,
+      archived_at: null,
+    };
+    await createWorkspace(workspace);
+    set({
+      workspaces: [workspace, ...get().workspaces],
+      activeModal: "none",
+    });
+    await get().selectWorkspace(workspace.id);
+    get().showToast(`Workspace "${workspace.title}" created.`);
+  },
+
   generateNewCurriculum: async (topicPrompt, sourceDocument) => {
     if (get().isGeneratingCurriculum) return;
     const controller = new AbortController();
@@ -307,7 +334,9 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         activeModal: "none",
         curriculumProgress: null,
       });
-      get().showToast(`Generated ${nodes.length}-node DAG for "${workspace.title}"`);
+      get().showToast(
+        `Generated workspace with ${nodes.length} concepts: "${workspace.title}"`
+      );
     } catch (error) {
       if (controller.signal.aborted) {
         get().showToast("Curriculum generation stopped.");

@@ -1413,6 +1413,40 @@ export function DagCanvas({
         />
       )}
 
+      {nodes.length === 0 && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6">
+          <div className="pointer-events-auto max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)]/95 p-6 text-center shadow-[0_12px_36px_rgba(31,43,51,0.12)] backdrop-blur">
+            <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">
+              Blank workspace
+            </p>
+            <h2 className="mt-2 text-base font-semibold text-[var(--color-ink)]">
+              Add your first concept
+            </h2>
+            <p className="mt-1.5 text-xs leading-5 text-[var(--color-muted)]">
+              Build the map yourself. Add concepts, then connect each prerequisite
+              from its bottom port to the concept that depends on it.
+            </p>
+            <button
+              type="button"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => {
+                const rect = containerRef.current?.getBoundingClientRect();
+                openAddEditor(
+                  (rect?.width ?? 900) / 2 - 150,
+                  (rect?.height ?? 650) / 2 - 100
+                );
+              }}
+              className="mt-4 rounded-lg bg-[var(--color-accent-button)] px-4 py-2 text-xs font-semibold text-white transition hover:brightness-95"
+            >
+              Add first concept
+            </button>
+            <p className="mt-2 text-[10px] text-[var(--color-muted)]">
+              You can also use Add Node in the canvas toolbar.
+            </p>
+          </div>
+        </div>
+      )}
+
       <div
         data-canvas-toolbar
         className="absolute bottom-4 left-4 z-20 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-1.5 rounded-xl border border-[#e1dfd8] bg-white/95 p-1.5 shadow-[0_5px_18px_rgba(35,51,60,0.09)] backdrop-blur"

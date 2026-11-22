@@ -355,7 +355,11 @@ export default function App() {
               onRestore={store.restoreWorkspace}
               onPermanentlyDelete={store.permanentlyDeleteWorkspace}
               onGetDeleteSummary={getWorkspaceDeletionSummary}
-              onNewDag={() => store.setActiveModal("new_workspace")}
+              onNewWorkspace={() => {
+                setMainView("graph");
+                setIsExcalidrawFullscreen(false);
+                store.setActiveModal("new_workspace");
+              }}
               onVault={() => store.setActiveModal("vault")}
               onReview={() => store.setActiveModal("review")}
               onGuide={() => setIsGuideOpen(true)}
@@ -571,16 +575,16 @@ export default function App() {
                 </div>
               )
             ) : (
-              store.nodes.length === 0 ? (
+              !activeWorkspace ? (
                 <div
                   data-guide="canvas"
                   className="flex flex-1 flex-col items-center justify-center p-8 text-center"
                 >
                   <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--color-muted)]">
-                    Learning studio
+                    Workspace
                   </p>
                   <h2 className="mt-3 text-xl font-semibold tracking-tight">
-                    No curriculum yet
+                    No workspace selected
                   </h2>
                   <div className="mt-5 flex items-center gap-2">
                     <button
@@ -588,7 +592,7 @@ export default function App() {
                       onClick={() => store.setActiveModal("new_workspace")}
                       className="rounded-lg bg-[var(--color-accent-button)] px-4 py-2.5 text-xs font-semibold text-white transition hover:brightness-95"
                     >
-                      New DAG
+                      Create workspace
                     </button>
                     <button
                       type="button"
@@ -745,6 +749,9 @@ export default function App() {
             isConfiguringDiagnostic={store.isConfiguringDiagnostic}
             diagnosticError={store.diagnosticError}
             onClose={() => store.setActiveModal("none")}
+            onCreateWorkspace={(title, rootDomain) =>
+              store.createManualWorkspace(title, rootDomain)
+            }
             onGenerateCurriculum={(topic, sourceDocument) =>
               store.generateNewCurriculum(topic, sourceDocument)
             }
