@@ -58,6 +58,7 @@ Copy-Item -LiteralPath (Join-Path $iconRoot "Square44x44Logo.png") -Destination 
 
 $windowsKits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
 $makeAppx = Get-ChildItem -LiteralPath $windowsKits -Filter "MakeAppx.exe" -File -Recurse |
+  Where-Object { $_.Directory.Name -eq "x64" } |
   Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
   Select-Object -First 1
 if (-not $makeAppx) {
