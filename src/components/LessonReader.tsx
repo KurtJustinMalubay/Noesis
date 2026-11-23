@@ -75,11 +75,16 @@ interface LessonReaderProps {
   companionOpen: boolean;
   isHydrating: boolean;
   hydrationError: string | null;
+  generationPreview: string;
+  flashcardsEnabled: boolean;
+  flashcardCount: number | null;
+  isGeneratingFlashcards: boolean;
   hasSavedQuiz: boolean;
   isQuizAvailabilityLoaded: boolean;
   onClose: () => void;
   onRetryHydration: () => void;
   onRegenerateLesson: () => void;
+  onGenerateFlashcards: () => void;
   onRequestCompletion: (nodeId: string) => void;
   onStartDiagnostic: (nodeId: string) => void;
   onOpenVisualBoard?: (node: GraphNode) => Promise<void>;
@@ -93,11 +98,16 @@ export function LessonReader({
   companionOpen,
   isHydrating,
   hydrationError,
+  generationPreview,
+  flashcardsEnabled,
+  flashcardCount,
+  isGeneratingFlashcards,
   hasSavedQuiz,
   isQuizAvailabilityLoaded,
   onClose,
   onRetryHydration,
   onRegenerateLesson,
+  onGenerateFlashcards,
   onRequestCompletion,
   onStartDiagnostic,
   onOpenVisualBoard,
@@ -125,6 +135,7 @@ export function LessonReader({
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const enterFramesRef = useRef<number[]>([]);
+  const enterFallbackRef = useRef<number | null>(null);
   const exitTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -142,6 +153,10 @@ export function LessonReader({
   useEffect(() => {
     enterFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
     enterFramesRef.current = [];
+    if (enterFallbackRef.current !== null) {
+      window.clearTimeout(enterFallbackRef.current);
+      enterFallbackRef.current = null;
+    }
     if (exitTimerRef.current !== null) {
       window.clearTimeout(exitTimerRef.current);
       exitTimerRef.current = null;
@@ -150,14 +165,25 @@ export function LessonReader({
     if (isOpen) {
       setIsRendered(true);
       setIsVisible(false);
-      const firstFrame = requestAnimationFrame(() => {
-        const secondFrame = requestAnimationFrame(() => setIsVisible(true));
-        enterFramesRef.current = [secondFrame];
-      });
-      enterFramesRef.current = [firstFrame];
+      if (typeof window.requestAnimationFrame === "function") {
+        const firstFrame = window.requestAnimationFrame(() => {
+          const secondFrame = window.requestAnimationFrame(() =>
+            setIsVisible(true)
+          );
+          enterFramesRef.current = [secondFrame];
+        });
+        enterFramesRef.current = [firstFrame];
+      }
+      enterFallbackRef.current = window.setTimeout(
+        () => setIsVisible(true),
+        120
+      );
     } else {
       setIsVisible(false);
-      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      if (
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ??
+        false
+      ) {
         setIsRendered(false);
       } else {
         exitTimerRef.current = window.setTimeout(
@@ -169,6 +195,10 @@ export function LessonReader({
 
     return () => {
       enterFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
+      if (enterFallbackRef.current !== null) {
+        window.clearTimeout(enterFallbackRef.current);
+        enterFallbackRef.current = null;
+      }
       if (exitTimerRef.current !== null) {
         window.clearTimeout(exitTimerRef.current);
       }
@@ -352,7 +382,7 @@ export function LessonReader({
         isVisible ? "lesson-reader-panel-visible" : ""
       }`}
     >
-      <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] px-6 py-5">
+      <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border)] px-5 py-5 sm:px-6">
         <div>
           <div className="flex items-center gap-2 font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--color-accent)]">
             <BookOpen className="h-3.5 w-3.5" />
@@ -363,10 +393,10 @@ export function LessonReader({
               </span>
             )}
           </div>
-          <h2 className="mt-1.5 font-serif text-[21px] font-semibold leading-tight tracking-tight text-[var(--color-ink)]">
+          <h2 className="mt-2 font-serif text-2xl font-semibold leading-tight tracking-tight text-[var(--color-ink)]">
             {node.title}
           </h2>
-          <p className="mt-1.5 max-w-[52ch] text-xs leading-5 text-[var(--color-muted)]">
+          <p className="mt-2 max-w-[52ch] text-[13px] leading-5 text-[var(--color-muted)]">
             <RichContent inline>{node.summary_hint}</RichContent>
           </p>
         </div>
@@ -376,17 +406,18 @@ export function LessonReader({
               type="button"
               onClick={() => void openVisualBoard()}
               disabled={isHydrating || isOpeningVisualBoard}
-              className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-50"
+              className="inline-flex h-10 items-center gap-2 rounded-xl border border-[var(--color-border)] px-3 text-xs font-semibold text-[var(--color-accent)] transition hover:bg-[var(--color-accent-soft)] disabled:cursor-wait disabled:opacity-50"
               aria-label="Open or create this lesson's visual board"
               title="Open or create this lesson's visual board"
             >
               <Shapes className="h-4 w-4" />
+              <span>Visual board</span>
             </button>
           )}
           <button
             type="button"
             onClick={() => setIsExpanded((expanded) => !expanded)}
-            className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
             aria-label={isExpanded ? "Restore lesson panel size" : "Expand lesson panel"}
             aria-pressed={isExpanded}
             title={isExpanded ? "Restore panel size" : "Expand panel"}
@@ -399,7 +430,7 @@ export function LessonReader({
           </button>
           <button
             onClick={onClose}
-            className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
             aria-label="Close lesson"
           >
             <X className="h-4 w-4" />
@@ -408,12 +439,12 @@ export function LessonReader({
       </div>
 
       <div
-        className={`lesson-reader-content flex-1 space-y-5 overflow-y-auto bg-[var(--color-panel)] px-6 py-6 select-text ${
+        className={`lesson-reader-content flex-1 space-y-6 overflow-y-auto bg-[var(--color-panel)] px-5 py-6 select-text sm:px-6 ${
           isExpanded ? "lesson-reader-content-expanded" : ""
         }`}
       >
         {isHydrating ? (
-          <div className="flex h-64 flex-col items-center justify-center text-center">
+          <div className="flex min-h-64 flex-col items-center justify-center text-center">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-accent)] border-t-transparent" />
             <p className="mt-3 text-sm font-medium text-[var(--color-ink)]">
               Generating lesson content...
@@ -421,6 +452,11 @@ export function LessonReader({
             <p className="mt-1 text-xs text-[var(--color-muted)]">
               Grounding with relevant local sources
             </p>
+            {generationPreview && (
+              <pre className="mt-5 max-h-[45vh] w-full max-w-2xl overflow-y-auto whitespace-pre-wrap rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-4 text-left font-sans text-sm leading-6 text-[var(--color-ink)]">
+                {generationPreview}
+              </pre>
+            )}
           </div>
         ) : (
           <>
@@ -494,12 +530,50 @@ export function LessonReader({
                   disabled={isHydrating}
                   aria-expanded={isRegenerationConfirmationOpen}
                   aria-controls="lesson-regeneration-confirmation"
-                  title="Replace the lesson, diagram, and references. Saved examples, quizzes, and flashcards are kept."
+                  title="Replace the lesson, diagram, and references. Saved examples, quizzes, and study progress are kept."
                   className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2 text-[11px] font-semibold text-[var(--color-accent)] transition hover:bg-[var(--color-hover)] disabled:cursor-wait disabled:opacity-50"
                   aria-label="Regenerate lesson"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                   Regenerate lesson
+                </button>
+              </div>
+            )}
+            {flashcardsEnabled && node.is_hydrated === 1 && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-[var(--color-ink)]">
+                    Optional study cards
+                  </p>
+                  <p className="mt-0.5 text-[11px] leading-4 text-[var(--color-muted)]">
+                    Generate flashcards separately when you’re ready to review.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={onGenerateFlashcards}
+                  disabled={
+                    isHydrating ||
+                    isGeneratingFlashcards ||
+                    flashcardCount === null ||
+                    flashcardCount > 0
+                  }
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2 text-[11px] font-semibold text-[var(--color-accent)] transition hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isGeneratingFlashcards ? (
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  ) : flashcardCount !== null && flashcardCount > 0 ? (
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  ) : (
+                    <Sparkles className="h-3.5 w-3.5" />
+                  )}
+                  {isGeneratingFlashcards
+                    ? "Generating…"
+                    : flashcardCount === null
+                      ? "Checking…"
+                      : flashcardCount > 0
+                        ? "Flashcards ready"
+                        : "Generate flashcards"}
                 </button>
               </div>
             )}
@@ -512,7 +586,7 @@ export function LessonReader({
               >
                 <p className="text-xs leading-5 text-[var(--color-ink)]">
                   Regenerate this lesson? The lesson, diagram, and references
-                  will be replaced. Worked examples, quizzes, and flashcard
+                  will be replaced. Worked examples, quizzes, and study
                   progress will be kept.
                 </p>
                 <div className="flex justify-end gap-2">
@@ -731,7 +805,7 @@ export function LessonReader({
         <button
           disabled={isHydrating || !isQuizAvailabilityLoaded}
           onClick={() => onStartDiagnostic(node.id)}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-panel)] px-3 py-2.5 text-[11px] font-semibold text-[var(--color-accent)] transition hover:bg-[var(--color-hover)] disabled:opacity-50"
+          className="flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-xl bg-[var(--color-accent-button)] px-3 py-2.5 text-xs font-semibold text-[var(--color-panel)] shadow-sm transition hover:brightness-95 disabled:opacity-50"
         >
           {hasSavedQuiz ? (
             <CheckCircle2 className="h-4 w-4" />
@@ -748,7 +822,7 @@ export function LessonReader({
         <button
           disabled={isHydrating || node.status === "mastered"}
           onClick={() => onRequestCompletion(node.id)}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--color-success)] px-3 py-2.5 text-[11px] font-semibold text-[var(--color-panel)] transition hover:brightness-95 disabled:cursor-default disabled:border disabled:border-[var(--color-border)] disabled:bg-[var(--color-panel)] disabled:text-[var(--color-success)]"
+          className="flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-panel)] px-3 py-2.5 text-xs font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:cursor-default disabled:text-[var(--color-success)]"
         >
           {node.status === "mastered" ? (
             <>

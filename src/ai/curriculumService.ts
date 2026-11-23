@@ -1,6 +1,7 @@
 import {
   generateGeminiJson,
   generateGeminiText,
+  isTransientGeminiApiError,
   parseOrRepairGeminiJson,
   streamGeminiText,
   type GeminiRequestOptions,
@@ -16,12 +17,12 @@ import {
   isLessonImageTitleRelevant,
   replaceLessonImageRequest,
 } from "./lessonImageMarkers";
+import { validateMermaidDiagram } from "../utils/mermaid";
 import { searchVaultFts } from "../db/repositories/documentRepo";
-import { createWorkspace } from "../db/repositories/workspaceRepo";
 import {
-  hydrateNodeBatch,
-  saveGraphBatch,
-} from "../db/repositories/graphRepo";
+  deleteGeneratedWorkspace,
+  saveGeneratedWorkspace,
+} from "../db/repositories/curriculumRepo";
 import {
   buildInitialGraphNodes,
   validateAndLayerDag,
@@ -183,20 +184,6 @@ async function searchCommonsImageSafely(
   }
 }
 
-function insertLessonImage(
-  markdown: string,
-  image: CommonsImage,
-  includeAttribution = false
-): string {
-  const imageMarkdown = formatLessonImage(image, includeAttribution);
-  const headingMatch = markdown.match(/^#{1,2}\s+.+(?:\r?\n|$)/);
-  if (!headingMatch) return `${imageMarkdown}\n\n${markdown}`;
-  const headingEnd = headingMatch[0].length;
-  return `${markdown.slice(0, headingEnd)}\n${imageMarkdown}\n\n${markdown.slice(
-    headingEnd
-  )}`;
-}
-
 function formatLessonImage(
   image: CommonsImage,
   includeAttribution = false
@@ -251,17 +238,11 @@ export async function generateWorkedExample(
     "trace-table": "Include a Markdown state or execution trace table.",
     analogy: "Include a concise real-world analogy and explain where it does and does not apply.",
     image:
-      "A relevant online Wikimedia Commons illustration will be added when one is available; do not claim details about an image you cannot see.",
+      "Only when a specific real-world example or concept materially benefits from a visual, place [[NOESIS_IMAGE: exact subject]] on its own line at that point. Use a specific, factual subject (not pronouns or vague phrases); otherwise do not request an image. The image is sourced from Wikimedia Commons and its attribution/link will be attached.",
   };
   const selectedInstructions = tools.length
     ? tools.map((tool) => toolInstructions[tool]).join("\n")
     : "Choose the most useful worked-example format for this concept.";
-  const imageResultPromise = tools.includes("image")
-    ? searchCommonsImageSafely(
-      `${node.title} ${userPrompt.split(/\s+/).slice(0, 6).join(" ")}`,
-      options.signal
-      )
-    : Promise.resolve({ image: null, warning: null });
   const generatedExample = await streamGeminiText(
     {
       tier: "synthesis",
@@ -274,14 +255,18 @@ export async function generateWorkedExample(
     options.onChunk ?? (() => {})
   );
   if (!tools.includes("image")) return generatedExample;
-  const imageResult = await imageResultPromise;
-  if (imageResult.image) {
-    return insertLessonImage(generatedExample, imageResult.image, true);
-  }
-  if (imageResult.warning) {
-    return `${generatedExample}\n\n> ${imageResult.warning}`;
-  }
-  return generatedExample;
+  const imageRequest = extractLessonImageRequest(generatedExample);
+  const imageResult = imageRequest
+    ? await searchCommonsImageSafely(imageRequest.query, options.signal)
+    : { image: null, warning: null };
+  const cleanedExample = replaceLessonImageRequest(
+    generatedExample,
+    imageRequest?.marker ?? "",
+    imageResult.image ? formatLessonImage(imageResult.image, true) : ""
+  );
+  return imageResult.warning
+    ? `${cleanedExample}\n\n> ${imageResult.warning}`
+    : cleanedExample;
 }
 
 export async function summarizeTutorThread(
@@ -495,8 +480,22 @@ export async function generateWorkspaceCurriculum(
     phase: "Saving curriculum…",
     nodeTitles: positionedNodes.map((node) => node.title),
   });
-  await createWorkspace(workspace);
-  await saveGraphBatch(positionedNodes, validated.validEdges);
+  if (signal?.aborted) {
+    throw new DOMException("Curriculum generation stopped.", "AbortError");
+  }
+  await saveGeneratedWorkspace(workspace, positionedNodes, validated.validEdges);
+  if (signal?.aborted) {
+    try {
+      await deleteGeneratedWorkspace(workspace.id);
+    } catch (error) {
+      throw new Error(
+        `Curriculum generation was stopped, but its saved workspace could not be removed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+    throw new DOMException("Curriculum generation stopped.", "AbortError");
+  }
   onProgress?.({
     phase: "Curriculum ready",
     nodeTitles: positionedNodes.map((node) => node.title),
@@ -619,7 +618,8 @@ function mapCompactCurriculum(
 
 export async function generateLessonMaterial(
   node: GraphNode,
-  workspaceTitle: string
+  workspaceTitle: string,
+  onProgress?: (text: string) => void
 ): Promise<{
   lessonMarkdown: string;
   mermaidDiagram: string;
@@ -659,63 +659,100 @@ export async function generateLessonMaterial(
   const lessonRequest: GeminiRequestOptions = {
     tier: "synthesis",
     systemInstruction:
-      `Teach from first principles. ${lessonDepthInstructions} Use \\frac{numerator}{denominator} for every fraction and never use TeX \\over. Return the complete lesson as raw Markdown only, with clear headings, worked examples, and one valid Mermaid flowchart in a fenced mermaid block. Use simple alphanumeric node IDs and quote node labels. Do not wrap the lesson in JSON. Only request an online image when a specific real-world visual materially helps explain a concept; never add a decorative image or image to the opening just to fill space. When one is useful, put [[NOESIS_IMAGE: concise specific subject]] on its own line at the point in the lesson where it is discussed. Request at most one image, and do not request an image for a concept that is better explained by the diagram or equations.`,
+      `Teach from first principles. ${lessonDepthInstructions} Use \\frac{numerator}{denominator} for every fraction and never use TeX \\over. Return the complete lesson as raw Markdown only, with clear headings and worked examples. Include a Mermaid flowchart only when a diagram materially clarifies the lesson; otherwise omit it. Any Mermaid block must use simple alphanumeric node IDs and quoted node labels. Do not wrap the lesson in JSON. Only request an online image when a specific real-world example or concept materially benefits from a visual; never add a decorative image or image to the opening just to fill space. When useful, put [[NOESIS_IMAGE: concise specific subject]] on its own line at the relevant point. Request at most one image and prefer no image when the concept is better explained by text, a diagram, or equations.`,
     userPrompt: `Course: ${workspaceTitle}\nTopic Node: ${node.title}\nScope: ${node.summary_hint}\n\nLocal Vault Context:\n${vaultContext}`,
     maxOutputTokens: lessonTokenBudgets[lessonDepth],
   };
-  const generatedLesson = (await generateGeminiText(lessonRequest)).trim();
+  let streamedLesson = "";
+  let generatedLesson: string;
+  try {
+    generatedLesson = await streamGeminiText(lessonRequest, (chunk) => {
+      streamedLesson += chunk;
+      onProgress?.(streamedLesson);
+    });
+  } catch (streamError) {
+    if (isTransientGeminiApiError(streamError)) throw streamError;
+    try {
+      onProgress?.("");
+      generatedLesson = await generateGeminiText(lessonRequest);
+    } catch (fallbackError) {
+      const describe = (error: unknown) =>
+        error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Lesson streaming failed: ${describe(streamError)}. Standard generation fallback failed: ${describe(fallbackError)}`
+      );
+    }
+  }
+  generatedLesson = generatedLesson.trim();
   if (!generatedLesson) {
     throw new Error(`Lesson generation returned empty content for ${node.title}.`);
   }
 
-  const mermaidMatch = generatedLesson.match(
-    /```mermaid\s*\r?\n([\s\S]*?)```/i
-  );
-  let mermaidDiagram = mermaidMatch?.[1]?.trim() ?? "";
-  let lessonMarkdown = mermaidMatch
-    ? generatedLesson.replace(mermaidMatch[0], "").trim()
-    : generatedLesson;
+  const mermaidBlockPattern =
+    /```mermaid[ \t]*\r?\n([\s\S]*?)(?:\r?\n```[ \t]*|$)/gi;
+  const mermaidMatches = Array.from(generatedLesson.matchAll(mermaidBlockPattern));
+  let mermaidDiagram = mermaidMatches[0]?.[1]?.trim() ?? "";
+  let lessonMarkdown = generatedLesson
+    .replace(mermaidBlockPattern, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   const imageRequest = extractLessonImageRequest(lessonMarkdown);
   const imageResultPromise = imageRequest
     ? searchCommonsImageSafely(imageRequest.query)
     : Promise.resolve({ image: null, warning: null });
-  if (!mermaidDiagram) {
+  if (mermaidDiagram) {
     try {
-      const diagramResponse = await generateGeminiText({
-        tier: "fast",
-        temperature: 0.1,
-        maxOutputTokens: 400,
-        timeoutMs: 45_000,
-        systemInstruction:
-          "Return only a valid Mermaid flowchart using flowchart TD. Use simple alphanumeric node IDs, quote every node label, and connect 3-6 key ideas. No markdown fences or prose.",
-        userPrompt: `Create a concept diagram for "${node.title}". Scope: ${node.summary_hint}\nLesson:\n${lessonMarkdown.slice(0, 2500)}`,
-      });
-      mermaidDiagram = diagramResponse
-        .replace(/^```(?:mermaid)?\s*/i, "")
-        .replace(/```$/g, "")
-        .trim();
-    } catch (error) {
-      citations.push(
-        `Concept diagram generation was unavailable: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
+      await validateMermaidDiagram(mermaidDiagram);
+    } catch (validationError) {
+      try {
+        const diagramResponse = await generateGeminiText({
+          tier: "fast",
+          temperature: 0,
+          maxOutputTokens: 400,
+          timeoutMs: 45_000,
+          systemInstruction:
+            "Return only a syntactically valid Mermaid flowchart using flowchart TD. Use simple alphanumeric node IDs, quote every node label, and connect 3-6 key ideas. No markdown fences or prose.",
+          userPrompt: `Regenerate only this invalid Mermaid diagram for "${node.title}". Scope: ${node.summary_hint}\nValidation error: ${
+            validationError instanceof Error
+              ? validationError.message
+              : String(validationError)
+          }\nInvalid diagram:\n${mermaidDiagram}\nLesson:\n${lessonMarkdown.slice(
+            0,
+            2500
+          )}`,
+        });
+        const replacement = diagramResponse
+          .replace(/^```(?:mermaid)?\s*/i, "")
+          .replace(/```$/g, "")
+          .trim();
+        await validateMermaidDiagram(replacement);
+        mermaidDiagram = replacement;
+      } catch (repairError) {
+        mermaidDiagram = "";
+        citations.push(
+          `The generated diagram was omitted after validation or repair failed: ${
+            repairError instanceof Error
+              ? repairError.message
+              : String(repairError)
+          }`
+        );
+      }
     }
   }
-  if (imageRequest) {
-    const imageResult = await imageResultPromise;
-    lessonMarkdown = replaceLessonImageRequest(
-      lessonMarkdown,
-      imageRequest.marker,
-      imageResult.image ? formatLessonImage(imageResult.image) : ""
+  const imageResult = imageRequest
+    ? await imageResultPromise
+    : { image: null, warning: null };
+  lessonMarkdown = replaceLessonImageRequest(
+    lessonMarkdown,
+    imageRequest?.marker ?? "",
+    imageResult.image ? formatLessonImage(imageResult.image) : ""
+  );
+  if (imageResult.image) {
+    citations.push(
+      `Illustration: ${imageResult.image.attribution} — ${imageResult.image.sourceUrl}`
     );
-    if (imageResult.image) {
-      citations.push(
-        `Illustration: ${imageResult.image.attribution} — ${imageResult.image.sourceUrl}`
-      );
-    } else if (imageResult.warning) {
-      citations.push(imageResult.warning);
-    }
+  } else if (imageResult.warning) {
+    citations.push(imageResult.warning);
   }
   return {
     lessonMarkdown,
@@ -725,19 +762,30 @@ export async function generateLessonMaterial(
 }
 
 /**
- * Hydrates a single DAG node with a structured lesson, Mermaid diagram, and SM-2 flashcards.
+ * Hydrates a single DAG node with its lesson and optional Mermaid diagram.
  */
 export async function hydrateNodeContent(
   node: GraphNode,
-  workspaceTitle: string
+  workspaceTitle: string,
+  onProgress?: (text: string) => void
 ): Promise<{
   lessonMarkdown: string;
   mermaidDiagram: string;
   citations: string[];
-  flashcards: Flashcard[];
 }> {
   const { lessonMarkdown, mermaidDiagram, citations } =
-    await generateLessonMaterial(node, workspaceTitle);
+    await generateLessonMaterial(node, workspaceTitle, onProgress);
+  return { lessonMarkdown, mermaidDiagram, citations };
+}
+
+export async function generateLessonFlashcards(
+  node: GraphNode,
+  lessonMarkdown: string
+): Promise<Flashcard[]> {
+  if (!lessonMarkdown.trim()) {
+    throw new Error("Generate the lesson before creating its flashcards.");
+  }
+
   const flashcardSchema: Record<string, unknown> = {
     type: "ARRAY",
     items: {
@@ -749,7 +797,7 @@ export async function hydrateNodeContent(
       required: ["front", "back"],
     },
   };
-  const rawFlashcards = await generateGeminiJson<unknown>({
+  const response = await generateGeminiJson<unknown>({
     tier: "fast",
     temperature: 0,
     maxOutputTokens: 700,
@@ -758,10 +806,13 @@ export async function hydrateNodeContent(
     userPrompt: `Concept: ${node.title}\nScope: ${node.summary_hint}\nLesson:\n${lessonMarkdown.slice(0, 9000)}`,
     jsonSchema: flashcardSchema,
   });
-  if (!Array.isArray(rawFlashcards)) {
-    throw new Error(`Flashcard generation returned an invalid array for ${node.title}.`);
+  if (!Array.isArray(response) || response.length === 0) {
+    throw new Error(
+      `Flashcard generation returned no cards for ${node.title}.`
+    );
   }
-  const normalizedFlashcards = rawFlashcards.slice(0, 5).map((value) => {
+
+  const normalizedFlashcards = response.slice(0, 5).map((value) => {
     const card =
       value && typeof value === "object" && !Array.isArray(value)
         ? (value as Record<string, unknown>)
@@ -785,7 +836,7 @@ export async function hydrateNodeContent(
   }
 
   const now = Date.now();
-  const cards: Flashcard[] = normalizedFlashcards.map((fc) => ({
+  return normalizedFlashcards.map((fc) => ({
     id: crypto.randomUUID(),
     node_id: node.id,
     front: fc.front,
@@ -795,21 +846,6 @@ export async function hydrateNodeContent(
     repetitions: 0,
     next_review_at: now,
   }));
-
-  await hydrateNodeBatch(
-    node.id,
-    lessonMarkdown,
-    mermaidDiagram || null,
-    JSON.stringify(citations),
-    cards
-  );
-
-  return {
-    lessonMarkdown,
-    mermaidDiagram,
-    citations,
-    flashcards: cards,
-  };
 }
 
 /**

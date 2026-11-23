@@ -14,6 +14,7 @@ import {
   Check,
   History,
   LoaderCircle,
+  MoreHorizontal,
   Pencil,
   Plus,
   Settings2,
@@ -238,6 +239,7 @@ export function TutorDrawer({
   >(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
   const [chatSettings, setChatSettings] = useState(loadTutorChatSettings);
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -249,6 +251,7 @@ export function TutorDrawer({
   const topSentinelRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const enterFramesRef = useRef<number[]>([]);
+  const enterFallbackRef = useRef<number | null>(null);
   const exitTimerRef = useRef<number | null>(null);
 
   useLayoutEffect(() => {
@@ -295,12 +298,21 @@ export function TutorDrawer({
   }, []);
 
   useEffect(() => {
-    if (!isOpen) setDeleteConfirmation(null);
+    if (!isOpen) {
+      setDeleteConfirmation(null);
+      setIsActionsMenuOpen(false);
+      setIsHistoryOpen(false);
+      setIsSettingsOpen(false);
+    }
   }, [isOpen]);
 
   useEffect(() => {
     enterFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
     enterFramesRef.current = [];
+    if (enterFallbackRef.current !== null) {
+      window.clearTimeout(enterFallbackRef.current);
+      enterFallbackRef.current = null;
+    }
     if (exitTimerRef.current !== null) {
       window.clearTimeout(exitTimerRef.current);
       exitTimerRef.current = null;
@@ -309,15 +321,26 @@ export function TutorDrawer({
     if (isOpen) {
       setIsRendered(true);
       setIsVisible(false);
-      const firstFrame = requestAnimationFrame(() => {
-        const secondFrame = requestAnimationFrame(() => setIsVisible(true));
-        enterFramesRef.current = [secondFrame];
-      });
-      enterFramesRef.current = [firstFrame];
+      if (typeof window.requestAnimationFrame === "function") {
+        const firstFrame = window.requestAnimationFrame(() => {
+          const secondFrame = window.requestAnimationFrame(() =>
+            setIsVisible(true)
+          );
+          enterFramesRef.current = [secondFrame];
+        });
+        enterFramesRef.current = [firstFrame];
+      }
+      enterFallbackRef.current = window.setTimeout(
+        () => setIsVisible(true),
+        120
+      );
     } else {
       controllerRef.current?.abort();
       setIsVisible(false);
-      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      if (
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ??
+        false
+      ) {
         setIsRendered(false);
       } else {
         exitTimerRef.current = window.setTimeout(
@@ -329,6 +352,10 @@ export function TutorDrawer({
 
     return () => {
       enterFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
+      if (enterFallbackRef.current !== null) {
+        window.clearTimeout(enterFallbackRef.current);
+        enterFallbackRef.current = null;
+      }
       if (exitTimerRef.current !== null) {
         window.clearTimeout(exitTimerRef.current);
       }
@@ -492,14 +519,22 @@ export function TutorDrawer({
     const sentinel = topSentinelRef.current;
     if (!root || !sentinel || !activeThreadId || !hasMoreMessages) return;
 
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) void loadOlderMessages();
-      },
-      { root, rootMargin: "72px 0px 0px" }
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
+    if (typeof window.IntersectionObserver === "function") {
+      const observer = new window.IntersectionObserver(
+        ([entry]) => {
+          if (entry.isIntersecting) void loadOlderMessages();
+        },
+        { root, rootMargin: "72px 0px 0px" }
+      );
+      observer.observe(sentinel);
+      return () => observer.disconnect();
+    }
+
+    const loadWhenNearTop = () => {
+      if (root.scrollTop <= 72) void loadOlderMessages();
+    };
+    root.addEventListener("scroll", loadWhenNearTop, { passive: true });
+    return () => root.removeEventListener("scroll", loadWhenNearTop);
   }, [activeThreadId, hasMoreMessages, loadOlderMessages]);
 
   const stopGeneration = () => controllerRef.current?.abort();
@@ -912,9 +947,9 @@ export function TutorDrawer({
         isVisible ? "tutor-drawer-panel-visible" : ""
       }`}
     >
-      <div className="relative flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3.5">
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--color-accent-soft)] text-[var(--color-accent)]">
+      <div className="relative flex min-w-0 items-center gap-3 border-b border-[var(--color-border)] px-3 py-3">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--color-accent-soft)] text-[var(--color-accent)]">
             <Bot className="h-4 w-4" />
           </div>
           <div className="min-w-0">
@@ -923,7 +958,7 @@ export function TutorDrawer({
                 ? "Socratic Tutor"
                 : "AI Assistant"}
             </h3>
-            <p className="max-w-[170px] truncate text-[10px] text-[var(--color-muted)]">
+            <p className="truncate text-[10px] text-[var(--color-muted)]">
               {activeThread?.title ??
                 (chatSettings.interactionStyle === "tutor"
                   ? "Guided learning · local sources"
@@ -931,45 +966,11 @@ export function TutorDrawer({
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => {
-              setIsHistoryOpen(false);
-              setIsSettingsOpen((open) => !open);
-            }}
-            className={`rounded-lg p-1.5 transition hover:bg-[var(--color-hover)] ${
-              isSettingsOpen
-                ? "text-[var(--color-accent)]"
-                : "text-[var(--color-muted)]"
-            }`}
-            aria-label="Chat settings"
-            aria-expanded={isSettingsOpen}
-            title="Chat settings"
-          >
-            <Settings2 className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setIsSettingsOpen(false);
-              setIsHistoryOpen((open) => !open);
-            }}
-            className={`rounded-lg p-1.5 transition hover:bg-[var(--color-hover)] ${
-              isHistoryOpen
-                ? "text-[var(--color-accent)]"
-                : "text-[var(--color-muted)]"
-            }`}
-            aria-label="Toggle tutor history"
-            aria-expanded={isHistoryOpen}
-            title="History"
-          >
-            <History className="h-4 w-4" />
-          </button>
+        <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
             onClick={() => void createNewChat()}
-            className="rounded-lg border border-[var(--color-border)] p-1.5 text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-2.5 text-[11px] font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
             aria-label="New chat"
             title="New chat"
           >
@@ -977,26 +978,88 @@ export function TutorDrawer({
           </button>
           <button
             type="button"
-            onClick={() => void requestChatHistoryClear()}
-            disabled={
-              !activeThreadId || preparingDeleteThreadId === activeThreadId
-            }
-            className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:opacity-40"
-            title="Clear current chat"
-            aria-label="Clear current chat"
+            onClick={() => {
+              setIsSettingsOpen(false);
+              setIsHistoryOpen(false);
+              setIsActionsMenuOpen((open) => !open);
+            }}
+            className={`grid h-9 w-9 place-items-center rounded-lg transition hover:bg-[var(--color-hover)] ${
+              isActionsMenuOpen
+                ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                : "text-[var(--color-muted)]"
+            }`}
+            aria-label="More tutor actions"
+            aria-expanded={isActionsMenuOpen}
+            title="More tutor actions"
           >
-            <Trash2 className="h-3.5 w-3.5" />
+            <MoreHorizontal className="h-4 w-4" />
           </button>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            className="grid h-9 w-9 place-items-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] focus-visible:outline-2 focus-visible:outline-[var(--color-focus-ring)]"
             aria-label="Close tutor panel"
             title="Close tutor"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
+
+        <AnimatedPresence
+          present={isActionsMenuOpen}
+          motion="popover"
+          className="absolute right-12 top-full z-40 mt-2 w-56"
+          exitDuration={170}
+        >
+          <div
+            role="menu"
+            aria-label="Tutor actions"
+            className="motion-popover overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-1.5 shadow-[0_16px_44px_rgba(31,43,51,0.18)]"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setIsActionsMenuOpen(false);
+                setIsHistoryOpen(false);
+                setIsSettingsOpen((open) => !open);
+              }}
+              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+            >
+              <Settings2 className="h-4 w-4 text-[var(--color-muted)]" />
+              Chat settings
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setIsActionsMenuOpen(false);
+                setIsSettingsOpen(false);
+                setIsHistoryOpen((open) => !open);
+              }}
+              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+            >
+              <History className="h-4 w-4 text-[var(--color-muted)]" />
+              Chat history
+            </button>
+            <div className="my-1 border-t border-[var(--color-border)]" />
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setIsActionsMenuOpen(false);
+                void requestChatHistoryClear();
+              }}
+              disabled={
+                !activeThreadId || preparingDeleteThreadId === activeThreadId
+              }
+              className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs font-semibold text-[var(--color-warning)] transition hover:bg-[var(--color-warning)]/10 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Trash2 className="h-4 w-4" />
+              Clear current chat
+            </button>
+          </div>
+        </AnimatedPresence>
 
         <AnimatedPresence
           present={isSettingsOpen}
@@ -1212,9 +1275,24 @@ export function TutorDrawer({
                 ? "Ask about a concept or your notes. Switch to AI assistant in settings for direct answers."
                 : "Ask anything, or attach a lesson to include it as context."}
             </p>
-            <p className="mt-2 text-[10px]">
-              Close this panel with the X button or the Tutor button in the top bar.
-            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {[
+                "Explain a concept step by step",
+                "Help me make a study plan",
+              ].map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  onClick={() => {
+                    setInput(prompt);
+                    composerRef.current?.focus();
+                  }}
+                  className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3 py-2 text-[11px] font-medium text-[var(--color-accent)] transition hover:bg-[var(--color-accent-soft)]"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           messages.map((message, index) => (
@@ -1266,7 +1344,7 @@ export function TutorDrawer({
               <button
                 type="button"
                 onClick={() => void updateAttachedLesson(null)}
-                className="shrink-0 rounded-full p-0.5 hover:bg-[var(--color-panel)]"
+                className="grid h-6 w-6 shrink-0 place-items-center rounded-full hover:bg-[var(--color-panel)]"
                 aria-label={`Remove ${attachedLesson.title} context`}
                 title="Remove lesson context"
               >

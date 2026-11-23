@@ -83,6 +83,7 @@ export interface UserPreferences {
   lastLightThemeId: AppTheme;
   fontFamily: FontFamily;
   readingScale: ReadingScale;
+  highContrastText: boolean;
   showCanvasDots: boolean;
   edgeRouting: "curved" | "orthogonal";
   nodeDensity: "comfortable" | "compact";
@@ -99,12 +100,13 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
   lastLightThemeId: "daylight",
   fontFamily: "system",
   readingScale: "default",
+  highContrastText: false,
   showCanvasDots: true,
   edgeRouting: "curved",
   nodeDensity: "comfortable",
   masteryPassThreshold: 80,
   dailyReviewLimit: 20,
-  showAppTutorial: true,
+  showAppTutorial: false,
   launchInFullscreen: false,
 };
 
@@ -301,6 +303,10 @@ export function loadUserPreferences(): UserPreferences {
         parsed.readingScale === "compact" || parsed.readingScale === "comfortable"
           ? parsed.readingScale
           : "default",
+      highContrastText:
+        typeof parsed.highContrastText === "boolean"
+          ? parsed.highContrastText
+          : DEFAULT_PREFERENCES.highContrastText,
       showCanvasDots:
         typeof parsed.showCanvasDots === "boolean"
           ? parsed.showCanvasDots

@@ -22,6 +22,7 @@
   --color-muted: #5e6d72;
   --color-accent: #326a9f;
   --color-accent-button: #326a9f;
+  --color-accent-foreground: #ffffff;
   --color-accent-soft: #e9f1f7;
   --color-success: #19816f;
   --color-warning: #b7792d;
@@ -29,6 +30,7 @@
   --color-edge-active: #4f83a5;
   --color-edge-upstream: #9a7951;
   --color-canvas-dot: rgba(91, 112, 124, 0.17);
+  --color-focus-ring: var(--color-accent);
   --node-mastered-bg: #f1faf6;
   --node-mastered-border: #9ccdc0;
   --node-mastered-ink: #263e39;
@@ -78,6 +80,10 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "cv11", "ss01";
+}
+
+html {
+  font-size: 17px;
 }
 
 html,
@@ -136,8 +142,8 @@ button:disabled {
 }
 
 :focus-visible {
-  outline: 2px solid #3978a8;
-  outline-offset: 2px;
+  outline: 3px solid var(--color-focus-ring);
+  outline-offset: 3px;
 }
 
 @layer components {
@@ -198,6 +204,7 @@ button:disabled {
     --color-selected: var(--color-accent-soft);
     --color-border-strong: color-mix(in srgb, var(--color-muted) 50%, var(--color-border));
     --color-accent-button: var(--color-accent);
+    --color-accent-foreground: var(--color-app-bg);
     --color-success: #78c5a1;
     --color-warning: #d3a75d;
     --color-edge-muted: var(--color-border-strong);
@@ -313,6 +320,7 @@ button:disabled {
     --color-panel-subtle: color-mix(in srgb, var(--color-app-bg) 50%, var(--color-panel));
     --color-ink: #4C4F69;
     --color-muted: #6C6F85; --color-accent: #7287FD; --color-accent-button: #7287FD;
+    --color-accent-foreground: #1E1E2E;
     --color-accent-soft: #dfe4ff; --color-border: #d2d6e0;
     --color-edge-upstream: #179299;
   }
@@ -488,6 +496,7 @@ button:disabled {
     --color-muted: #b7b7b7;
     --color-accent: #79b4ed;
     --color-accent-button: #326a9f;
+    --color-accent-foreground: #ffffff;
     --color-accent-soft: #293b4b;
     --color-success: #78c5a1;
     --color-warning: #d3a75d;
@@ -613,6 +622,48 @@ button:disabled {
     --node-unlocked-bg: #fbfcf7;
     --node-unlocked-border: #b7c5a8;
     --node-unlocked-ink: #3b4b37;
+}
+
+[data-high-contrast-text="true"] {
+  --color-ink: #111111;
+  --color-muted: #303030;
+  --color-border-strong: #666666;
+  --color-focus-ring: #111111;
+}
+
+[data-high-contrast-text="true"][data-theme="mica-dark"],
+[data-high-contrast-text="true"][data-theme="midnight-dusk"],
+[data-high-contrast-text="true"][data-theme="tako"],
+[data-high-contrast-text="true"][data-theme="nord-night"],
+[data-high-contrast-text="true"][data-theme="catppuccin-mocha"],
+[data-high-contrast-text="true"][data-theme="tokyo-night"],
+[data-high-contrast-text="true"][data-theme="amoled-obsidian"] {
+  --color-ink: #ffffff;
+  --color-muted: #f0f0f0;
+  --color-border-strong: #a0a0a0;
+  --color-focus-ring: #ffffff;
+}
+
+[data-high-contrast-text="true"]
+  :is(.text-slate-300, .text-slate-400, .text-slate-500, .text-gray-300, .text-gray-400, .text-gray-500) {
+  color: var(--color-muted) !important;
+}
+
+[data-high-contrast-text="true"]
+  :is(.text-slate-600, .text-slate-700, .text-slate-800, .text-gray-600, .text-gray-700, .text-gray-800) {
+  color: var(--color-ink) !important;
+}
+
+[data-high-contrast-text="true"] input::placeholder,
+[data-high-contrast-text="true"] textarea::placeholder {
+  color: var(--color-muted);
+  opacity: 1;
+}
+
+[data-high-contrast-text="true"] .prose a {
+  color: var(--color-ink);
+  font-weight: 600;
+  text-decoration-thickness: 2px;
 }
 
 @layer components {
@@ -1129,7 +1180,211 @@ button:disabled {
 }
 
 button {
-  transition-property: transform, opacity;
+  transition-property:
+    background-color,
+    border-color,
+    color,
+    box-shadow,
+    transform,
+    opacity;
+  transition-duration: var(--duration-snap);
+  transition-timing-function: var(--ease-snap);
+}
+
+.app-shell .text-\[9px\] {
+  font-size: 0.625rem;
+}
+
+.app-shell .text-\[10px\] {
+  font-size: 0.6875rem;
+}
+
+/* Graph cards use fixed layout coordinates, so keep their original text scale. */
+[data-dag-node] .text-\[9px\] {
+  font-size: 9px;
+}
+
+[data-dag-node] .text-\[10px\] {
+  font-size: 10px;
+}
+
+[data-dag-node] .text-\[11px\] {
+  font-size: 11px;
+}
+
+.lesson-reader-panel,
+.tutor-drawer-panel {
+  box-shadow: -16px 0 42px color-mix(in srgb, var(--color-ink) 12%, transparent);
+}
+
+.canvas-more-menu > summary::after,
+.disclosure-chevron > summary::after {
+  width: 0;
+  height: 0;
+  margin-left: auto;
+  border-top: 5px solid currentColor;
+  border-right: 4px solid transparent;
+  border-left: 4px solid transparent;
+  content: "";
+  transition: transform var(--duration-snap) var(--ease-snap);
+}
+
+.canvas-more-menu > summary::after {
+  margin-left: 0.5rem;
+}
+
+.canvas-more-menu[open] > summary::after,
+.disclosure-chevron[open] > summary::after {
+  transform: rotate(180deg);
+}
+
+.settings-disclosure > summary {
+  min-height: 2.75rem;
+  display: flex;
+  align-items: center;
+}
+
+.disclosure-chevron > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.settings-disclosure > summary:focus-visible,
+.canvas-more-menu > summary:focus-visible,
+.disclosure-chevron > summary:focus-visible {
+  outline: 3px solid var(--color-focus-ring);
+  outline-offset: 3px;
+}
+
+.quiz-arena-shell {
+  background-image: radial-gradient(
+    ellipse at 12% 0%,
+    color-mix(in srgb, var(--color-accent) 9%, transparent),
+    transparent 42%
+  );
+}
+
+.quiz-config-card {
+  background-image: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-accent-soft) 55%, transparent),
+    transparent 55%
+  );
+}
+
+@media (max-width: 760px) {
+  .quiz-arena-header {
+    min-height: 0;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+  }
+
+  .quiz-arena-header > div:nth-of-type(1) {
+    width: 2.25rem;
+    height: 2.25rem;
+  }
+
+  .quiz-arena-header > div:nth-of-type(2) {
+    flex: 1 1 calc(100% - 9rem);
+  }
+
+  .quiz-arena-header > button:last-child {
+    margin-left: auto;
+  }
+
+  .settings-shell {
+    height: min(88vh, 720px);
+    max-height: 90vh;
+    flex-direction: column;
+  }
+
+  .settings-sections {
+    width: auto;
+    flex: none;
+    padding: 0.5rem 0.75rem;
+    border-right: 0;
+    border-bottom: 1px solid #e9e7e1;
+  }
+
+  .settings-sections nav {
+    display: flex;
+    gap: 0.25rem;
+    margin-top: 0.25rem;
+    overflow-x: auto;
+    padding: 2px;
+  }
+
+  .settings-sections nav button {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 0.5rem 0.75rem;
+  }
+
+  .settings-sections > div:last-child {
+    display: none;
+  }
+
+  .settings-shell > div:nth-child(2) {
+    min-height: 0;
+  }
+
+  .app-shell .app-topbar {
+    height: auto;
+    min-height: 4rem;
+    flex-wrap: wrap;
+    padding-block: 0.5rem;
+    padding-inline: 0.75rem;
+  }
+
+  .app-shell .app-topbar > div:first-child {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .app-shell .app-topbar > div:last-child {
+    margin-left: auto;
+  }
+
+  .app-shell .app-topbar nav {
+    max-width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .lesson-reader-panel {
+    width: min(560px, calc(100vw - 64px));
+    min-width: min(360px, calc(100vw - 64px));
+  }
+
+  .lesson-reader-panel-visible[data-tutor-open="true"] {
+    transform: translate3d(0, 0, 0);
+  }
+
+  .lesson-reader-panel-expanded[data-tutor-open="true"] {
+    width: 100%;
+  }
+}
+
+@media (max-width: 520px) {
+  .lesson-reader-panel {
+    width: 100%;
+    min-width: 100%;
+  }
+
+  .lesson-reader-panel-visible[data-tutor-open="true"] {
+    transform: translate3d(0, 0, 0);
+  }
+
+  .lesson-reader-panel-expanded[data-tutor-open="true"] {
+    width: 100%;
+  }
+
+  .app-shell .app-topbar nav button {
+    padding-inline: 0.625rem;
+  }
 }
 
 .workspace-loading-indicator {

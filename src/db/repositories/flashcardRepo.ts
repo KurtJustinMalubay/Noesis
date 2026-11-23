@@ -7,6 +7,25 @@ export interface DueFlashcard extends Flashcard {
   node_title: string;
 }
 
+export interface WorkspaceFlashcard extends Flashcard {
+  node_title: string;
+}
+
+export async function getWorkspaceFlashcards(
+  workspaceId: string
+): Promise<WorkspaceFlashcard[]> {
+  const db = await getDb();
+  return db.select<WorkspaceFlashcard[]>(
+    `SELECT f.*, n.title AS node_title
+     FROM flashcards f
+     JOIN nodes n ON n.id = f.node_id
+     WHERE n.workspace_id = $1
+       AND n.archived_at IS NULL
+     ORDER BY n.title COLLATE NOCASE ASC, f.next_review_at ASC`,
+    [workspaceId]
+  );
+}
+
 export async function getDueFlashcards(
   workspaceId: string,
   nowMs: number = Date.now()
@@ -29,6 +48,49 @@ export async function getNodeFlashcards(nodeId: string): Promise<Flashcard[]> {
   return db.select<Flashcard[]>(
     "SELECT * FROM flashcards WHERE node_id = $1 ORDER BY next_review_at ASC",
     [nodeId]
+  );
+}
+
+export async function insertFlashcard(card: Flashcard): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute(
+      `INSERT INTO flashcards (
+         id, node_id, front, back, ease_factor, interval_days, repetitions, next_review_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        card.id,
+        card.node_id,
+        card.front,
+        card.back,
+        card.ease_factor,
+        card.interval_days,
+        card.repetitions,
+        card.next_review_at,
+      ]
+    )
+  );
+}
+
+export async function updateFlashcardContent(
+  cardId: string,
+  nodeId: string,
+  front: string,
+  back: string
+): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute(
+      "UPDATE flashcards SET node_id = $1, front = $2, back = $3 WHERE id = $4",
+      [nodeId, front, back, cardId]
+    )
+  );
+}
+
+export async function deleteFlashcard(cardId: string): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    db.execute("DELETE FROM flashcards WHERE id = $1", [cardId])
   );
 }
 

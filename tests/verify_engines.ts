@@ -189,7 +189,12 @@ async function testAll() {
   assert(rev2.repetitions === 2 && rev2.interval_days === 6, "Repetition 2 check");
 
   const revFail = scheduleNextReview(rev2, 0, now);
-  assert(revFail.repetitions === 0 && revFail.interval_days === 1, "Reset on Again (0)");
+  assert(
+    revFail.repetitions === 0 &&
+      revFail.interval_days === 0 &&
+      revFail.next_review_at === now + 10 * 60 * 1000,
+    "Again should reset repetitions and make the card due again in ten minutes"
+  );
   console.log("✓ sm2Scheduler tests passed!");
 
   console.log("=== 5. Testing chunker & SHA-256 ===");

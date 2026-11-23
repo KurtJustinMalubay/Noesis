@@ -245,11 +245,59 @@ async function run(): Promise<void> {
     );
     assert(
       fallbackReply === "Fallback succeeded" &&
-        unavailableAttempts === 3 &&
+        unavailableAttempts === 2 &&
         retryUrls.some((url) => url.includes("/models/gemini-4-hydrogen:")),
-      "503 responses should retry the selected model and fail over to the configured alternate"
+      "503 responses should retry once and fail over to the configured alternate"
     );
 
+    storedAiSettings = JSON.stringify({
+      provider: "gemini",
+      apiKey: "test-key",
+      fastModel: "gemini-3.5-flash-lite",
+      synthesisModel: "gemini-3.5-flash-lite",
+    });
+    const sameModelUrls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      sameModelUrls.push(url);
+      if (url.includes("/models/gemini-3.5-flash-lite:")) {
+        return new Response(
+          JSON.stringify({
+            error: { code: 503, status: "UNAVAILABLE", message: "Overloaded" },
+          }),
+          { status: 503, headers: { "Retry-After": "0" } }
+        );
+      }
+      return makeResponse(
+        `data: ${JSON.stringify({
+          candidates: [{ content: { parts: [{ text: "Alternate model succeeded" }] } }],
+        })}\n\n`
+      );
+    }) as typeof fetch;
+    const alternateModelReply = await streamGeminiText(
+      {
+        tier: "synthesis",
+        apiKey: "test-key",
+        systemInstruction: "Test",
+        userPrompt: "Recover when both configured models match",
+      },
+      () => {}
+    );
+    assert(
+      alternateModelReply === "Alternate model succeeded" &&
+        sameModelUrls.some((url) => url.includes("/models/gemini-3.8-flash:")) &&
+        !sameModelUrls.some((url) =>
+          url.includes("/models/gemini-3.5-flash-lite:")
+        ),
+      "an overloaded model should be bypassed during cooldown and use a distinct supported fallback"
+    );
+
+    storedAiSettings = JSON.stringify({
+      provider: "gemini",
+      apiKey: "test-key",
+      fastModel: "gemini-4-hydrogen",
+      synthesisModel: "gemini-3.5-flash-lite",
+    });
     const apiError = JSON.stringify({
       error: { code: 404, message: "Model not found" },
     });

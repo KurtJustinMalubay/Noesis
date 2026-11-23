@@ -1,3 +1,5 @@
+import { queueMermaidTask } from "../../utils/mermaid";
+
 function resolveThemeColor(
   root: HTMLElement,
   name: string,
@@ -60,21 +62,18 @@ function getFallbackThemeVariables() {
   };
 }
 
-let renderQueue: Promise<void> = Promise.resolve();
-
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 export function renderMermaidDiagram(code: string, id: string): Promise<string> {
-  const result = renderQueue.then(async () => {
-    const { default: mermaid } = await import("mermaid");
+  return queueMermaidTask(async (mermaid) => {
     try {
       mermaid.initialize({
         startOnLoad: false,
         theme: "base",
         themeVariables: getThemeVariables(),
-        securityLevel: "loose",
+        securityLevel: "strict",
       });
       return (await mermaid.render(id, code)).svg;
     } catch (themeError) {
@@ -83,7 +82,7 @@ export function renderMermaidDiagram(code: string, id: string): Promise<string> 
           startOnLoad: false,
           theme: "base",
           themeVariables: getFallbackThemeVariables(),
-          securityLevel: "loose",
+          securityLevel: "strict",
         });
         return (await mermaid.render(`${id}-fallback`, code)).svg;
       } catch (fallbackError) {
@@ -95,9 +94,4 @@ export function renderMermaidDiagram(code: string, id: string): Promise<string> 
       }
     }
   });
-  renderQueue = result.then(
-    () => undefined,
-    () => undefined
-  );
-  return result;
 }

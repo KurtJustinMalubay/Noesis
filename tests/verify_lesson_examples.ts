@@ -18,6 +18,16 @@ async function run(): Promise<void> {
     );
     INSERT INTO workspaces (id, title, root_domain, created_at, updated_at)
       VALUES ('legacy-workspace', 'Legacy', 'Test', 1, 1);
+    CREATE TABLE documents (
+      id TEXT PRIMARY KEY NOT NULL,
+      workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+      file_name TEXT NOT NULL,
+      file_hash TEXT UNIQUE NOT NULL,
+      page_count INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL
+    );
+    INSERT INTO documents (id, workspace_id, file_name, file_hash, page_count, created_at)
+      VALUES ('legacy-document', 'legacy-workspace', 'notes.txt', 'legacy-hash', 1, 1);
     PRAGMA user_version = 6;
   `);
   const adapter = {
@@ -33,7 +43,16 @@ async function run(): Promise<void> {
   const version = sqlite.prepare("PRAGMA user_version").get() as {
     user_version: number;
   };
-  assert(version.user_version === 9, "migrations should advance the schema to v9");
+  assert(version.user_version === 10, "migrations should advance the schema to v10");
+  const legacyDocumentLink = sqlite
+    .prepare(
+      "SELECT COUNT(*) AS count FROM document_workspaces WHERE doc_id = ? AND workspace_id = ?"
+    )
+    .get("legacy-document", "legacy-workspace") as { count: number };
+  assert(
+    legacyDocumentLink.count === 1,
+    "existing workspace documents should migrate into the sharing table"
+  );
   const pluginBoardColumns = sqlite
     .prepare("PRAGMA table_info(plugin_boards)")
     .all() as Array<{ name: string; notnull: number }>;
@@ -111,6 +130,24 @@ async function run(): Promise<void> {
   assert(
     newWorkspaceMode.layout_mode === "auto",
     "new workspaces should use Auto-Layout by default"
+  );
+  sqlite
+    .prepare(
+      "INSERT OR IGNORE INTO document_workspaces (doc_id, workspace_id) VALUES (?, ?)"
+    )
+    .run("legacy-document", "workspace");
+  const sharedDocumentCount = sqlite
+    .prepare(
+      `SELECT COUNT(*) AS count FROM documents d
+       WHERE d.workspace_id = ? OR d.workspace_id IS NULL OR EXISTS (
+         SELECT 1 FROM document_workspaces dw
+         WHERE dw.doc_id = d.id AND dw.workspace_id = ?
+       )`
+    )
+    .get("workspace", "workspace") as { count: number };
+  assert(
+    sharedDocumentCount.count === 1,
+    "a deduplicated document should be visible to each linked workspace"
   );
   sqlite
     .prepare(
@@ -305,11 +342,47 @@ async function run(): Promise<void> {
     "node boards should cascade with their concept while workspace boards remain"
   );
 
+  sqlite
+    .prepare("DELETE FROM workspaces WHERE id = ?")
+    .run("legacy-workspace");
+  const sharedAfterOwnerDeletion = sqlite
+    .prepare(
+      `SELECT COUNT(*) AS count FROM documents d
+       WHERE d.workspace_id = ? OR EXISTS (
+         SELECT 1 FROM document_workspaces dw
+         WHERE dw.doc_id = d.id AND dw.workspace_id = ?
+       ) OR (
+         d.workspace_id IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM document_workspaces dw WHERE dw.doc_id = d.id
+         )
+       )`
+    )
+    .get("workspace", "workspace") as { count: number };
+  const unrelatedWorkspaceCount = sqlite
+    .prepare(
+      `SELECT COUNT(*) AS count FROM documents d
+       WHERE d.workspace_id = ? OR EXISTS (
+         SELECT 1 FROM document_workspaces dw
+         WHERE dw.doc_id = d.id AND dw.workspace_id = ?
+       ) OR (
+         d.workspace_id IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM document_workspaces dw WHERE dw.doc_id = d.id
+         )
+       )`
+    )
+    .get("unrelated", "unrelated") as { count: number };
+  assert(
+    sharedAfterOwnerDeletion.count === 1 && unrelatedWorkspaceCount.count === 0,
+    "sharing should remain workspace-scoped after its original owner is removed"
+  );
+
   sqlite.close();
-  console.log("✓ SQLite v9 archive, workspace, example, and plugin-board tests passed!");
+  console.log("✓ SQLite v10 document sharing and workspace tests passed!");
 }
 
 run().catch((error) => {
-  console.error("Worked-example database tests failed:", error);
+  console.error("Database migration tests failed:", error);
   process.exitCode = 1;
 });

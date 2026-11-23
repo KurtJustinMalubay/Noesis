@@ -1,3 +1,4 @@
+import type Database from "@tauri-apps/plugin-sql";
 import { getDb } from "../client";
 import { buildMultiRowInsert } from "../batch";
 import { serializeDbWrite } from "../writeQueue";
@@ -39,12 +40,63 @@ export async function listDocuments(
   const db = await getDb();
   if (workspaceId) {
     return db.select<StoredDocument[]>(
-      "SELECT * FROM documents WHERE workspace_id = $1 OR workspace_id IS NULL ORDER BY created_at DESC",
+      `SELECT d.* FROM documents d
+       WHERE d.workspace_id = $1
+          OR EXISTS (
+            SELECT 1 FROM document_workspaces dw
+            WHERE dw.doc_id = d.id AND dw.workspace_id = $1
+          )
+          OR (
+            d.workspace_id IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM document_workspaces dw WHERE dw.doc_id = d.id
+            )
+          )
+       ORDER BY d.created_at DESC`,
       [workspaceId]
     );
   }
   return db.select<StoredDocument[]>(
     "SELECT * FROM documents ORDER BY created_at DESC"
+  );
+}
+
+async function insertWorkspaceDocumentLink(
+  db: Database,
+  docId: string,
+  workspaceId: string | null
+): Promise<void> {
+  if (!workspaceId) return;
+  const documentRows = await db.select<Array<{ workspace_id: string | null }>>(
+    "SELECT workspace_id FROM documents WHERE id = $1",
+    [docId]
+  );
+  const document = documentRows[0];
+  if (!document) {
+    throw new Error("Cannot share a document that is no longer in the vault.");
+  }
+  if (document.workspace_id === null) {
+    const workspaceLinks = await db.select<Array<{ workspace_id: string }>>(
+      "SELECT workspace_id FROM document_workspaces WHERE doc_id = $1 LIMIT 1",
+      [docId]
+    );
+    if (workspaceLinks.length === 0) return;
+  }
+  await db.execute(
+    `INSERT OR IGNORE INTO document_workspaces (doc_id, workspace_id)
+     VALUES ($1, $2)`,
+    [docId, workspaceId]
+  );
+}
+
+export async function associateDocumentWithWorkspace(
+  docId: string,
+  workspaceId: string | null
+): Promise<void> {
+  if (!workspaceId) return;
+  const db = await getDb();
+  await serializeDbWrite(() =>
+    insertWorkspaceDocumentLink(db, docId, workspaceId)
   );
 }
 
@@ -58,7 +110,10 @@ export async function saveDocumentWithChunks(
       "SELECT * FROM documents WHERE file_hash = $1 LIMIT 1",
       [doc.file_hash]
     );
-    if (existing[0]) return existing[0];
+    if (existing[0]) {
+      await insertWorkspaceDocumentLink(db, existing[0].id, doc.workspace_id);
+      return existing[0];
+    }
 
     let documentInserted = false;
     try {
@@ -75,6 +130,7 @@ export async function saveDocumentWithChunks(
         ]
       );
       documentInserted = true;
+      await insertWorkspaceDocumentLink(db, doc.id, doc.workspace_id);
 
       const batches = buildMultiRowInsert(
         "doc_chunks",
@@ -161,7 +217,18 @@ export async function searchVaultFts(
        JOIN doc_chunks c ON c.id = f.rowid
        JOIN documents d ON d.id = c.doc_id
        WHERE doc_chunks_fts MATCH $1
-         AND (d.workspace_id = $2 OR d.workspace_id IS NULL)
+         AND (
+           d.workspace_id = $2 OR
+           EXISTS (
+             SELECT 1 FROM document_workspaces dw
+             WHERE dw.doc_id = d.id AND dw.workspace_id = $2
+           ) OR (
+             d.workspace_id IS NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM document_workspaces dw WHERE dw.doc_id = d.id
+             )
+           )
+         )
        ORDER BY rank ASC
        LIMIT $3`,
       [ftsQuery, workspaceId, candidateLimit]

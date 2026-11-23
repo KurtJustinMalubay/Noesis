@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Compass,
   Link2,
   Lock,
@@ -28,6 +30,7 @@ import { ArchivedConceptsDialog } from "./ArchivedConceptsDialog";
 
 interface DagCanvasProps {
   workspaceId: string | null;
+  isNativeFullscreen: boolean;
   nodes: GraphNode[];
   edges: GraphEdge[];
   layoutMode: CanvasLayoutMode;
@@ -100,6 +103,7 @@ const NODE_DRAG_THRESHOLD = 5;
 
 export function DagCanvas({
   workspaceId,
+  isNativeFullscreen,
   nodes,
   edges,
   layoutMode,
@@ -123,6 +127,7 @@ export function DagCanvas({
 }: DagCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphTrackRef = useRef<HTMLDivElement>(null);
+  const dotGridRef = useRef<HTMLDivElement>(null);
   const [pan, setPan] = useState({ x: 450, y: 80 });
   const [scale, setScale] = useState(1);
   const [isDragging, setIsDragging] = useState(false);
@@ -141,6 +146,7 @@ export function DagCanvas({
     null
   );
   const [showArchivedConcepts, setShowArchivedConcepts] = useState(false);
+  const [isToolbarExpanded, setIsToolbarExpanded] = useState(true);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorTitle, setEditorTitle] = useState("");
   const [editorSummary, setEditorSummary] = useState("");
@@ -157,6 +163,33 @@ export function DagCanvas({
   const connectionRef = useRef<ConnectionDragState | null>(null);
   const suppressClickNodeId = useRef<string | null>(null);
   const { nodeWidth, nodeHeight, verticalGap } = DEFAULT_LAYOUT_CONFIG;
+  useEffect(() => {
+    if (!selectedEdge) return;
+
+    const dismissDisconnectAction = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest("[data-disconnect-action]")
+      ) {
+        return;
+      }
+      setSelectedEdge(null);
+    };
+
+    document.addEventListener("pointerdown", dismissDisconnectAction, true);
+    return () =>
+      document.removeEventListener("pointerdown", dismissDisconnectAction, true);
+  }, [selectedEdge]);
+
+  const updateDotGridCamera = (nextPan: { x: number; y: number }, nextScale: number) => {
+    const dotGrid = dotGridRef.current;
+    if (!dotGrid) return;
+    const gridSize = 24 * nextScale;
+    const offset = (value: number) =>
+      ((value % gridSize) + gridSize) % gridSize - 1;
+    dotGrid.style.backgroundSize = `${gridSize}px ${gridSize}px`;
+    dotGrid.style.backgroundPosition = `${offset(nextPan.x)}px ${offset(nextPan.y)}px`;
+  };
   const displayNodes = useMemo(
     () =>
       nodes.map((node) => {
@@ -175,9 +208,10 @@ export function DagCanvas({
     [nodes]
   );
   const lastViewRef = useRef<{
+    workspaceId: string | null;
     layoutKey: string;
     layoutMode: CanvasLayoutMode | null;
-  }>({ layoutKey: "", layoutMode: null });
+  }>({ workspaceId: null, layoutKey: "", layoutMode: null });
   const graphIndexes = useMemo(() => {
     const nodeMap = new Map(displayNodes.map((node) => [node.id, node]));
     const parents = new Map<string, string[]>();
@@ -219,7 +253,7 @@ export function DagCanvas({
       maxY,
     };
   }, [displayNodes, edges, nodeWidth, nodeHeight]);
-  const focusNodeId = hoveredNodeId ?? selectedNodeId;
+  const focusNodeId = selectedEdge ? null : hoveredNodeId ?? selectedNodeId;
   const { ancestors, lineageIds } = useMemo(() => {
     const ancestors = new Set<string>();
     const descendants = new Set<string>();
@@ -355,13 +389,19 @@ export function DagCanvas({
 
   useEffect(() => {
     const shouldFit =
+      lastViewRef.current.workspaceId !== workspaceId ||
       lastViewRef.current.layoutMode === null ||
       lastViewRef.current.layoutMode !== layoutMode ||
       (layoutMode === "auto" &&
         lastViewRef.current.layoutKey !== layoutKey);
-    lastViewRef.current = { layoutKey, layoutMode };
+    lastViewRef.current = { workspaceId, layoutKey, layoutMode };
     if (shouldFit) fitGraph();
-  }, [layoutKey, layoutMode]);
+  }, [layoutKey, layoutMode, workspaceId]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(fitGraph);
+    return () => window.cancelAnimationFrame(frame);
+  }, [isNativeFullscreen]);
 
   useEffect(() => {
     setShowArchivedConcepts(false);
@@ -383,7 +423,7 @@ export function DagCanvas({
     if (
       target instanceof Element &&
       target.closest(
-        "[data-dag-node], [data-dag-edge], button, [data-canvas-popover]"
+        "[data-dag-node], [data-dag-edge], button, [data-canvas-popover], [data-canvas-toolbar]"
       )
     ) {
       return;
@@ -408,6 +448,7 @@ export function DagCanvas({
       graphTrackRef.current.style.transform =
         `translate3d(${nextPan.x}px, ${nextPan.y}px, 0) scale(${scaleRef.current})`;
     }
+    updateDotGridCamera(nextPan, scaleRef.current);
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
@@ -836,16 +877,26 @@ export function DagCanvas({
       className={`relative h-full w-full overflow-hidden bg-[var(--color-canvas)] select-none outline-none ${
         isDragging ? "cursor-grabbing" : "cursor-grab"
       }`}
-      style={
-        showDots
-          ? {
-              backgroundImage:
-                "radial-gradient(circle at 1px 1px, var(--color-canvas-dot) 1px, transparent 0)",
-              backgroundSize: "24px 24px",
-            }
-          : undefined
-      }
     >
+      <div
+        ref={dotGridRef}
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0"
+        style={
+          showDots
+            ? {
+                backgroundImage:
+                  "radial-gradient(circle at 1px 1px, var(--color-canvas-dot) 1px, transparent 0)",
+                backgroundSize: `${24 * scale}px ${24 * scale}px`,
+                backgroundPosition: `${
+                  ((pan.x % (24 * scale)) + 24 * scale) % (24 * scale) - 1
+                }px ${
+                  ((pan.y % (24 * scale)) + 24 * scale) % (24 * scale) - 1
+                }px`,
+              }
+            : undefined
+        }
+      />
       <div
         ref={graphTrackRef}
         style={{
@@ -973,39 +1024,75 @@ export function DagCanvas({
                 : `M ${x1} ${y1} C ${x1} ${y1 + controlGap}, ${x2} ${y2 - controlGap}, ${x2} ${y2}`;
 
             return (
-              <path
+              <g
                 key={`${edge.source_id}-${edge.target_id}`}
-                data-dag-edge
-                d={path}
-                fill="none"
-                stroke={stroke}
-                strokeWidth={isSelected ? 3 : focusNodeId && inLineage ? 2.5 : isMastered ? 2 : 1.5}
-                strokeDasharray={isMastered || !isLockedPath ? undefined : "5 5"}
-                opacity={inLineage ? 0.82 : 0.12}
-                markerEnd={
-                  isMastered
-                    ? "url(#arrow-mastered)"
-                    : isInProgressPath
-                      ? "url(#arrow-in-progress)"
-                      : isLockedPath
-                        ? "url(#arrow-locked)"
-                        : "url(#arrow-unlocked)"
+                opacity={
+                  selectedEdge
+                    ? isSelected
+                      ? 1
+                      : 0.1
+                    : inLineage
+                      ? 0.82
+                      : 0.12
                 }
-                className="pointer-events-auto cursor-pointer transition-opacity"
-                style={{ pointerEvents: "stroke" }}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  containerRef.current?.focus();
-                }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  containerRef.current?.focus();
-                  setSelectedEdge({
-                    sourceId: edge.source_id,
-                    targetId: edge.target_id,
-                  });
-                }}
-              />
+              >
+                <path
+                  d={path}
+                  fill="none"
+                  stroke="transparent"
+                  strokeWidth="16"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Select prerequisite connection from ${src.title} to ${tgt.title}`}
+                  aria-keyshortcuts="Enter Space"
+                  className="pointer-events-auto cursor-pointer outline-none focus:outline-none focus-visible:outline-none"
+                  style={{ pointerEvents: "stroke" }}
+                  onFocus={() =>
+                    setSelectedEdge({
+                      sourceId: edge.source_id,
+                      targetId: edge.target_id,
+                    })
+                  }
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    containerRef.current?.focus();
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    containerRef.current?.focus();
+                    setSelectedEdge({
+                      sourceId: edge.source_id,
+                      targetId: edge.target_id,
+                    });
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    setSelectedEdge({
+                      sourceId: edge.source_id,
+                      targetId: edge.target_id,
+                    });
+                  }}
+                />
+                <path
+                  data-dag-edge
+                  d={path}
+                  fill="none"
+                  stroke={stroke}
+                  strokeWidth={isSelected ? 3 : focusNodeId && inLineage ? 2.5 : isMastered ? 2 : 1.5}
+                  strokeDasharray={isMastered || !isLockedPath ? undefined : "5 5"}
+                  markerEnd={
+                    isMastered
+                      ? "url(#arrow-mastered)"
+                      : isInProgressPath
+                        ? "url(#arrow-in-progress)"
+                        : isLockedPath
+                          ? "url(#arrow-locked)"
+                          : "url(#arrow-unlocked)"
+                  }
+                  className="pointer-events-none transition-opacity"
+                />
+              </g>
             );
           })}
 
@@ -1049,6 +1136,7 @@ export function DagCanvas({
               <button
                 type="button"
                 data-canvas-toolbar
+                data-disconnect-action
                 onClick={() => {
                   const edge = selectedEdge;
                   setSelectedEdge(null);
@@ -1056,18 +1144,18 @@ export function DagCanvas({
                     onDisconnectNodes(edge.sourceId, edge.targetId)
                   );
                 }}
-                className="pointer-events-auto absolute z-30 flex items-center gap-1 rounded-full border border-rose-200 bg-white px-2 py-1 text-[10px] font-semibold text-rose-700 shadow-md hover:bg-rose-50"
-                style={{ left: x - 40, top: y - 16 }}
+                className="pointer-events-auto absolute z-30 -translate-x-1/2 -translate-y-1/2 rounded-full bg-rose-600 px-3 py-1.5 text-[11px] font-semibold text-white shadow-md transition-colors hover:bg-rose-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-500"
+                style={{ left: x, top: y }}
                 title="Disconnect prerequisite"
+                aria-label={`Disconnect prerequisite from ${source.title} to ${target.title}`}
               >
-                <X className="h-3 w-3" />
                 Disconnect
               </button>
             );
           })()}
 
         {displayNodes.map((node) => {
-          const isSelected = node.id === selectedNodeId;
+          const isSelected = !selectedEdge && node.id === selectedNodeId;
           const isLocked = node.status === "locked";
           const isMastered = node.status === "mastered";
           const isInProgress = node.status === "in_progress";
@@ -1088,6 +1176,15 @@ export function DagCanvas({
                 : "text-[var(--color-accent)]";
           const prerequisiteCount =
             graphIndexes.prerequisiteCounts.get(node.id) ?? 0;
+          const nodeConnections = edges.filter(
+            (edge) =>
+              edge.source_id === node.id || edge.target_id === node.id
+          );
+          const canConnectToNode = Boolean(
+            connection && validTargetIds.has(node.id)
+          );
+          const isActiveConnectionNode =
+            connection?.sourceId === node.id || canConnectToNode;
           const hasInputConnection =
             connection?.targetId === node.id && connection.targetIsValid;
           const hasInvalidInputConnection =
@@ -1139,7 +1236,15 @@ export function DagCanvas({
                 zIndex: isSelected || openMenuNodeId === node.id ? 20 : 1,
                 transition: dragTransition,
               }}
-              className={`group pointer-events-auto ${inLineage ? "opacity-100" : "opacity-25"} ${
+              className={`group pointer-events-auto ${
+                connection
+                  ? isActiveConnectionNode
+                    ? "opacity-100"
+                    : "opacity-25"
+                  : inLineage
+                    ? "opacity-100"
+                    : "opacity-25"
+              } ${
                 isSelected ? "z-10" : ""
               }`}
             >
@@ -1182,7 +1287,7 @@ export function DagCanvas({
                       {node.title}
                     </span>
                     {node.summary_hint && (
-                      <div className="mt-1 block line-clamp-2 text-[9px] leading-3 text-slate-500">
+                      <div className="mt-1 line-clamp-2 text-[9px] leading-3 text-slate-500">
                         {stripMathMarkup(node.summary_hint)}
                       </div>
                     )}
@@ -1252,8 +1357,8 @@ export function DagCanvas({
                     ? "bg-red-500 ring-4 ring-red-200"
                     : hasInputConnection
                       ? "bg-emerald-500 ring-4 ring-emerald-200"
-                      : connection && validTargetIds.has(node.id)
-                        ? "bg-sky-500 ring-4 ring-sky-200"
+                      : canConnectToNode
+                        ? "z-30 scale-150 bg-sky-500 ring-4 ring-sky-200 shadow-lg"
                         : inputPortColor
                 }`}
                 style={{ borderColor: "var(--color-panel)" }}
@@ -1283,7 +1388,7 @@ export function DagCanvas({
                 <div
                   data-canvas-popover
                   onPointerDown={(e) => e.stopPropagation()}
-                  className="pointer-events-auto absolute right-0 top-7 z-40 w-40 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-1 shadow-xl"
+                  className="pointer-events-auto absolute right-0 top-7 z-40 max-h-[60vh] w-52 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-1 shadow-xl"
                 >
                   <button
                     type="button"
@@ -1293,6 +1398,55 @@ export function DagCanvas({
                     <Pencil className="h-3.5 w-3.5" />
                     Edit Concept
                   </button>
+                  {nodeConnections.length > 0 && (
+                    <div className="my-1 border-t border-[var(--color-border)] pt-1">
+                      <p className="px-2.5 py-1 text-[9px] font-bold uppercase tracking-wide text-[var(--color-muted)]">
+                        Connections
+                      </p>
+                      {nodeConnections.map((edge) => {
+                        const isPrerequisite = edge.target_id === node.id;
+                        const otherNode = graphIndexes.nodeMap.get(
+                          isPrerequisite ? edge.source_id : edge.target_id
+                        );
+                        if (!otherNode) return null;
+                        const relation = isPrerequisite
+                          ? "prerequisite"
+                          : "dependent";
+                        return (
+                          <button
+                            key={`${edge.source_id}-${edge.target_id}`}
+                            type="button"
+                            aria-label={`Disconnect ${relation} ${otherNode.title}`}
+                            title={`Disconnect ${relation}: ${otherNode.title}`}
+                            onClick={() => {
+                              setOpenMenuNodeId(null);
+                              setSelectedEdge(null);
+                              void runCanvasAction(() =>
+                                onDisconnectNodes(
+                                  edge.source_id,
+                                  edge.target_id
+                                )
+                              );
+                            }}
+                            className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[10px] text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                          >
+                            <X
+                              className="h-3 w-3 shrink-0 text-[var(--color-muted)]"
+                              aria-hidden="true"
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block font-semibold">
+                                Disconnect {relation}
+                              </span>
+                              <span className="block truncate text-[9px] text-[var(--color-muted)]">
+                                {otherNode.title}
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
@@ -1449,9 +1603,28 @@ export function DagCanvas({
 
       <div
         data-canvas-toolbar
-        className="absolute bottom-4 left-4 z-20 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-1.5 rounded-xl border border-[#e1dfd8] bg-white/95 p-1.5 shadow-[0_5px_18px_rgba(35,51,60,0.09)] backdrop-blur"
+        className={`absolute bottom-4 left-4 z-20 flex max-w-[calc(100%-2rem)] items-center transition-all duration-200 ease-out motion-reduce:transition-none ${
+          isToolbarExpanded
+            ? "flex-wrap gap-1.5 rounded-xl border border-[#e1dfd8] bg-white/95 p-1.5 shadow-[0_5px_18px_rgba(35,51,60,0.09)] backdrop-blur"
+            : "h-12 w-12 justify-center rounded-xl border border-[#e1dfd8] bg-white/95 p-1.5 shadow-[0_5px_18px_rgba(35,51,60,0.09)] backdrop-blur"
+        }`}
+        style={{
+            transitionDuration: "360ms",
+            transitionTimingFunction: "cubic-bezier(0.22, 1, 0.36, 1)",
+        }}
       >
-        <div className="flex items-center gap-1 rounded-lg bg-[#f2f1ed] p-0.5">
+        <div
+          aria-hidden={!isToolbarExpanded}
+          inert={!isToolbarExpanded}
+          className={`flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden whitespace-nowrap transition-[max-width,opacity,transform] duration-[360ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${
+            isToolbarExpanded
+              ? "max-w-[1000px] translate-x-0 opacity-100"
+              : "pointer-events-none max-w-0 -translate-x-2 opacity-0"
+          }`}
+        >
+        <div
+          className="flex items-center gap-1 rounded-lg bg-[#f2f1ed] p-0.5"
+        >
           <button
             type="button"
             onClick={() => {
@@ -1465,6 +1638,7 @@ export function DagCanvas({
             }}
             className="tactile-control rounded-lg p-1.5 text-slate-600 hover:bg-[#f2f1ed]"
             title="Zoom In"
+            aria-label="Zoom in"
           >
             <ZoomIn className="h-4 w-4" />
           </button>
@@ -1484,6 +1658,7 @@ export function DagCanvas({
             }}
             className="tactile-control rounded-lg p-1.5 text-slate-600 hover:bg-[#f2f1ed]"
             title="Zoom Out"
+            aria-label="Zoom out"
           >
             <ZoomOut className="h-4 w-4" />
           </button>
@@ -1493,13 +1668,16 @@ export function DagCanvas({
             onClick={fitGraph}
             className="tactile-control flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-[#f2f1ed]"
             title="Recenter Graph"
+            aria-label="Fit graph to screen"
           >
-            <Compass className="h-3.5 w-3.5 text-[#326a9f]" />
+            <Compass className="h-3.5 w-3.5 text-[var(--color-accent)]" />
             Fit to screen
           </button>
         </div>
         <div className="h-5 w-px bg-[#d8d5ce]" aria-hidden="true" />
-        <div className="flex items-center rounded-lg border border-[#e6e3dd] bg-[#f8f7f4] p-0.5">
+        <div
+          className="flex items-center rounded-lg border border-[#e6e3dd] bg-[#f8f7f4] p-0.5"
+        >
           <button
             type="button"
             onClick={() => void runCanvasAction(() => onSetLayoutMode("auto"))}
@@ -1522,29 +1700,11 @@ export function DagCanvas({
           >
             Free Place
           </button>
-          {layoutMode === "free" && (
-            <>
-              <button
-                type="button"
-                onClick={() => void resetToAutoLayout()}
-                className="rounded-md px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 hover:bg-[#f2f1ed]"
-                title="Restore Sugiyama positions and layer backdrops"
-              >
-                Reset Layout
-              </button>
-              <button
-                type="button"
-                onClick={() => void realignGrid()}
-                className="rounded-md px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 hover:bg-[#f2f1ed]"
-                title="Snap free-place nodes to the 16px grid"
-              >
-                Re-align Grid
-              </button>
-            </>
-          )}
         </div>
         <div className="h-5 w-px bg-[#d8d5ce]" aria-hidden="true" />
-        <div className="flex items-center gap-0.5 rounded-lg border border-[#e6e3dd] bg-[#f8f7f4] p-0.5">
+        <div
+          className="flex items-center gap-0.5 rounded-lg border border-[#e6e3dd] bg-[#f8f7f4] p-0.5"
+        >
           <button
             type="button"
             onClick={() => {
@@ -1556,17 +1716,63 @@ export function DagCanvas({
             <Plus className="h-3.5 w-3.5" />
             Add Node
           </button>
-          <button
-            type="button"
-            disabled={!workspaceId}
-            onClick={() => setShowArchivedConcepts(true)}
-            className="flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[10px] font-semibold text-slate-600 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-            title="View archived concepts"
-          >
-            <Archive className="h-3.5 w-3.5" />
-            Archived concepts
-          </button>
         </div>
+        </div>
+        <details
+          className={`canvas-more-menu relative ${isToolbarExpanded ? "" : "hidden"}`}
+        >
+          <summary className="flex min-h-9 cursor-pointer list-none items-center rounded-lg border border-[#e6e3dd] bg-white/80 px-3 text-[11px] font-semibold text-slate-600 hover:bg-[#f2f1ed] focus-visible:outline">
+            More
+          </summary>
+          <div className="absolute bottom-full left-0 mb-2 flex min-w-48 flex-col gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-1.5 text-[var(--color-ink)] shadow-xl">
+            {layoutMode === "free" && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void resetToAutoLayout()}
+                  className="rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)]"
+                  title="Restore automatic positions and layer backdrops"
+                >
+                  Reset to auto-layout
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void realignGrid()}
+                  className="rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)]"
+                  title="Snap free-place nodes to the 16px grid"
+                >
+                  Re-align to grid
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              disabled={!workspaceId}
+              onClick={() => setShowArchivedConcepts(true)}
+              className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+              title="View archived concepts"
+            >
+              <Archive className="h-4 w-4" />
+              Archived concepts
+            </button>
+          </div>
+        </details>
+        <button
+          type="button"
+          onClick={() => setIsToolbarExpanded((expanded) => !expanded)}
+          className="flex min-h-9 min-w-9 items-center justify-center rounded-lg text-slate-600 transition-colors hover:bg-[#f2f1ed] focus-visible:outline"
+          aria-expanded={isToolbarExpanded}
+          aria-label={
+            isToolbarExpanded ? "Collapse canvas toolbar" : "Expand canvas toolbar"
+          }
+          title={isToolbarExpanded ? "Collapse toolbar" : "Expand toolbar"}
+        >
+          {isToolbarExpanded ? (
+            <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <ChevronRight className="h-4 w-4" aria-hidden="true" />
+          )}
+        </button>
       </div>
       <div className="absolute right-4 top-4 z-20 rounded-lg border border-[#e1dfd8] bg-white/90 px-3 py-2 text-[10px] text-slate-500 shadow-sm">
         <span className="inline-flex items-center gap-1">

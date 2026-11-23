@@ -1,4 +1,5 @@
 export const EXCALIDRAW_PLUGIN_ID = "excalidraw";
+export const FLASHCARDS_PLUGIN_ID = "flashcards";
 
 export const BUILT_IN_PLUGINS = [
   {
@@ -6,6 +7,13 @@ export const BUILT_IN_PLUGINS = [
     name: "Excalidraw",
     description:
       "Create visual boards for a workspace or individual concept nodes.",
+    defaultEnabled: true,
+  },
+  {
+    id: FLASHCARDS_PLUGIN_ID,
+    name: "Flashcards",
+    description:
+      "Generate, edit, and review lesson cards. Disabling hides these tools but keeps saved cards.",
     defaultEnabled: true,
   },
 ] as const;

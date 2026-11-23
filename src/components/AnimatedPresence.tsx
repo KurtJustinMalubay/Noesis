@@ -11,17 +11,23 @@ export function useDelayedUnmount(
 
   useEffect(() => {
     let frame = 0;
+    let enterFallback = 0;
     let timeout = 0;
 
     if (present) {
       setMounted(true);
-      frame = requestAnimationFrame(() => setVisible(true));
+      if (typeof window.requestAnimationFrame === "function") {
+        frame = window.requestAnimationFrame(() => setVisible(true));
+      } else {
+        setVisible(true);
+      }
+      enterFallback = window.setTimeout(() => setVisible(true), 100);
     } else {
       setVisible(false);
       if (mounted) {
-        const reducedMotion = window.matchMedia(
-          "(prefers-reduced-motion: reduce)"
-        ).matches;
+        const reducedMotion =
+          window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ??
+          false;
         if (reducedMotion) {
           setMounted(false);
         } else {
@@ -35,6 +41,7 @@ export function useDelayedUnmount(
 
     return () => {
       if (frame) cancelAnimationFrame(frame);
+      if (enterFallback) window.clearTimeout(enterFallback);
       if (timeout) window.clearTimeout(timeout);
     };
   }, [present, exitDuration, mounted]);

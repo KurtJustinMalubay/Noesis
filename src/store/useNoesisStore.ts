@@ -22,6 +22,7 @@ import {
   updateWorkspaceLayoutMode,
   type WorkspaceProgressSummary,
 } from "../db/repositories/workspaceRepo";
+import { deleteGeneratedWorkspace } from "../db/repositories/curriculumRepo";
 import {
   archiveConceptNode as archiveConceptNodeRecord,
   deleteGraphEdge,
@@ -39,10 +40,15 @@ import {
 } from "../db/repositories/graphRepo";
 import {
   getDueFlashcards,
+  getWorkspaceFlashcards,
   getNodeFlashcards,
+  insertFlashcard,
+  deleteFlashcard as deleteFlashcardRecord,
+  updateFlashcardContent,
   updateFlashcardSchedule,
   updateFlashcardSchedules,
   type DueFlashcard,
+  type WorkspaceFlashcard,
 } from "../db/repositories/flashcardRepo";
 import {
   deleteDocument,
@@ -51,9 +57,11 @@ import {
 } from "../db/repositories/documentRepo";
 import {
   generateWorkspaceCurriculum,
+  generateLessonFlashcards,
   generateLessonMaterial,
   hydrateNodeContent,
 } from "../ai/curriculumService";
+import { serializeLessonGeneration } from "../ai/lessonGenerationQueue";
 import {
   generateNodeQuiz,
   gradeSubjectiveBatch,
@@ -83,6 +91,8 @@ import {
   saveUserPreferences,
   type UserPreferences,
 } from "../ai/keyStore";
+import { usePluginStore } from "../plugins/pluginStore";
+import { FLASHCARDS_PLUGIN_ID } from "../plugins/registry";
 import type {
   CurriculumProgress,
   CurriculumSourceDocument,
@@ -96,6 +106,14 @@ export type ActiveModal =
   | "diagnostic"
   | "completion"
   | "new_workspace";
+
+let workspaceSelectionGeneration = 0;
+
+function areFlashcardsEnabled(): boolean {
+  return usePluginStore
+    .getState()
+    .enabledPluginIds.includes(FLASHCARDS_PLUGIN_ID);
+}
 
 interface NoesisState {
   // Core entities
@@ -118,6 +136,9 @@ interface NoesisState {
   curriculumProgress: CurriculumProgress | null;
   hydratingNodeIds: Set<string>;
   hydrationErrors: Map<string, string>;
+  lessonGenerationText: Map<string, string>;
+  flashcardCounts: Map<string, number>;
+  generatingFlashcardNodeIds: Set<string>;
   diagnosticQuestions: QuizQuestion[];
   diagnosticConfig: QuizGenerationConfig | null;
   diagnosticDraft: QuizDraft;
@@ -172,6 +193,7 @@ interface NoesisState {
   disconnectConceptNodes: (sourceId: string, targetId: string) => Promise<void>;
   selectNode: (nodeId: string | null) => Promise<void>;
   regenerateNodeLesson: (nodeId: string) => Promise<void>;
+  generateNodeFlashcards: (nodeId: string) => Promise<void>;
   markNodeMastered: (nodeId: string, score?: number) => Promise<void>;
   openDiagnosticForNode: (nodeId: string) => Promise<void>;
   configureDiagnosticForNode: (nodeId: string) => void;
@@ -191,6 +213,20 @@ interface NoesisState {
   refreshNodeQuizAvailability: (nodeId: string) => Promise<void>;
   clearQuizAvailability: () => void;
   gradeDueCard: (card: DueFlashcard, grade: ReviewGrade) => Promise<void>;
+  loadWorkspaceFlashcards: (
+    workspaceId: string
+  ) => Promise<WorkspaceFlashcard[]>;
+  createFlashcard: (
+    nodeId: string,
+    front: string,
+    back: string
+  ) => Promise<WorkspaceFlashcard>;
+  editFlashcard: (
+    card: WorkspaceFlashcard,
+    front: string,
+    back: string
+  ) => Promise<WorkspaceFlashcard>;
+  removeFlashcard: (card: WorkspaceFlashcard) => Promise<void>;
   refreshDocuments: () => Promise<void>;
   removeDocument: (docId: string) => Promise<void>;
   setActiveModal: (modal: ActiveModal) => void;
@@ -218,6 +254,9 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   curriculumProgress: null,
   hydratingNodeIds: new Set(),
   hydrationErrors: new Map(),
+  lessonGenerationText: new Map(),
+  flashcardCounts: new Map(),
+  generatingFlashcardNodeIds: new Set(),
   diagnosticQuestions: [],
   diagnosticConfig: null,
   diagnosticDraft: { answers: {}, currentQuestionIndex: 0 },
@@ -252,6 +291,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   },
 
   selectWorkspace: async (workspaceId: string) => {
+    const requestGeneration = ++workspaceSelectionGeneration;
     const [{ nodes, edges }, dueCards, documents, workspaceProgress] =
       await Promise.all([
         getWorkspaceGraph(workspaceId),
@@ -259,6 +299,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         listDocuments(workspaceId),
         getWorkspaceProgressSummaries(),
       ]);
+    if (requestGeneration !== workspaceSelectionGeneration) return;
 
     const preferences = get().preferences;
     const remainingReviews =
@@ -322,6 +363,11 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         controller.signal,
         sourceDocument
       );
+      if (controller.signal.aborted) {
+        await deleteGeneratedWorkspace(workspace.id);
+        throw new DOMException("Curriculum generation stopped.", "AbortError");
+      }
+      workspaceSelectionGeneration += 1;
       const workspaces = [workspace, ...get().workspaces];
       set({
         workspaces,
@@ -338,7 +384,11 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         `Generated workspace with ${nodes.length} concepts: "${workspace.title}"`
       );
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (
+        controller.signal.aborted &&
+        error instanceof DOMException &&
+        error.name === "AbortError"
+      ) {
         get().showToast("Curriculum generation stopped.");
         return;
       }
@@ -366,6 +416,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       (item) => item.id !== workspaceId
     );
     const wasActiveWorkspace = get().activeWorkspaceId === workspaceId;
+    if (wasActiveWorkspace) workspaceSelectionGeneration += 1;
     set({
       workspaces: remaining,
       archivedWorkspaces: [
@@ -683,6 +734,19 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
 
     set({ selectedNodeId: nodeId });
     void get().refreshNodeQuizAvailability(nodeId);
+    void getNodeFlashcards(nodeId)
+      .then((cards) => {
+        const flashcardCounts = new Map(get().flashcardCounts);
+        flashcardCounts.set(nodeId, cards.length);
+        set({ flashcardCounts });
+      })
+      .catch((error) => {
+        get().showToast(
+          `Could not check lesson flashcards: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      });
 
     // Auto-hydrate lesson + Mermaid diagram + flashcards on first open
     if (
@@ -694,18 +758,34 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       hydratingNodeIds.add(node.id);
       const hydrationErrors = new Map(get().hydrationErrors);
       hydrationErrors.delete(node.id);
-      set({ hydratingNodeIds, hydrationErrors });
+      const lessonGenerationText = new Map(get().lessonGenerationText);
+      lessonGenerationText.set(node.id, "");
+      set({ hydratingNodeIds, hydrationErrors, lessonGenerationText });
+      let lastProgressUpdate = 0;
       try {
-        const hydrated = await hydrateNodeContent(
-          node,
-          ws?.title ?? "Noesis Course"
+        const hydrated = await serializeLessonGeneration(() =>
+          hydrateNodeContent(
+            node,
+            ws?.title ?? "Noesis Course",
+            (text) => {
+              const now = Date.now();
+              if (text && now - lastProgressUpdate < 100) return;
+              lastProgressUpdate = now;
+              const progress = new Map(get().lessonGenerationText);
+              progress.set(node.id, text);
+              set({ lessonGenerationText: progress });
+            }
+          )
         );
+        const progress = new Map(get().lessonGenerationText);
+        progress.set(node.id, hydrated.lessonMarkdown);
+        set({ lessonGenerationText: progress });
         await hydrateNodeBatch(
           node.id,
           hydrated.lessonMarkdown,
           hydrated.mermaidDiagram,
           JSON.stringify(hydrated.citations),
-          hydrated.flashcards
+          []
         );
         const updatedNodes = get().nodes.map((n) =>
           n.id === node.id
@@ -736,7 +816,9 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       } finally {
         const remainingHydrations = new Set(get().hydratingNodeIds);
         remainingHydrations.delete(node.id);
-        set({ hydratingNodeIds: remainingHydrations });
+        const lessonGenerationText = new Map(get().lessonGenerationText);
+        lessonGenerationText.delete(node.id);
+        set({ hydratingNodeIds: remainingHydrations, lessonGenerationText });
       }
     }
   },
@@ -753,13 +835,29 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     hydratingNodeIds.add(nodeId);
     const hydrationErrors = new Map(get().hydrationErrors);
     hydrationErrors.delete(nodeId);
-    set({ hydratingNodeIds, hydrationErrors });
+    const lessonGenerationText = new Map(get().lessonGenerationText);
+    lessonGenerationText.set(nodeId, "");
+    set({ hydratingNodeIds, hydrationErrors, lessonGenerationText });
+    let lastProgressUpdate = 0;
 
     try {
-      const generated = await generateLessonMaterial(
-        node,
-        workspace?.title ?? "Noesis Course"
+      const generated = await serializeLessonGeneration(() =>
+        generateLessonMaterial(
+          node,
+          workspace?.title ?? "Noesis Course",
+          (text) => {
+            const now = Date.now();
+            if (text && now - lastProgressUpdate < 100) return;
+            lastProgressUpdate = now;
+            const progress = new Map(get().lessonGenerationText);
+            progress.set(nodeId, text);
+            set({ lessonGenerationText: progress });
+          }
+        )
       );
+      const progress = new Map(get().lessonGenerationText);
+      progress.set(nodeId, generated.lessonMarkdown);
+      set({ lessonGenerationText: progress });
       await updateNodeLessonContent(
         nodeId,
         generated.lessonMarkdown,
@@ -790,7 +888,71 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     } finally {
       const remainingHydrations = new Set(get().hydratingNodeIds);
       remainingHydrations.delete(nodeId);
-      set({ hydratingNodeIds: remainingHydrations });
+      const lessonGenerationText = new Map(get().lessonGenerationText);
+      lessonGenerationText.delete(nodeId);
+      set({ hydratingNodeIds: remainingHydrations, lessonGenerationText });
+    }
+  },
+
+  generateNodeFlashcards: async (nodeId) => {
+    if (!areFlashcardsEnabled()) return;
+    if (get().generatingFlashcardNodeIds.has(nodeId)) return;
+    const node = get().nodes.find((item) => item.id === nodeId);
+    const lessonMarkdown = node?.lesson_markdown;
+    if (!node || node.is_hydrated !== 1 || !lessonMarkdown?.trim()) {
+    get().showToast(
+      "Generate the lesson before creating its flashcards."
+    );
+    return;
+    }
+
+    const generatingFlashcardNodeIds = new Set(
+    get().generatingFlashcardNodeIds
+    );
+    generatingFlashcardNodeIds.add(nodeId);
+    set({ generatingFlashcardNodeIds });
+    try {
+    const existingCards = await getNodeFlashcards(nodeId);
+    if (existingCards.length > 0) {
+      const flashcardCounts = new Map(get().flashcardCounts);
+      flashcardCounts.set(nodeId, existingCards.length);
+      set({ flashcardCounts });
+      get().showToast("Flashcards already exist for this lesson.");
+      return;
+    }
+
+    const cards = await serializeLessonGeneration(() =>
+      generateLessonFlashcards(node, lessonMarkdown)
+    );
+    if (!areFlashcardsEnabled()) return;
+    await updateFlashcardSchedules(cards);
+      const flashcardCounts = new Map(get().flashcardCounts);
+    flashcardCounts.set(nodeId, cards.length);
+    set({ flashcardCounts });
+
+    try {
+      const dueCards = await getDueFlashcards(node.workspace_id);
+      set({ dueCards });
+    } catch (error) {
+      get().showToast(
+        `Flashcards were saved, but the review queue could not be refreshed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      return;
+    }
+
+    get().showToast(`Generated ${cards.length} flashcards.`);
+    } catch (error) {
+      get().showToast(
+      `Flashcard generation failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    } finally {
+    const remaining = new Set(get().generatingFlashcardNodeIds);
+    remaining.delete(nodeId);
+    set({ generatingFlashcardNodeIds: remaining });
     }
   },
 
@@ -986,23 +1148,25 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       set({ diagnosticDraft: draft, diagnosticScore: score });
 
       if (passed) {
-        const cards = await getNodeFlashcards(nodeId);
-        const scheduledCards = cards.map((card) =>
-          scheduleNextReview(card, 2)
-        );
-        await updateFlashcardSchedules(scheduledCards);
-        const workspaceId = get().activeWorkspaceId;
-        if (workspaceId) {
-          const dueCards = await getDueFlashcards(workspaceId);
-          const { preferences } = get();
-          const remaining =
-            preferences.dailyReviewLimit === 0
-              ? dueCards.length
-              : Math.max(
-                  0,
-                  preferences.dailyReviewLimit - getReviewsCompletedToday()
-                );
-          set({ dueCards: dueCards.slice(0, remaining) });
+        if (areFlashcardsEnabled()) {
+          const cards = await getNodeFlashcards(nodeId);
+          const scheduledCards = cards.map((card) =>
+            scheduleNextReview(card, 2)
+          );
+          await updateFlashcardSchedules(scheduledCards);
+          const workspaceId = get().activeWorkspaceId;
+          if (workspaceId) {
+            const dueCards = await getDueFlashcards(workspaceId);
+            const { preferences } = get();
+            const remaining =
+              preferences.dailyReviewLimit === 0
+                ? dueCards.length
+                : Math.max(
+                    0,
+                    preferences.dailyReviewLimit - getReviewsCompletedToday()
+                  );
+            set({ dueCards: dueCards.slice(0, remaining) });
+          }
         }
         await get().markNodeMastered(nodeId, score);
       }
@@ -1041,26 +1205,134 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   clearQuizAvailability: () => set({ quizNodeIds: new Set() }),
 
   gradeDueCard: async (card: DueFlashcard, grade: ReviewGrade) => {
+    if (!areFlashcardsEnabled()) {
+      throw new Error("Enable the Flashcards plugin to review cards.");
+    }
     const updated = scheduleNextReview(card, grade);
     await updateFlashcardSchedule(updated);
 
+    const completedToday = recordCompletedReview();
     const wsId = get().activeWorkspaceId;
-    if (wsId) {
+    if (!wsId) {
+      set({ dueCards: get().dueCards.filter((c) => c.id !== card.id) });
+      return;
+    }
+
+    try {
       const dueCards = await getDueFlashcards(wsId);
       const { preferences } = get();
-      const completedToday = recordCompletedReview();
       const remaining =
         preferences.dailyReviewLimit === 0
           ? dueCards.length
-          : Math.max(
-              0,
-              preferences.dailyReviewLimit - completedToday
-            );
+          : Math.max(0, preferences.dailyReviewLimit - completedToday);
       set({ dueCards: dueCards.slice(0, remaining) });
-    } else {
-      recordCompletedReview();
-      set({ dueCards: get().dueCards.filter((c) => c.id !== card.id) });
+    } catch (error) {
+      set({ dueCards: get().dueCards.filter((item) => item.id !== card.id) });
+      get().showToast(
+        `Review saved, but the queue could not be refreshed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
     }
+  },
+
+  loadWorkspaceFlashcards: async (workspaceId) => {
+    if (!areFlashcardsEnabled()) {
+      throw new Error("Enable the Flashcards plugin to manage cards.");
+    }
+    return getWorkspaceFlashcards(workspaceId);
+  },
+
+  createFlashcard: async (nodeId, front, back) => {
+    if (!areFlashcardsEnabled()) {
+      throw new Error("Enable the Flashcards plugin to add cards.");
+    }
+    const node = get().nodes.find((item) => item.id === nodeId);
+    if (!node || node.workspace_id !== get().activeWorkspaceId) {
+      throw new Error("Choose a lesson in the active workspace.");
+    }
+
+    const card = {
+      id: crypto.randomUUID(),
+      node_id: nodeId,
+      front: front.trim(),
+      back: back.trim(),
+      ease_factor: 2.5,
+      interval_days: 0,
+      repetitions: 0,
+      next_review_at: Date.now(),
+    };
+    await insertFlashcard(card);
+    const workspaceCard = { ...card, node_title: node.title };
+    const flashcardCounts = new Map(get().flashcardCounts);
+    const nodeFlashcardCount = flashcardCounts.get(nodeId);
+    if (nodeFlashcardCount !== undefined) {
+      flashcardCounts.set(nodeId, nodeFlashcardCount + 1);
+    }
+    const dueCards = [...get().dueCards, workspaceCard].sort(
+      (a, b) => a.next_review_at - b.next_review_at
+    );
+    const remainingReviews =
+      get().preferences.dailyReviewLimit === 0
+        ? dueCards.length
+        : Math.max(
+            0,
+            get().preferences.dailyReviewLimit - getReviewsCompletedToday()
+          );
+    set({
+      flashcardCounts,
+      dueCards: dueCards.slice(0, remainingReviews),
+    });
+    return workspaceCard;
+  },
+
+  editFlashcard: async (card, front, back) => {
+    if (!areFlashcardsEnabled()) {
+      throw new Error("Enable the Flashcards plugin to edit cards.");
+    }
+    const node = get().nodes.find(
+      (item) =>
+        item.id === card.node_id &&
+        item.workspace_id === get().activeWorkspaceId
+    );
+    if (!node) {
+      throw new Error("This flashcard is no longer in the active workspace.");
+    }
+
+    const updatedCard = { ...card, front: front.trim(), back: back.trim() };
+    await updateFlashcardContent(
+      card.id,
+      card.node_id,
+      updatedCard.front,
+      updatedCard.back
+    );
+    if (get().dueCards.some((item) => item.id === card.id)) {
+      set({
+        dueCards: get().dueCards.map((card) =>
+          card.id === updatedCard.id
+            ? { ...card, front: updatedCard.front, back: updatedCard.back }
+            : card
+        ),
+      });
+    }
+    return updatedCard;
+  },
+
+  removeFlashcard: async (card) => {
+    if (!areFlashcardsEnabled()) {
+      throw new Error("Enable the Flashcards plugin to remove cards.");
+    }
+    await deleteFlashcardRecord(card.id);
+    set({ dueCards: get().dueCards.filter((item) => item.id !== card.id) });
+    const flashcardCounts = new Map(get().flashcardCounts);
+    const nodeFlashcardCount = flashcardCounts.get(card.node_id);
+    if (nodeFlashcardCount !== undefined) {
+      flashcardCounts.set(
+        card.node_id,
+        Math.max(0, nodeFlashcardCount - 1)
+      );
+    }
+    set({ flashcardCounts });
   },
 
   refreshDocuments: async () => {

@@ -14,12 +14,15 @@ import {
   ChevronRight,
   Code2,
   FileText,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Play,
   RotateCcw,
   Save,
   Sparkles,
   Square,
-  X,
 } from "lucide-react";
 import { loadQuizPreferences, saveQuizPreferences } from "../ai/quizService";
 import type { QuizBatchProgress } from "../ai/quizService";
@@ -58,6 +61,11 @@ const LANGUAGES: Array<{ id: QuizLanguage; label: string }> = [
   { id: "SQL", label: "SQL" },
   { id: "Go", label: "Go" },
 ];
+
+interface QuizItem {
+  type: QuizQuestionType;
+  questionIndexes: number[];
+}
 
 interface QuizArenaProps {
   nodeId: string | null;
@@ -137,12 +145,33 @@ export function QuizArena({
   const [score, setScore] = useState(savedScore ?? savedDraft.score ?? null);
   const [isSaving, setIsSaving] = useState(false);
   const [isComplete, setIsComplete] = useState(savedScore !== null);
+  const [isOverviewOpen, setIsOverviewOpen] = useState(false);
+  const [isQuestionNavOpen, setIsQuestionNavOpen] = useState(true);
   const dirtyRef = useRef(false);
 
-  const questionIndex = useMemo(
-    () => new Map(questions.map((question, index) => [question.id, index])),
-    [questions]
+  const quizItems = useMemo(() => {
+    const items: QuizItem[] = [];
+    let multipleChoiceItem: QuizItem | null = null;
+
+    questions.forEach((question, index) => {
+      if (question.type === "mcq") {
+        if (!multipleChoiceItem) {
+          multipleChoiceItem = { type: "mcq", questionIndexes: [] };
+          items.push(multipleChoiceItem);
+        }
+        multipleChoiceItem.questionIndexes.push(index);
+      } else {
+        items.push({ type: question.type, questionIndexes: [index] });
+      }
+    });
+
+    return items;
+  }, [questions]);
+  const currentItemIndex = Math.max(
+    0,
+    quizItems.findIndex((item) => item.questionIndexes.includes(currentIndex))
   );
+  const activeItem = quizItems[currentItemIndex] ?? null;
   const activeQuestion = questions[currentIndex] ?? null;
 
   useEffect(() => {
@@ -222,6 +251,12 @@ export function QuizArena({
     setAnswerVersion((version) => version + 1);
   };
 
+  const navigateToItem = (index: number) => {
+    const itemIndex = Math.min(Math.max(index, 0), quizItems.length - 1);
+    const firstQuestionIndex = quizItems[itemIndex]?.questionIndexes[0];
+    if (firstQuestionIndex !== undefined) navigateToQuestion(firstQuestionIndex);
+  };
+
   const handleSaveDraft = async () => {
     if (!nodeId) return;
     setIsSaving(true);
@@ -289,6 +324,26 @@ export function QuizArena({
       count + (isAnswered(question, answersRef.current[question.id]) ? 1 : 0),
     0
   );
+  const activeAnswered = activeQuestion
+    ? isAnswered(activeQuestion, answersRef.current[activeQuestion.id])
+    : false;
+  const activeItemAnsweredCount =
+    activeItem?.questionIndexes.reduce(
+      (count, index) =>
+        count +
+        (isAnswered(questions[index], answersRef.current[questions[index].id])
+          ? 1
+          : 0),
+      0
+    ) ?? 0;
+  const hasQuestionNavigation = quizItems.length > 1;
+
+  useEffect(() => {
+    if (activeItem?.type !== "mcq" || !activeQuestion) return;
+    document
+      .getElementById(`quiz-question-${activeQuestion.id}`)
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [activeItem?.type, activeQuestion?.id]);
 
   const handleArenaKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
@@ -333,75 +388,77 @@ export function QuizArena({
     <div
       data-theme={theme}
       onKeyDown={handleArenaKeyDown}
-      className="fixed inset-0 z-40 flex flex-col bg-[var(--color-canvas)] text-[var(--color-ink)]"
+      className="quiz-arena-shell fixed inset-0 z-40 flex flex-col bg-[var(--color-canvas)] text-[var(--color-ink)]"
     >
-      <header className="flex min-h-16 items-center gap-4 border-b border-[var(--color-border)] bg-[var(--color-panel)] px-5">
+      <header className="quiz-arena-header relative z-10 flex min-h-16 items-center gap-4 border-b border-[var(--color-border)] bg-[var(--color-panel)] px-5 shadow-sm backdrop-blur">
         <button
+          type="button"
           onClick={onClose}
-          className="inline-flex shrink-0 items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+          className="inline-flex min-h-10 shrink-0 items-center gap-2 rounded-xl border border-[var(--color-border)] px-3 py-2 text-xs font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+          aria-label="Exit to lesson"
         >
           <ArrowLeft className="h-4 w-4" />
           Exit to Lesson
         </button>
+        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--color-accent-button)] text-[var(--color-accent-foreground)] shadow-sm">
+          <Sparkles className="h-5 w-5" />
+        </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
-            Mastery Assessment
+            Noesis · mastery checkpoint
           </p>
-          <h1 className="truncate text-sm font-bold">{lessonTitle}</h1>
+          <h1 className="truncate text-sm font-bold text-[var(--color-ink)]">
+            {lessonTitle}
+          </h1>
         </div>
-        {!isConfiguring && questions.length > 0 && (
-          <>
-            <div className="hidden items-center gap-1.5 md:flex">
-              {questions.map((question, index) => {
-                const answered = isAnswered(
-                  question,
-                  answersRef.current[question.id]
-                );
-                return (
-                  <button
-                    key={question.id}
-                    onClick={() =>
-                      navigateToQuestion(questionIndex.get(question.id) ?? 0)
-                    }
-                    aria-label={`Go to question ${index + 1}`}
-                    aria-current={currentIndex === index ? "step" : undefined}
-                    className={`grid h-7 min-w-7 place-items-center rounded-full border px-1.5 text-[10px] font-semibold transition ${
-                      currentIndex === index
-                        ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-panel)]"
-                        : answered
-                          ? "border-[var(--color-success)]/50 bg-[var(--color-success)]/10 text-[var(--color-success)]"
-                          : "border-[var(--color-border)] text-[var(--color-muted)] hover:bg-[var(--color-hover)]"
-                    }`}
-                  >
-                    {answered && currentIndex !== index ? (
-                      <Check className="h-3 w-3" />
-                    ) : (
-                      index + 1
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-            <span className="shrink-0 font-mono text-xs text-[var(--color-muted)]">
-              {currentIndex + 1} / {questions.length}
-            </span>
+        {!isLoading && !isConfiguring && questions.length > 0 && (
+          <div className="hidden shrink-0 items-center gap-1 xl:flex">
             <button
-              onClick={() => nodeId && onConfigure(nodeId)}
-              disabled={isLoading || isSubmitting}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-2 text-[11px] font-semibold transition hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              onClick={() => setIsOverviewOpen((open) => !open)}
+              aria-controls="quiz-item-overview"
+              aria-expanded={isOverviewOpen}
+              aria-label={`${isOverviewOpen ? "Hide" : "Show"} item overview`}
+              title={`${isOverviewOpen ? "Hide" : "Show"} item overview`}
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-2.5 text-[11px] font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-focus-ring)]"
             >
-              <RotateCcw className="h-3.5 w-3.5" />
-              Regenerate Quiz
+              {isOverviewOpen ? (
+                <PanelLeftClose className="h-4 w-4" aria-hidden="true" />
+              ) : (
+                <PanelLeftOpen className="h-4 w-4" aria-hidden="true" />
+              )}
+              Overview
             </button>
-          </>
+            {hasQuestionNavigation && (
+              <button
+                type="button"
+                onClick={() => setIsQuestionNavOpen((open) => !open)}
+                aria-controls="quiz-question-navigation"
+                aria-expanded={isQuestionNavOpen}
+                aria-label={`${isQuestionNavOpen ? "Hide" : "Show"} item navigation`}
+                title={`${isQuestionNavOpen ? "Hide" : "Show"} item navigation`}
+                className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-2.5 text-[11px] font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-focus-ring)]"
+              >
+                {isQuestionNavOpen ? (
+                  <PanelRightClose className="h-4 w-4" aria-hidden="true" />
+                ) : (
+                  <PanelRightOpen className="h-4 w-4" aria-hidden="true" />
+                )}
+                Items
+              </button>
+            )}
+          </div>
         )}
-        <button
-          onClick={onClose}
-          aria-label="Close assessment"
-          className="rounded-lg p-2 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
-        >
-          <X className="h-4 w-4" />
-        </button>
+        {!isConfiguring && questions.length > 0 && (
+          <button
+            onClick={() => nodeId && onConfigure(nodeId)}
+            disabled={isLoading || isSubmitting}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-2 text-[11px] font-semibold transition hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Regenerate Quiz
+          </button>
+        )}
       </header>
 
       {isLoading ? (
@@ -445,15 +502,21 @@ export function QuizArena({
         </div>
       ) : isConfiguring ? (
         <div className="flex flex-1 items-start justify-center overflow-y-auto p-5 md:items-center md:p-8">
-          <section className="w-full max-w-3xl rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-6 shadow-[0_20px_70px_rgba(27,39,47,0.12)] md:p-8">
+          <section className="quiz-config-card w-full max-w-3xl rounded-3xl border border-[var(--color-border)] bg-[var(--color-panel)] p-6 shadow-xl md:p-8">
             <div className="flex items-start gap-4">
-              <div className="rounded-xl bg-[var(--color-accent-soft)] p-3 text-[var(--color-accent)]">
+              <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-[var(--color-accent-button)] text-[var(--color-accent-foreground)] shadow-sm">
                 <Sparkles className="h-5 w-5" />
               </div>
               <div className="min-w-0 flex-1">
-                <h2 className="text-xl font-bold">Build your assessment</h2>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-muted)]">
+                  Assessment studio
+                </p>
+                <h2 className="mt-1 text-2xl font-bold tracking-tight">
+                  Build your assessment
+                </h2>
                 <p className="mt-1 text-sm leading-6 text-[var(--color-muted)]">
-                  Choose question styles and challenge level before generating questions for this lesson.
+                  Choose how you want to practice. Your quiz will stay grounded
+                  in this lesson.
                 </p>
               </div>
               {questions.length > 0 && (
@@ -483,15 +546,26 @@ export function QuizArena({
             )}
 
             <div className="mt-7">
-              <h3 className="text-xs font-bold uppercase tracking-[0.1em] text-[var(--color-muted)]">
-                Question formats
-              </h3>
-              <div className="mt-3 grid gap-2 md:grid-cols-3">
+              <div className="flex items-end justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-bold text-[var(--color-ink)]">
+                    Choose question styles
+                  </h3>
+                  <p className="mt-1 text-xs text-[var(--color-muted)]">
+                    Select one or more ways to check your understanding.
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-full border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-1 text-[11px] font-semibold text-[var(--color-ink)]">
+                  {config.formats.length} selected
+                </span>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-3">
                 {FORMATS.map((format) => {
                   const selected = config.formats.includes(format.id);
                   return (
                     <button
                       key={format.id}
+                      type="button"
                       aria-pressed={selected}
                       onClick={() =>
                         setConfig((current) => {
@@ -502,19 +576,30 @@ export function QuizArena({
                           return { ...current, formats };
                         })
                       }
-                      className={`rounded-xl border p-4 text-left transition ${
+                      className={`min-h-36 rounded-2xl border p-4 text-left transition hover:-translate-y-0.5 hover:shadow-md ${
                         selected
-                          ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]"
-                          : "border-[var(--color-border)] hover:bg-[var(--color-hover)]"
+                          ? "border-[var(--color-border-strong)] bg-[var(--color-accent-soft)] shadow-sm"
+                          : "border-[var(--color-border)] bg-[var(--color-panel)] hover:border-[var(--color-border-strong)]"
                       }`}
                     >
-                      <span className="flex items-center justify-between text-xs font-bold">
-                        {format.label}
-                        {selected && (
-                          <Check className="h-4 w-4 text-[var(--color-accent)]" />
-                        )}
+                      <span className="mb-4 flex items-center justify-between">
+                        <span className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--color-accent-button)] text-[var(--color-accent-foreground)]">
+                          {format.id === "mcq" ? (
+                            <Check className="h-4 w-4" />
+                          ) : format.id === "coding" ? (
+                            <Code2 className="h-4 w-4" />
+                          ) : (
+                            <FileText className="h-4 w-4" />
+                          )}
+                        </span>
+                        <span className="text-[10px] font-semibold text-[var(--color-ink)]">
+                          {selected ? "Selected" : "Choose"}
+                        </span>
                       </span>
-                      <span className="mt-1 block text-[11px] text-[var(--color-muted)]">
+                      <span className="block text-sm font-bold text-[var(--color-ink)]">
+                        {format.label}
+                      </span>
+                      <span className="mt-1.5 block text-xs leading-5 text-[var(--color-muted)]">
                         {format.detail}
                       </span>
                     </button>
@@ -523,79 +608,111 @@ export function QuizArena({
               </div>
             </div>
 
-            <div className="mt-6 grid gap-5 md:grid-cols-2">
-              <label className="block text-xs font-semibold">
-                Question count
-                <div className="mt-2 flex gap-2">
-                  {([3, 5, 8, 10, 12] as const).map((count) => (
-                    <button
-                      key={count}
-                      type="button"
-                      aria-pressed={config.count === count}
-                      onClick={() => setConfig({ ...config, count })}
-                      className={`rounded-lg border px-4 py-2 text-xs font-semibold ${
-                        config.count === count
-                          ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-                          : "border-[var(--color-border)] hover:bg-[var(--color-hover)]"
-                      }`}
-                    >
-                      {count}
-                    </button>
-                  ))}
+            <div className="mt-5 grid grid-cols-3 gap-2">
+              {[
+                ["Styles", String(config.formats.length)],
+                ["Questions", String(config.count)],
+                [
+                  "Challenge",
+                  (config.difficultyMode ?? "medium").replace(/^\w/, (letter) =>
+                    letter.toUpperCase()
+                  ),
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2.5"
+                >
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[var(--color-muted)]">
+                    {label}
+                  </p>
+                  <p className="mt-0.5 truncate text-xs font-bold text-[var(--color-ink)]">
+                    {value}
+                  </p>
                 </div>
-              </label>
-              {config.formats.includes("coding") && (
+              ))}
+            </div>
+
+            <details className="disclosure-chevron quiz-options-disclosure mt-5 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-4">
+              <summary className="cursor-pointer py-3 text-xs font-semibold text-[var(--color-ink)]">
+                Fine-tune your assessment
+              </summary>
+              <div className="grid gap-5 border-t border-[var(--color-border)] py-4 md:grid-cols-2">
                 <label className="block text-xs font-semibold">
-                  Coding language
+                  Question count
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {([3, 5, 8, 10, 12] as const).map((count) => (
+                      <button
+                        key={count}
+                        type="button"
+                        aria-pressed={config.count === count}
+                        onClick={() => setConfig({ ...config, count })}
+                        className={`rounded-lg border px-4 py-2 text-xs font-semibold ${
+                          config.count === count
+                            ? "border-[var(--color-border-strong)] bg-[var(--color-accent-soft)] text-[var(--color-ink)]"
+                            : "border-[var(--color-border)] hover:bg-[var(--color-hover)]"
+                        }`}
+                      >
+                        {count}
+                      </button>
+                    ))}
+                  </div>
+                </label>
+                {config.formats.includes("coding") && (
+                  <label className="block text-xs font-semibold">
+                    Coding language
+                    <select
+                      value={config.language}
+                      onChange={(event) =>
+                        setConfig({
+                          ...config,
+                          language: event.target.value as QuizLanguage,
+                        })
+                      }
+                      className="mt-2 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2.5 text-xs"
+                    >
+                      {LANGUAGES.map((language) => (
+                        <option key={language.id} value={language.id}>
+                          {language.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <label className="block text-xs font-semibold">
+                  Difficulty
                   <select
-                    value={config.language}
+                    value={config.difficultyMode ?? "medium"}
                     onChange={(event) =>
                       setConfig({
                         ...config,
-                        language: event.target.value as QuizLanguage,
+                        difficultyMode: event.target.value as NonNullable<
+                          QuizGenerationConfig["difficultyMode"]
+                        >,
                       })
                     }
                     className="mt-2 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2.5 text-xs"
                   >
-                    {LANGUAGES.map((language) => (
-                      <option key={language.id} value={language.id}>
-                        {language.label}
-                      </option>
-                    ))}
+                    <option value="easy">Easy</option>
+                    <option value="medium">Medium</option>
+                    <option value="hard">Hard</option>
+                    <option value="progressive">
+                      Hybrid: Progressive (Easy → Hard)
+                    </option>
+                    <option value="balanced">Hybrid: Balanced Mix</option>
                   </select>
                 </label>
-              )}
-              <label className="block text-xs font-semibold">
-                Difficulty
-                <select
-                  value={config.difficultyMode ?? "medium"}
-                  onChange={(event) =>
-                    setConfig({
-                      ...config,
-                      difficultyMode: event.target.value as NonNullable<
-                        QuizGenerationConfig["difficultyMode"]
-                      >,
-                    })
-                  }
-                  className="mt-2 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-2.5 text-xs"
-                >
-                  <option value="easy">Easy</option>
-                  <option value="medium">Medium</option>
-                  <option value="hard">Hard</option>
-                  <option value="progressive">Hybrid: Progressive (Easy → Hard)</option>
-                  <option value="balanced">Hybrid: Balanced Mix</option>
-                </select>
-              </label>
-            </div>
+              </div>
+            </details>
 
-            <div className="mt-8 flex items-center justify-between gap-3 border-t border-[var(--color-border)] pt-5">
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--color-border)] pt-5">
               <p className="text-[11px] text-[var(--color-muted)]">
                 Preferred formats and language are saved on this device.
               </p>
               <button
                 onClick={handleGenerate}
                 disabled={!nodeId || config.formats.length === 0}
-                className="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-5 py-2.5 text-xs font-semibold text-[var(--color-panel)] transition hover:brightness-95 disabled:opacity-50"
+                className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-[var(--color-accent-button)] px-5 py-2.5 text-xs font-bold text-[var(--color-accent-foreground)] shadow-sm transition hover:-translate-y-0.5 hover:brightness-95 hover:shadow-md disabled:translate-y-0 disabled:opacity-50"
               >
                 <Play className="h-3.5 w-3.5" />
                 Generate Assessment
@@ -609,7 +726,7 @@ export function QuizArena({
           {error && <p role="alert" className="mt-2 text-xs text-[var(--color-warning)]">{error}</p>}
           <button
             onClick={() => nodeId && onConfigure(nodeId)}
-            className="mt-4 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-panel)]"
+            className="mt-4 min-h-10 rounded-xl bg-[var(--color-accent-button)] px-4 py-2 text-xs font-bold text-[var(--color-accent-foreground)] shadow-sm"
           >
             Configure Quiz
           </button>
@@ -621,17 +738,193 @@ export function QuizArena({
               {error}
             </div>
           )}
-          <main className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
+          <main className="flex min-h-0 flex-1 overflow-hidden">
+            <aside
+              id="quiz-item-overview"
+              aria-label="Assessment item overview"
+              aria-hidden={!isOverviewOpen}
+              className={
+                isOverviewOpen
+                  ? "hidden w-52 shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-4 xl:flex"
+                  : "hidden"
+              }
+            >
+              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-4">
+                <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-muted)]">
+                  Item {currentItemIndex + 1}
+                </p>
+                <h2 className="mt-2 text-base font-bold text-[var(--color-ink)]">
+                  {activeItem?.type === "mcq"
+                    ? "Multiple choice"
+                    : activeItem?.type === "coding"
+                      ? "Coding challenge"
+                      : "Written response"}
+                </h2>
+                <p className="mt-1 text-xs text-[var(--color-muted)]">
+                  {activeItem?.questionIndexes.length ?? 0} question
+                  {activeItem?.questionIndexes.length === 1 ? "" : "s"}
+                </p>
+                <div
+                  className="mt-3 h-1.5 overflow-hidden rounded-full bg-[var(--color-panel-subtle)]"
+                  role="progressbar"
+                  aria-label="Current item completion"
+                  aria-valuemin={0}
+                  aria-valuemax={activeItem?.questionIndexes.length ?? 0}
+                  aria-valuenow={activeItemAnsweredCount}
+                >
+                  <div
+                    className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-300"
+                    style={{
+                      width: `${
+                        activeItem?.questionIndexes.length
+                          ? (activeItemAnsweredCount /
+                              activeItem.questionIndexes.length) *
+                            100
+                          : 0
+                      }%`,
+                    }}
+                  />
+                </div>
+              </div>
+              <p className="mt-4 border-t border-[var(--color-border)] pt-3 text-[10px] leading-4 text-[var(--color-muted)]">
+                {hasQuestionNavigation
+                  ? "Use item navigation to jump between sections."
+                  : "Your response is saved as you work."}
+              </p>
+            </aside>
+
+            <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+              {activeItem?.type === "mcq" ? (
+                <section className="min-w-0 flex-1 overflow-y-auto bg-[var(--color-canvas)] p-4 sm:p-6 lg:p-8">
+                  <div className="mx-auto max-w-4xl">
+                    <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-muted)]">
+                          Multiple-choice set
+                        </p>
+                        <h2 className="mt-1 text-xl font-bold text-[var(--color-ink)]">
+                          Select an answer for each question
+                        </h2>
+                      </div>
+                      <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel)] px-3 py-1.5 text-xs font-semibold text-[var(--color-ink)]">
+                        {activeItemAnsweredCount} /{" "}
+                        {activeItem.questionIndexes.length} answered
+                      </span>
+                    </div>
+                    <div className="space-y-5">
+                      {activeItem.questionIndexes.map(
+                        (questionIndex, itemQuestionIndex) => {
+                          const question = questions[questionIndex];
+                          const answered = isAnswered(
+                            question,
+                            answersRef.current[question.id]
+                          );
+
+                          return (
+                            <article
+                              id={`quiz-question-${question.id}`}
+                              key={question.id}
+                              className="scroll-mt-4 rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-5 shadow-sm sm:p-6"
+                            >
+                              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="grid h-8 w-8 place-items-center rounded-lg bg-[var(--color-accent-button)] text-xs font-bold text-[var(--color-accent-foreground)]">
+                                    {itemQuestionIndex + 1}
+                                  </span>
+                                  <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[var(--color-muted)]">
+                                    Question {itemQuestionIndex + 1}
+                                  </span>
+                                  <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-2 py-1 text-[9px] font-semibold text-[var(--color-muted)]">
+                                    {(question.difficulty ?? "medium").toUpperCase()}
+                                  </span>
+                                </div>
+                                <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-[var(--color-muted)]">
+                                  <span
+                                    aria-hidden="true"
+                                    className={`h-1.5 w-1.5 rounded-full ${
+                                      answered
+                                        ? "bg-[var(--color-success)]"
+                                        : "bg-[var(--color-border-strong)]"
+                                    }`}
+                                  />
+                                  {answered ? "Answered" : "Not answered"}
+                                </span>
+                              </div>
+                              <RichContent className="prose prose-sm max-w-none text-[var(--color-ink)]">
+                                {question.prompt}
+                              </RichContent>
+                              <div className="mt-4 space-y-2.5">
+                                {(question.options ?? []).map(
+                                  (option, optionIndex) => {
+                                    const selected =
+                                      answersRef.current[question.id] ===
+                                      optionIndex;
+                                    const isCorrect =
+                                      isComplete &&
+                                      question.answerIndex === optionIndex;
+                                    return (
+                                      <button
+                                        key={`${question.id}-${optionIndex}`}
+                                        type="button"
+                                        aria-pressed={selected}
+                                        disabled={isComplete || isSubmitting}
+                                        onClick={() => {
+                                          setCurrentIndex(questionIndex);
+                                          updateAnswer(
+                                            question.id,
+                                            optionIndex
+                                          );
+                                        }}
+                                        className={`flex w-full items-start gap-3 rounded-xl border p-3.5 text-left text-sm transition sm:p-4 ${
+                                          isCorrect
+                                            ? "border-[var(--color-success)] bg-[var(--color-success)]/10"
+                                            : selected
+                                              ? "border-[var(--color-border-strong)] bg-[var(--color-accent-soft)] shadow-sm"
+                                              : "border-[var(--color-border)] bg-[var(--color-panel)] hover:border-[var(--color-border-strong)] hover:bg-[var(--color-panel-subtle)]"
+                                        }`}
+                                      >
+                                        <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full border border-current text-[10px] font-bold">
+                                          {optionIndex + 1}
+                                        </span>
+                                        <span className="min-w-0 flex-1 pt-0.5">
+                                          <RichContent inline>{option}</RichContent>
+                                        </span>
+                                        {isCorrect && (
+                                          <Check className="mt-1 h-4 w-4 shrink-0 text-[var(--color-success)]" />
+                                        )}
+                                      </button>
+                                    );
+                                  }
+                                )}
+                              </div>
+                              {isComplete && question.explanation && (
+                                <RichContent className="prose prose-sm mt-4 max-w-none rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-4 text-[var(--color-muted)]">
+                                  {question.explanation}
+                                </RichContent>
+                              )}
+                            </article>
+                          );
+                        }
+                      )}
+                    </div>
+                  </div>
+                </section>
+              ) : (
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:flex-row">
             <section className="min-h-0 overflow-y-auto border-b border-[var(--color-border)] bg-[var(--color-panel)] p-5 select-text lg:w-[42%] lg:border-b-0 lg:border-r lg:p-8">
               {activeQuestion && (
                 <div className="mx-auto max-w-2xl">
-                  <div className="mb-5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-accent)]">
-                    {activeQuestion.type === "coding" ? (
-                      <Code2 className="h-4 w-4" />
-                    ) : (
-                      <FileText className="h-4 w-4" />
-                    )}
-                    {activeQuestion.type.replace("_", " ")}
+                  <div className="mb-5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-ink)]">
+                    <span className="grid h-8 w-8 place-items-center rounded-lg bg-[var(--color-accent-button)] text-[var(--color-accent-foreground)]">
+                      {activeQuestion.type === "coding" ? (
+                        <Code2 className="h-4 w-4" />
+                      ) : activeQuestion.type === "mcq" ? (
+                        <Check className="h-4 w-4" />
+                      ) : (
+                        <FileText className="h-4 w-4" />
+                      )}
+                    </span>
+                    <span>{activeQuestion.type.replace("_", " ")}</span>
                     <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-2 py-0.5 text-[9px] text-[var(--color-muted)]">
                       {(activeQuestion.difficulty ?? "medium").toUpperCase()}
                     </span>
@@ -665,48 +958,33 @@ export function QuizArena({
 
             <section className="flex min-h-0 flex-1 flex-col bg-[var(--color-canvas)] p-4 lg:w-[58%] lg:p-7">
               {activeQuestion && (
-                <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
-                  {activeQuestion.type === "mcq" ? (
-                    <div className="space-y-3">
-                      <p className="mb-4 text-xs text-[var(--color-muted)]">
-                        Choose one answer. Use keys 1–4 for quick selection.
+                <div className="mx-auto mb-4 w-full max-w-4xl rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-3 shadow-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-[var(--color-ink)]">
+                        Question {currentIndex + 1} of {questions.length}
                       </p>
-                      {(activeQuestion.options ?? []).map((option, index) => {
-                        const selected =
-                          answersRef.current[activeQuestion.id] === index;
-                        const isCorrect =
-                          isComplete && activeQuestion.answerIndex === index;
-                        return (
-                          <button
-                            key={`${activeQuestion.id}-${index}`}
-                            disabled={isComplete || isSubmitting}
-                            onClick={() =>
-                              updateAnswer(activeQuestion.id, index)
-                            }
-                            className={`flex w-full items-start gap-3 rounded-xl border p-4 text-left text-sm transition ${
-                              isCorrect
-                                ? "border-[var(--color-success)] bg-[var(--color-success)]/10"
-                                : selected
-                                  ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]"
-                                  : "border-[var(--color-border)] bg-[var(--color-panel)] hover:border-[var(--color-border-strong)]"
-                            }`}
-                          >
-                            <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md border border-current text-[10px] font-bold">
-                              {index + 1}
-                            </span>
-                            <span className="pt-0.5">
-                              <RichContent inline>{option}</RichContent>
-                            </span>
-                          </button>
-                        );
-                      })}
-                      {isComplete && activeQuestion.explanation && (
-                        <RichContent className="prose prose-sm mt-4 max-w-none rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-4 text-[var(--color-muted)]">
-                          {activeQuestion.explanation}
-                        </RichContent>
-                      )}
+                      <p className="mt-0.5 text-[11px] text-[var(--color-muted)]">
+                        Continue with this question to complete the item.
+                      </p>
                     </div>
-                  ) : activeQuestion.type === "open_ended" ? (
+                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--color-border)] px-2.5 py-1 text-[10px] font-semibold text-[var(--color-ink)]">
+                      <span
+                        aria-hidden="true"
+                        className={`h-1.5 w-1.5 rounded-full ${
+                          activeAnswered
+                            ? "bg-[var(--color-success)]"
+                            : "bg-[var(--color-border-strong)]"
+                        }`}
+                      />
+                      {activeAnswered ? "Answered" : "In progress"}
+                    </span>
+                  </div>
+                </div>
+              )}
+              {activeQuestion && (
+                <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
+                  {activeQuestion.type === "open_ended" ? (
                     <div className="flex min-h-0 flex-1 flex-col">
                       <label className="mb-2 text-xs font-semibold">
                         Your response
@@ -795,10 +1073,101 @@ export function QuizArena({
                 </div>
               )}
             </section>
+                </div>
+              )}
+            </div>
+
+            {hasQuestionNavigation && (
+              <aside
+                id="quiz-question-navigation"
+                aria-label="Assessment item navigation"
+                aria-hidden={!isQuestionNavOpen}
+                className={
+                  isQuestionNavOpen
+                    ? "hidden w-52 shrink-0 flex-col border-l border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-4 xl:flex"
+                    : "hidden"
+                }
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-ink)]">
+                      Item navigation
+                    </p>
+                    <p className="mt-1 text-[11px] leading-4 text-[var(--color-muted)]">
+                      Jump between assessment items.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsQuestionNavOpen(false)}
+                    aria-label="Hide item navigation"
+                    title="Hide item navigation"
+                    className="-mr-1 -mt-1 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-focus-ring)]"
+                  >
+                    <PanelRightClose className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                </div>
+                  <nav
+                    aria-label="Assessment items"
+                    className="mt-4 grid grid-cols-4 content-start gap-2"
+                  >
+                    {quizItems.map((item, itemIndex) => {
+                      const answeredCountForItem = item.questionIndexes.reduce(
+                        (count, questionIndex) =>
+                          count +
+                          (isAnswered(
+                            questions[questionIndex],
+                            answersRef.current[questions[questionIndex].id]
+                          )
+                            ? 1
+                            : 0),
+                        0
+                      );
+                      const isCompleteItem =
+                        answeredCountForItem === item.questionIndexes.length;
+                      const isCurrent = currentItemIndex === itemIndex;
+                        return (
+                          <button
+                            key={`${item.type}-${item.questionIndexes.join("-")}`}
+                            type="button"
+                            onClick={() => navigateToItem(itemIndex)}
+                            aria-current={isCurrent ? "step" : undefined}
+                            aria-label={`Item ${itemIndex + 1}: ${
+                              item.type === "mcq"
+                                ? "multiple choice"
+                                : item.type === "coding"
+                                  ? "coding"
+                                  : "written response"
+                            }, ${
+                              isCompleteItem ? "complete" : "incomplete"
+                            }`}
+                            className={`relative grid h-10 w-10 place-items-center rounded-lg border text-xs font-bold transition ${
+                              isCurrent
+                                ? "border-[var(--color-accent-button)] bg-[var(--color-accent-button)] text-[var(--color-accent-foreground)] shadow-sm"
+                                : isCompleteItem
+                                  ? "border-[var(--color-success)]/50 bg-[var(--color-success)]/10 text-[var(--color-ink)] hover:bg-[var(--color-success)]/20"
+                                  : "border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] hover:bg-[var(--color-hover)]"
+                            }`}
+                          >
+                            {itemIndex + 1}
+                            <span
+                              aria-hidden="true"
+                              className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${
+                                isCompleteItem
+                                  ? "bg-[var(--color-success)]"
+                                  : "bg-[var(--color-border-strong)]"
+                              }`}
+                            />
+                          </button>
+                        );
+                    })}
+                  </nav>
+              </aside>
+            )}
           </main>
 
           <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--color-border)] bg-[var(--color-panel)] px-5 py-3">
-            <div className="text-xs text-[var(--color-muted)]">
+            <div className="min-w-0 text-xs text-[var(--color-muted)]">
               {isComplete && score !== null ? (
                 <span
                   className={`font-semibold ${
@@ -823,27 +1192,24 @@ export function QuizArena({
                 <>Answered {answeredCount} of {questions.length}</>
               )}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <button
-                disabled={currentIndex <= 0}
-                onClick={() =>
-                  navigateToQuestion(Math.max(0, currentIndex - 1))
-                }
+                disabled={currentItemIndex <= 0}
+                onClick={() => navigateToItem(currentItemIndex - 1)}
                 className="inline-flex items-center gap-1 rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs font-semibold hover:bg-[var(--color-hover)] disabled:opacity-40"
               >
                 <ChevronLeft className="h-3.5 w-3.5" />
-                Previous
+                Previous item
               </button>
+              <span className="min-w-12 text-center text-xs font-semibold text-[var(--color-muted)]">
+                {currentItemIndex + 1} / {quizItems.length}
+              </span>
               <button
-                disabled={currentIndex >= questions.length - 1}
-                onClick={() =>
-                  navigateToQuestion(
-                    Math.min(questions.length - 1, currentIndex + 1)
-                  )
-                }
+                disabled={currentItemIndex >= quizItems.length - 1}
+                onClick={() => navigateToItem(currentItemIndex + 1)}
                 className="inline-flex items-center gap-1 rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs font-semibold hover:bg-[var(--color-hover)] disabled:opacity-40"
               >
-                Next
+                Next item
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
               <button
@@ -858,7 +1224,7 @@ export function QuizArena({
                 <button
                   disabled={!canSubmit || isSubmitting}
                   onClick={() => void handleSubmit()}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-panel)] transition hover:brightness-95 disabled:opacity-40"
+                  className="inline-flex min-h-10 items-center gap-1.5 rounded-xl bg-[var(--color-accent-button)] px-4 py-2 text-xs font-bold text-[var(--color-accent-foreground)] shadow-sm transition hover:-translate-y-0.5 hover:brightness-95 disabled:translate-y-0 disabled:opacity-40"
                 >
                   {isSubmitting ? (
                     <span className="h-3.5 w-3.5 animate-spin rounded-full border border-current border-t-transparent" />
@@ -873,7 +1239,7 @@ export function QuizArena({
                 score < passThreshold / 100 && (
                   <button
                     onClick={() => void handleRetake()}
-                    className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-panel)] transition hover:brightness-95"
+                    className="rounded-xl bg-[var(--color-accent-button)] px-4 py-2 text-xs font-bold text-[var(--color-accent-foreground)] shadow-sm transition hover:brightness-95"
                   >
                     Try Again
                   </button>
@@ -897,7 +1263,7 @@ function GradingFeedback({ result }: { result: QuizGradingResult }) {
         {result.feedback}
       </RichContent>
       {result.optimalSolution && (
-        <details className="mt-2">
+        <details className="disclosure-chevron mt-2">
           <summary className="cursor-pointer font-semibold">Reference solution</summary>
           <RichContent className="prose prose-xs mt-1 max-w-none text-[var(--color-muted)]">
             {result.optimalSolution}

@@ -1,4 +1,5 @@
 import {
+  useCallback,
   lazy,
   Suspense,
   useEffect,
@@ -18,14 +19,18 @@ import {
 import { getDb } from "./db/client";
 import { useNoesisStore } from "./store/useNoesisStore";
 import { usePluginStore } from "./plugins/pluginStore";
-import { EXCALIDRAW_PLUGIN_ID } from "./plugins/registry";
+import {
+  EXCALIDRAW_PLUGIN_ID,
+  FLASHCARDS_PLUGIN_ID,
+} from "./plugins/registry";
 import { DagCanvas } from "./components/DagCanvas";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { AppGuide } from "./components/AppGuide";
 import { AnimatedPresence } from "./components/AnimatedPresence";
 import { BootSplash } from "./components/BootSplash";
 import { UpdateIndicator } from "./components/UpdateIndicator";
-import type { GraphNode } from "./types/domain";
+import type { GraphEdge, GraphNode } from "./types/domain";
+import type { UserPreferences } from "./ai/keyStore";
 import { getWorkspaceDeletionSummary } from "./db/repositories/workspaceRepo";
 import {
   createPluginBoard,
@@ -57,6 +62,104 @@ const ExcalidrawWorkspace = lazy(() =>
   }))
 );
 
+const GUIDE_NODES: GraphNode[] = [
+  {
+    id: "guide-foundation",
+    workspace_id: "guide-preview",
+    title: "Learning science",
+    summary_hint: "How people learn and remember",
+    status: "unlocked",
+    mastery_score: 0,
+    in_degree_unmastered: 0,
+    layer_index: 0,
+    pos_x: 147,
+    pos_y: 0,
+    is_hydrated: 0,
+    lesson_markdown: null,
+    mermaid_diagram: null,
+    source_citations: null,
+    updated_at: 0,
+    archived_at: null,
+  },
+  {
+    id: "guide-attention",
+    workspace_id: "guide-preview",
+    title: "Attention",
+    summary_hint: "Focus and distractions",
+    status: "locked",
+    mastery_score: 0,
+    in_degree_unmastered: 1,
+    layer_index: 1,
+    pos_x: 0,
+    pos_y: 206,
+    is_hydrated: 0,
+    lesson_markdown: null,
+    mermaid_diagram: null,
+    source_citations: null,
+    updated_at: 0,
+    archived_at: null,
+  },
+  {
+    id: "guide-memory",
+    workspace_id: "guide-preview",
+    title: "Working memory",
+    summary_hint: "How we hold information in mind",
+    status: "locked",
+    mastery_score: 0,
+    in_degree_unmastered: 1,
+    layer_index: 1,
+    pos_x: 294,
+    pos_y: 206,
+    is_hydrated: 0,
+    lesson_markdown: null,
+    mermaid_diagram: null,
+    source_citations: null,
+    updated_at: 0,
+    archived_at: null,
+  },
+  {
+    id: "guide-recall",
+    workspace_id: "guide-preview",
+    title: "Active recall",
+    summary_hint: "Practice retrieving what you learned",
+    status: "locked",
+    mastery_score: 0,
+    in_degree_unmastered: 2,
+    layer_index: 2,
+    pos_x: 147,
+    pos_y: 412,
+    is_hydrated: 0,
+    lesson_markdown: null,
+    mermaid_diagram: null,
+    source_citations: null,
+    updated_at: 0,
+    archived_at: null,
+  },
+];
+
+const GUIDE_EDGES: GraphEdge[] = [
+  {
+    workspace_id: "guide-preview",
+    source_id: "guide-foundation",
+    target_id: "guide-attention",
+  },
+  {
+    workspace_id: "guide-preview",
+    source_id: "guide-foundation",
+    target_id: "guide-memory",
+  },
+  {
+    workspace_id: "guide-preview",
+    source_id: "guide-attention",
+    target_id: "guide-recall",
+  },
+  {
+    workspace_id: "guide-preview",
+    source_id: "guide-memory",
+    target_id: "guide-recall",
+  },
+];
+
 export default function App() {
   const [dbReady, setDbReady] = useState(false);
   const [bootError, setBootError] = useState<string | null>(null);
@@ -66,6 +169,12 @@ export default function App() {
   const [mainView, setMainView] = useState<"graph" | "excalidraw">("graph");
   const [isExcalidrawFullscreen, setIsExcalidrawFullscreen] = useState(false);
   const [isExcalidrawLessonOpen, setIsExcalidrawLessonOpen] = useState(false);
+  const [lessonBoardOpenRequest, setLessonBoardOpenRequest] = useState<{
+    workspaceId: string;
+    nodeId: string;
+    requestId: number;
+  } | null>(null);
+  const lessonBoardRequestIdRef = useRef(0);
   const [sidebarMotion, setSidebarMotion] = useState<
     "collapse" | "expand" | null
   >(null);
@@ -74,6 +183,7 @@ export default function App() {
   const [hasOpenedGuide, setHasOpenedGuide] = useState(false);
   const [hasOpenedModal, setHasOpenedModal] = useState(false);
   const sidebarCollapsedRef = useRef(false);
+  const sidebarBeforeCanvasExpandRef = useRef<boolean | null>(null);
   const startupGuideEvaluated = useRef(false);
   const launchFullscreenApplied = useRef(false);
   const lastSelectedNodeRef = useRef<GraphNode | null>(null);
@@ -81,6 +191,7 @@ export default function App() {
   const activeWorkspaceIdRef = useRef(store.activeWorkspaceId);
   const enabledPluginIds = usePluginStore((state) => state.enabledPluginIds);
   const excalidrawEnabled = enabledPluginIds.includes(EXCALIDRAW_PLUGIN_ID);
+  const flashcardsEnabled = enabledPluginIds.includes(FLASHCARDS_PLUGIN_ID);
   const toggleSidebar = () => {
     const nextCollapsed = !sidebarCollapsedRef.current;
     sidebarCollapsedRef.current = nextCollapsed;
@@ -92,6 +203,28 @@ export default function App() {
           ? "collapse"
           : "expand"
     );
+  };
+  const toggleExcalidrawFullscreen = () => {
+    if (isExcalidrawFullscreen) {
+      setIsExcalidrawFullscreen(false);
+      const previousSidebarState = sidebarBeforeCanvasExpandRef.current;
+      sidebarBeforeCanvasExpandRef.current = null;
+      if (
+        previousSidebarState !== null &&
+        previousSidebarState !== sidebarCollapsedRef.current
+      ) {
+        sidebarCollapsedRef.current = previousSidebarState;
+        setSidebarCollapsed(previousSidebarState);
+      }
+      return;
+    }
+
+    sidebarBeforeCanvasExpandRef.current = sidebarCollapsedRef.current;
+    if (!sidebarCollapsedRef.current) {
+      sidebarCollapsedRef.current = true;
+      setSidebarCollapsed(true);
+    }
+    setIsExcalidrawFullscreen(true);
   };
 
   useEffect(() => {
@@ -115,7 +248,11 @@ export default function App() {
       "data-theme",
       store.preferences.theme
     );
-  }, [store.preferences.theme]);
+    document.documentElement.setAttribute(
+      "data-high-contrast-text",
+      String(store.preferences.highContrastText)
+    );
+  }, [store.preferences.theme, store.preferences.highContrastText]);
 
   useEffect(() => {
     if (!dbReady || launchFullscreenApplied.current) return;
@@ -163,17 +300,35 @@ export default function App() {
   useEffect(() => {
     if (activeWorkspaceIdRef.current === store.activeWorkspaceId) return;
     activeWorkspaceIdRef.current = store.activeWorkspaceId;
+    setLessonBoardOpenRequest(null);
     setMainView("graph");
     setIsExcalidrawFullscreen(false);
   }, [store.activeWorkspaceId]);
 
   useEffect(() => {
-    if (mainView !== "excalidraw") setIsExcalidrawFullscreen(false);
+    if (mainView !== "excalidraw") {
+      setIsExcalidrawFullscreen(false);
+      const previousSidebarState = sidebarBeforeCanvasExpandRef.current;
+      sidebarBeforeCanvasExpandRef.current = null;
+      if (
+        previousSidebarState !== null &&
+        previousSidebarState !== sidebarCollapsedRef.current
+      ) {
+        sidebarCollapsedRef.current = previousSidebarState;
+        setSidebarCollapsed(previousSidebarState);
+      }
+    }
   }, [mainView]);
 
   useEffect(() => {
     if (mainView === "excalidraw") setSidebarMotion(null);
   }, [mainView]);
+
+  useEffect(() => {
+    if (!sidebarMotion) return;
+    const fallback = window.setTimeout(() => setSidebarMotion(null), 450);
+    return () => window.clearTimeout(fallback);
+  }, [sidebarMotion]);
 
   useEffect(() => {
     if (mainView === "excalidraw") {
@@ -300,9 +455,19 @@ export default function App() {
       store.showToast("Opened this lesson's visual board.");
     }
 
+    setLessonBoardOpenRequest({
+      workspaceId: node.workspace_id,
+      nodeId: node.id,
+      requestId: ++lessonBoardRequestIdRef.current,
+    });
     setIsExcalidrawFullscreen(false);
     setMainView("excalidraw");
   };
+  const handleLessonBoardRequestHandled = useCallback((requestId: number) => {
+    setLessonBoardOpenRequest((current) =>
+      current?.requestId === requestId ? null : current
+    );
+  }, []);
 
   const activeWorkspace =
     store.workspaces.find((workspace) => workspace.id === store.activeWorkspaceId) ??
@@ -320,6 +485,7 @@ export default function App() {
       data-theme={store.preferences.theme}
       data-font={store.preferences.fontFamily}
       data-reading-scale={store.preferences.readingScale}
+      data-high-contrast-text={store.preferences.highContrastText}
       className="app-shell relative flex h-screen w-screen overflow-hidden bg-[var(--color-app-bg)] text-[var(--color-ink)]"
     >
       {bootError ? (
@@ -342,6 +508,7 @@ export default function App() {
               activeWorkspaceId={store.activeWorkspaceId}
               nodes={store.nodes}
               dueCount={store.dueCards.length}
+              flashcardsEnabled={flashcardsEnabled}
               documentCount={store.documents.length}
               onToggle={toggleSidebar}
               onSelect={(id) => {
@@ -385,20 +552,20 @@ export default function App() {
                 }
               }}
             >
-        <header className="app-topbar z-10 flex h-14 shrink-0 items-center justify-between border-b border-[var(--color-border)] px-5">
+        <header className="app-topbar z-10 flex h-16 shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border)] px-6">
             <div className="flex min-w-0 items-center gap-4">
               <div className="min-w-0">
-                <h1 className="truncate text-[13px] font-semibold">
+                <h1 className="truncate text-sm font-semibold tracking-[-0.01em]">
                   {activeWorkspace?.title ?? "Learning studio"}
                 </h1>
                 {activeWorkspace && (
-                  <p className="text-[10px] text-[var(--color-muted)]">
+                  <p className="mt-0.5 text-[11px] text-[var(--color-muted)]">
                     {masteredCount} of {store.nodes.length} mastered
                   </p>
                 )}
               </div>
               {store.nodes.length > 0 && (
-                <div className="hidden h-1.5 w-24 overflow-hidden rounded-full bg-[var(--color-border)] sm:block">
+                <div className="hidden h-1.5 w-28 overflow-hidden rounded-full bg-[var(--color-border)] sm:block">
                   <div
                     className="h-full origin-left rounded-full bg-[var(--color-success)] transition-transform duration-300 ease-[var(--ease-spring)]"
                     style={{
@@ -411,15 +578,15 @@ export default function App() {
               {excalidrawEnabled && (
                 <nav
                   aria-label="Workspace views"
-                  className="flex shrink-0 items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-1"
+                  className="flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-1 shadow-sm"
                 >
                   <button
                     type="button"
                     onClick={() => setMainView("graph")}
                     aria-pressed={mainView === "graph"}
-                    className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
+                    className={`flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
                       mainView === "graph"
-                        ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                        ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
                         : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
                     }`}
                   >
@@ -430,9 +597,9 @@ export default function App() {
                     type="button"
                     onClick={() => setMainView("excalidraw")}
                     aria-pressed={mainView === "excalidraw"}
-                    className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
+                    className={`flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
                       mainView === "excalidraw"
-                        ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                        ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
                         : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
                     }`}
                   >
@@ -448,7 +615,7 @@ export default function App() {
                       aria-pressed={isExcalidrawLessonOpen}
                       className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
                         isExcalidrawLessonOpen
-                          ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                          ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
                           : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
                       }`}
                     >
@@ -459,11 +626,9 @@ export default function App() {
                   {mainView === "excalidraw" && (
                     <button
                       type="button"
-                      onClick={() =>
-                        setIsExcalidrawFullscreen((fullscreen) => !fullscreen)
-                      }
+                      onClick={toggleExcalidrawFullscreen}
                       aria-pressed={isExcalidrawFullscreen}
-                      className="rounded-md px-2.5 py-1.5 text-[10px] font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                      className="min-h-9 rounded-lg px-3 text-[11px] font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
                     >
                       {isExcalidrawFullscreen
                         ? "Restore canvas"
@@ -478,7 +643,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={toggleAppearanceMode}
-                className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-2 text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                className="flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
                 aria-label={
                   store.preferences.appearanceMode === "dark"
                     ? "Switch to light mode"
@@ -506,7 +671,7 @@ export default function App() {
                 aria-pressed={store.isTutorOpen}
                 aria-label={store.isTutorOpen ? "Close tutor" : "Open tutor"}
                 title={store.isTutorOpen ? "Close tutor" : "Open tutor"}
-                className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-[11px] font-semibold transition ${
+                className={`flex h-10 items-center gap-2 rounded-xl border px-3 text-[11px] font-semibold transition ${
                   store.isTutorOpen
                     ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
                     : "border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] hover:bg-[var(--color-hover)]"
@@ -526,7 +691,7 @@ export default function App() {
                       )
                     )
                 }
-                className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-2 text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                className="flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
                 aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
                 title={
                   isFullscreen ? "Exit fullscreen (F11)" : "Fullscreen (F11)"
@@ -559,6 +724,8 @@ export default function App() {
                 >
                   <ExcalidrawWorkspace
                     workspaceId={activeWorkspace.id}
+                    openBoardRequest={lessonBoardOpenRequest}
+                    onBoardRequestHandled={handleLessonBoardRequestHandled}
                     selectedNode={selectedNode}
                     nodes={store.nodes}
                     appearanceMode={store.preferences.appearanceMode}
@@ -580,56 +747,75 @@ export default function App() {
                   data-guide="canvas"
                   className="flex flex-1 flex-col items-center justify-center p-8 text-center"
                 >
-                  <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--color-muted)]">
-                    Workspace
-                  </p>
-                  <h2 className="mt-3 text-xl font-semibold tracking-tight">
-                    No workspace selected
-                  </h2>
-                  <div className="mt-5 flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => store.setActiveModal("new_workspace")}
-                      className="rounded-lg bg-[var(--color-accent-button)] px-4 py-2.5 text-xs font-semibold text-white transition hover:brightness-95"
-                    >
-                      Create workspace
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => store.setActiveModal("vault")}
-                      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2.5 text-xs font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
-                    >
-                      Add notes
-                    </button>
-                  </div>
+                  {isGuideOpen ? (
+                    <GuideDagPreview
+                      showDots={store.preferences.showCanvasDots}
+                      edgeRouting={store.preferences.edgeRouting}
+                      nodeDensity={store.preferences.nodeDensity}
+                    />
+                  ) : (
+                    <>
+                      <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--color-muted)]">
+                        Workspace
+                      </p>
+                      <h2 className="mt-3 text-xl font-semibold tracking-tight">
+                        No workspace selected
+                      </h2>
+                      <div className="mt-5 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => store.setActiveModal("new_workspace")}
+                          className="rounded-lg bg-[var(--color-accent-button)] px-4 py-2.5 text-xs font-semibold text-white transition hover:brightness-95"
+                        >
+                          Create workspace
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => store.setActiveModal("vault")}
+                          className="rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2.5 text-xs font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                        >
+                          Add notes
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div data-guide="canvas" className="min-w-0 flex-1">
-                  <DagCanvas
-                    workspaceId={activeWorkspace?.id ?? null}
-                    nodes={store.nodes}
-                    edges={store.edges}
-                    layoutMode={activeWorkspace?.layout_mode ?? "auto"}
-                    selectedNodeId={store.selectedNodeId}
-                    showDots={store.preferences.showCanvasDots}
-                    edgeRouting={store.preferences.edgeRouting}
-                    nodeDensity={store.preferences.nodeDensity}
-                    onSelectNode={(id) => store.selectNode(id)}
-                    quizNodeIds={store.quizNodeIds}
-                    onSetLayoutMode={store.setCanvasLayoutMode}
-                    onMoveNode={store.moveGraphNode}
-                    onRealignGrid={store.realignGraphGrid}
-                    onAddNode={store.addConceptNode}
-                    onEditNode={store.editConceptNode}
-                    onArchiveNode={store.archiveConceptNode}
-                    onRestoreArchivedNode={store.restoreArchivedConceptNode}
-                    onPermanentlyDeleteArchivedNode={
-                      store.permanentlyDeleteArchivedConceptNode
-                    }
-                    onConnectNodes={store.connectConceptNodes}
-                    onDisconnectNodes={store.disconnectConceptNodes}
-                    onToast={store.showToast}
-                  />
+                  {isGuideOpen && store.nodes.length === 0 ? (
+                    <GuideDagPreview
+                      showDots={store.preferences.showCanvasDots}
+                      edgeRouting={store.preferences.edgeRouting}
+                      nodeDensity={store.preferences.nodeDensity}
+                    />
+                  ) : (
+                    <DagCanvas
+                      workspaceId={activeWorkspace.id}
+                      isNativeFullscreen={isFullscreen}
+                      nodes={store.nodes}
+                      edges={store.edges}
+                      layoutMode={activeWorkspace.layout_mode}
+                      selectedNodeId={store.selectedNodeId}
+                      showDots={store.preferences.showCanvasDots}
+                      edgeRouting={store.preferences.edgeRouting}
+                      nodeDensity={store.preferences.nodeDensity}
+                      onSelectNode={(id) => store.selectNode(id)}
+                      quizNodeIds={store.quizNodeIds}
+                      onSetLayoutMode={store.setCanvasLayoutMode}
+                      onMoveNode={store.moveGraphNode}
+                      onRealignGrid={store.realignGraphGrid}
+                      onAddNode={store.addConceptNode}
+                      onEditNode={store.editConceptNode}
+                      onArchiveNode={store.archiveConceptNode}
+                      onRestoreArchivedNode={store.restoreArchivedConceptNode}
+                      onPermanentlyDeleteArchivedNode={
+                        store.permanentlyDeleteArchivedConceptNode
+                      }
+                      onConnectNodes={store.connectConceptNodes}
+                      onDisconnectNodes={store.disconnectConceptNodes}
+                      onToast={store.showToast}
+                    />
+                  )}
                 </div>
               )
             )}
@@ -654,6 +840,16 @@ export default function App() {
                   hydrationError={
                     store.hydrationErrors.get(lessonNode.id) ?? null
                   }
+                  generationPreview={
+                    store.lessonGenerationText.get(lessonNode.id) ?? ""
+                  }
+                  flashcardCount={
+                    store.flashcardCounts.get(lessonNode.id) ?? null
+                  }
+                  flashcardsEnabled={flashcardsEnabled}
+                  isGeneratingFlashcards={store.generatingFlashcardNodeIds.has(
+                    lessonNode.id
+                  )}
                   hasSavedQuiz={store.quizNodeIds.has(lessonNode.id)}
                   isQuizAvailabilityLoaded={store.checkedQuizNodeIds.has(
                     lessonNode.id
@@ -672,6 +868,9 @@ export default function App() {
                   }
                   onRegenerateLesson={() =>
                     void store.regenerateNodeLesson(lessonNode.id)
+                  }
+                  onGenerateFlashcards={() =>
+                    void store.generateNodeFlashcards(lessonNode.id)
                   }
                   onRequestCompletion={(id) => {
                     if (store.selectedNodeId === id) {
@@ -737,6 +936,7 @@ export default function App() {
             curriculumProgress={store.curriculumProgress}
             masteryPassThreshold={store.preferences.masteryPassThreshold}
             dueCards={store.dueCards}
+            flashcardNodes={store.nodes}
             documents={store.documents}
             diagnosticQuestions={store.diagnosticQuestions}
             diagnosticConfig={store.diagnosticConfig}
@@ -757,6 +957,10 @@ export default function App() {
             }
             onCancelCurriculum={() => store.cancelCurriculumGeneration()}
             onGradeCard={(card, grade) => store.gradeDueCard(card, grade)}
+            onLoadFlashcards={store.loadWorkspaceFlashcards}
+            onCreateFlashcard={store.createFlashcard}
+            onEditFlashcard={store.editFlashcard}
+            onRemoveFlashcard={store.removeFlashcard}
             onStartDiagnostic={(nodeId) =>
               store.openDiagnosticForNode(nodeId)
             }
@@ -795,6 +999,7 @@ export default function App() {
           {(hasOpenedGuide || isGuideOpen) && (
             <AppGuide
               isOpen={isGuideOpen}
+              flashcardsEnabled={flashcardsEnabled}
               onClose={closeGuide}
               showOnStartup={store.preferences.showAppTutorial}
               onShowOnStartupChange={setGuideOnStartup}
@@ -805,6 +1010,49 @@ export default function App() {
       <BootSplash
         ready={dbReady || Boolean(bootError)}
         status={bootError ? "Local vault unavailable" : undefined}
+      />
+    </div>
+  );
+}
+
+function GuideDagPreview({
+  showDots,
+  edgeRouting,
+  nodeDensity,
+}: {
+  showDots: boolean;
+  edgeRouting: UserPreferences["edgeRouting"];
+  nodeDensity: UserPreferences["nodeDensity"];
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      inert
+      className="pointer-events-none h-full min-h-[440px] w-full overflow-hidden [&_[data-canvas-toolbar]]:hidden"
+    >
+      <DagCanvas
+        workspaceId={null}
+        isNativeFullscreen={false}
+        nodes={GUIDE_NODES}
+        edges={GUIDE_EDGES}
+        layoutMode="auto"
+        selectedNodeId={null}
+        showDots={showDots}
+        edgeRouting={edgeRouting}
+        nodeDensity={nodeDensity}
+        quizNodeIds={new Set()}
+        onSelectNode={() => {}}
+        onSetLayoutMode={async () => {}}
+        onMoveNode={async () => {}}
+        onRealignGrid={async () => {}}
+        onAddNode={async () => "guide-preview"}
+        onEditNode={async () => {}}
+        onArchiveNode={async () => {}}
+        onRestoreArchivedNode={async () => {}}
+        onPermanentlyDeleteArchivedNode={async () => {}}
+        onConnectNodes={async () => {}}
+        onDisconnectNodes={async () => {}}
+        onToast={() => {}}
       />
     </div>
   );

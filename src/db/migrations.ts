@@ -1,6 +1,6 @@
 import type Database from "@tauri-apps/plugin-sql";
 
-const CURRENT_SCHEMA_VERSION = 9;
+const CURRENT_SCHEMA_VERSION = 10;
 
 export async function runMigrations(db: Database): Promise<void> {
   await db.execute("PRAGMA journal_mode = WAL;");
@@ -149,6 +149,21 @@ export async function runMigrations(db: Database): Promise<void> {
         page_count INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL
       );
+    `);
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS document_workspaces (
+        doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        PRIMARY KEY (doc_id, workspace_id)
+      );
+    `);
+    await db.execute(
+      "CREATE INDEX IF NOT EXISTS idx_document_workspaces_workspace ON document_workspaces(workspace_id);"
+    );
+    await db.execute(`
+      INSERT OR IGNORE INTO document_workspaces (doc_id, workspace_id)
+      SELECT id, workspace_id FROM documents WHERE workspace_id IS NOT NULL;
     `);
 
     await db.execute(`

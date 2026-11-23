@@ -13,9 +13,24 @@ export async function getDb(): Promise<Database> {
   initPromise = (async () => {
     const db = await Database.load(DB_URL);
     await runMigrations(db);
+    const integrity = await db.select<Array<{ quick_check: string }>>(
+      "PRAGMA quick_check(1);"
+    );
+    if (integrity[0]?.quick_check !== "ok") {
+      throw new Error(
+        `Local database integrity check failed: ${
+          integrity[0]?.quick_check ?? "no result returned"
+        }`
+      );
+    }
     dbInstance = db;
     return db;
   })();
 
-  return initPromise;
+  try {
+    return await initPromise;
+  } catch (error) {
+    initPromise = null;
+    throw error;
+  }
 }

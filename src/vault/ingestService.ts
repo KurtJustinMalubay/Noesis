@@ -3,6 +3,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { chunkDocumentText, computeSha256Hex } from "./chunker";
 import {
+  associateDocumentWithWorkspace,
   findDocumentByHash,
   saveDocumentWithChunks,
   type StoredDocument,
@@ -69,6 +70,9 @@ export async function ingestRawBytes(
 
   const fileHash = await computeSha256Hex(arrayBuffer);
   const existing = await findDocumentByHash(fileHash);
+  if (existing) {
+    await associateDocumentWithWorkspace(existing.id, workspaceId);
+  }
   if (existing && !includeExtractedText) {
     return {
       document: existing,

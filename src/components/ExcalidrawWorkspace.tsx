@@ -23,6 +23,12 @@ import type { GraphNode } from "../types/domain";
 
 interface ExcalidrawWorkspaceProps {
   workspaceId: string;
+  openBoardRequest: {
+    workspaceId: string;
+    nodeId: string;
+    requestId: number;
+  } | null;
+  onBoardRequestHandled: (requestId: number) => void;
   selectedNode: GraphNode | null;
   nodes: GraphNode[];
   appearanceMode: AppearanceMode;
@@ -67,6 +73,8 @@ function errorMessage(error: unknown): string {
 
 export function ExcalidrawWorkspace({
   workspaceId,
+  openBoardRequest,
+  onBoardRequestHandled,
   selectedNode,
   nodes,
   appearanceMode,
@@ -87,6 +95,7 @@ export function ExcalidrawWorkspace({
   const saveTimerRef = useRef<number | null>(null);
   const initialFollowAppliedRef = useRef(false);
   const lastFollowedNodeIdRef = useRef<string | null>(selectedNode?.id ?? null);
+  const handledBoardRequestRef = useRef<number | null>(null);
 
   const activeBoard =
     boards.find((board) => board.id === activeBoardId) ?? null;
@@ -166,6 +175,54 @@ export function ExcalidrawWorkspace({
     lastFollowedNodeIdRef.current = nodeId;
     activateBoardForNode(nodeId);
   }, [boardsLoaded, boards, selectedNode?.id]);
+
+  useEffect(() => {
+    if (
+      !boardsLoaded ||
+      !openBoardRequest ||
+      openBoardRequest.workspaceId !== workspaceId ||
+      handledBoardRequestRef.current === openBoardRequest.requestId
+    ) {
+      return;
+    }
+
+    handledBoardRequestRef.current = openBoardRequest.requestId;
+    let active = true;
+    listPluginBoards(workspaceId, EXCALIDRAW_PLUGIN_ID)
+      .then((loadedBoards) => {
+        if (!active) return;
+        const board = loadedBoards.find(
+          (item) => item.node_id === openBoardRequest.nodeId
+        );
+        if (!board) {
+          throw new Error("The lesson's Excalidraw board could not be loaded.");
+        }
+        savePendingScene();
+        setBoards(loadedBoards);
+        setActiveBoardId(board.id);
+        setSceneError(null);
+        void markPluginBoardOpened(board.id).catch((error) =>
+          onToast(`Could not update board activity: ${errorMessage(error)}`)
+        );
+        onBoardRequestHandled(openBoardRequest.requestId);
+      })
+      .catch((error) => {
+        if (active) {
+          onToast(`Could not open lesson board: ${errorMessage(error)}`);
+          onBoardRequestHandled(openBoardRequest.requestId);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    boardsLoaded,
+    openBoardRequest?.requestId,
+    workspaceId,
+    onToast,
+    onBoardRequestHandled,
+  ]);
 
   useEffect(
     () => () => {

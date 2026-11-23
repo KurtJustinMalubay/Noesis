@@ -1,5 +1,6 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import {
+  GEMINI_MODEL_OPTIONS,
   loadAiSettings,
   type AiProvider,
 } from "./keyStore.ts";
@@ -298,6 +299,22 @@ const MAX_TRANSIENT_RETRIES = 2;
 const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 const LOCAL_CONTEXT_SAFETY_TOKENS = 128;
 const LOCAL_MIN_INPUT_TOKENS = 384;
+const GEMINI_OVERLOAD_COOLDOWN_MS = 60_000;
+const overloadedGeminiModels = new Map<string, number>();
+
+export function isTransientGeminiApiError(error: unknown): boolean {
+  if (error instanceof AiApiError) {
+    return (
+      error.provider === "gemini" &&
+      typeof error.status === "number" &&
+      RETRYABLE_HTTP_STATUSES.has(error.status)
+    );
+  }
+  return (
+    error instanceof Error &&
+    /Gemini API Error \((?:429|500|502|503|504)\)/.test(error.message)
+  );
+}
 
 function getDefaultTimeoutMs(
   provider: AiProvider,
@@ -408,14 +425,14 @@ function getRetryDelay(response: Response, attempt: number): number {
   if (retryAfter) {
     const seconds = Number(retryAfter);
     if (Number.isFinite(seconds)) {
-      return Math.min(5000, Math.max(0, seconds * 1000));
+      return Math.min(15_000, Math.max(0, seconds * 1000));
     }
     const retryAt = Date.parse(retryAfter);
     if (Number.isFinite(retryAt)) {
-      return Math.min(5000, Math.max(0, retryAt - Date.now()));
+      return Math.min(15_000, Math.max(0, retryAt - Date.now()));
     }
   }
-  return attempt === 0 ? 600 : 1200;
+  return Math.min(8000, 1000 * 2 ** attempt);
 }
 
 function waitForRetry(delay: number, signal?: AbortSignal): Promise<void> {
@@ -459,10 +476,11 @@ async function fetchWithTransientRetry(
       continue;
     }
 
+    const retryLimit = response.status === 503 ? 1 : MAX_TRANSIENT_RETRIES;
     if (
       response.ok ||
       !RETRYABLE_HTTP_STATUSES.has(response.status) ||
-      attempt >= MAX_TRANSIENT_RETRIES
+      attempt >= retryLimit
     ) {
       return response;
     }
@@ -473,40 +491,104 @@ async function fetchWithTransientRetry(
   }
 }
 
+function getGeminiModelCooldown(model: string): number | null {
+  const cooldownUntil = overloadedGeminiModels.get(model);
+  if (!cooldownUntil) return null;
+  if (cooldownUntil <= Date.now()) {
+    overloadedGeminiModels.delete(model);
+    return null;
+  }
+  return cooldownUntil;
+}
+
+function isGeminiModelCoolingDown(model: string): boolean {
+  return getGeminiModelCooldown(model) !== null;
+}
+
+function markGeminiModelOverloaded(model: string): void {
+  overloadedGeminiModels.set(model, Date.now() + GEMINI_OVERLOAD_COOLDOWN_MS);
+}
+
+function getFallbackGeminiModel(
+  opts: GeminiRequestOptions,
+  currentModel: string
+): string | undefined {
+  const settings = loadAiSettings();
+  const configuredFallback =
+    opts.tier === "fast" ? settings.synthesisModel : settings.fastModel;
+  const defaultFallbacks =
+    opts.tier === "synthesis"
+      ? ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-3.1-flash-lite"]
+      : ["gemini-4-hydrogen", "gemini-3.1-flash-lite", "gemini-3.8-flash"];
+  return [
+    configuredFallback,
+    ...defaultFallbacks,
+    ...GEMINI_MODEL_OPTIONS.map(({ id }) => id),
+  ].find(
+    (model) =>
+      model.trim() &&
+      model !== currentModel &&
+      !isGeminiModelCoolingDown(model)
+  );
+}
+
 async function withConfiguredFallback<T>(
   opts: GeminiRequestOptions,
   request: (requestOptions: GeminiRequestOptions) => Promise<T>
 ): Promise<T> {
-  try {
-    return await request(opts);
-  } catch (error) {
-    if (
-      !(error instanceof AiApiError) ||
-      error.provider !== "gemini" ||
-      typeof error.status !== "number" ||
-      !RETRYABLE_HTTP_STATUSES.has(error.status) ||
-      opts.modelId
-    ) {
-      throw error;
-    }
+  if ((opts.provider ?? loadAiSettings().provider) !== "gemini" || opts.modelId) {
+    return request(opts);
+  }
 
-    const currentModel = getProviderConfig(opts).model;
-    const settings = loadAiSettings();
-    const fallbackModel =
-      opts.tier === "fast" ? settings.synthesisModel : settings.fastModel;
-    if (!fallbackModel.trim() || fallbackModel === currentModel) throw error;
-
+  const currentModel = getProviderConfig(opts).model;
+  let primaryError: unknown;
+  const cooldownUntil = getGeminiModelCooldown(currentModel);
+  if (cooldownUntil !== null) {
+    const remainingSeconds = Math.ceil(
+      (cooldownUntil - Date.now()) / 1000
+    );
+    primaryError = new Error(
+      `Gemini model ${currentModel} is temporarily paused after an overload. Try again in about ${remainingSeconds} seconds.`
+    );
+  } else {
     try {
-      return await request({ ...opts, modelId: fallbackModel });
-    } catch (fallbackError) {
-      const detail =
-        fallbackError instanceof Error
-          ? fallbackError.message
-          : String(fallbackError);
-      throw new Error(
-        `${error.message} Automatic fallback to ${fallbackModel} also failed: ${detail}`
-      );
+      return await request(opts);
+    } catch (error) {
+      if (
+        !(error instanceof AiApiError) ||
+        error.provider !== "gemini" ||
+        typeof error.status !== "number" ||
+        !RETRYABLE_HTTP_STATUSES.has(error.status)
+      ) {
+        throw error;
+      }
+      if (error.status === 503) markGeminiModelOverloaded(currentModel);
+      primaryError = error;
     }
+  }
+
+  const fallbackModel = getFallbackGeminiModel(opts, currentModel);
+  if (!fallbackModel) throw primaryError;
+
+  try {
+    return await request({ ...opts, modelId: fallbackModel });
+  } catch (fallbackError) {
+    if (
+      fallbackError instanceof AiApiError &&
+      fallbackError.provider === "gemini" &&
+      fallbackError.status === 503
+    ) {
+      markGeminiModelOverloaded(fallbackModel);
+    }
+    const primaryDetail =
+      primaryError instanceof Error ? primaryError.message : String(primaryError);
+    const fallbackDetail =
+      fallbackError instanceof Error
+        ? fallbackError.message
+        : String(fallbackError);
+    throw new Error(
+      `${primaryDetail} Automatic fallback to ${fallbackModel} also failed: ${fallbackDetail}`
+    );
   }
 }
 

@@ -3,6 +3,7 @@ import type { Flashcard } from "../types/domain";
 export type ReviewGrade = 0 | 1 | 2 | 3; // 0: Again, 1: Hard, 2: Good, 3: Easy
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const AGAIN_DELAY_MS = 10 * 60 * 1000;
 
 // Maps 4-button UX grades onto standard SM-2 quality scale (0..5)
 const GRADE_TO_QUALITY: Record<ReviewGrade, number> = {
@@ -25,7 +26,7 @@ export function scheduleNextReview(
 
   if (q < 3) {
     repetitions = 0;
-    intervalDays = 1;
+    intervalDays = 0;
   } else {
     if (repetitions === 0) {
       intervalDays = 1;
@@ -55,6 +56,7 @@ export function scheduleNextReview(
     ease_factor: Number(easeFactor.toFixed(2)),
     interval_days: intervalDays,
     repetitions,
-    next_review_at: nowMs + intervalDays * DAY_MS,
+    next_review_at:
+      nowMs + (grade === 0 ? AGAIN_DELAY_MS : intervalDays * DAY_MS),
   };
 }

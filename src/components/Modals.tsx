@@ -1,8 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatedPresence } from "./AnimatedPresence";
 import {
   CheckCircle2,
+  Plus,
+  Pencil,
   Eye,
   EyeOff,
   FileUp,
@@ -13,7 +21,6 @@ import {
   Monitor,
   Puzzle,
   RefreshCw,
-  RotateCcw,
   Search,
   Sparkles,
   Trash2,
@@ -33,8 +40,14 @@ import { fetchLocalModels, testGeminiConnection } from "../ai/geminiClient";
 import { ingestLocalFilePath } from "../vault/ingestService";
 import { useNoesisStore, type ActiveModal } from "../store/useNoesisStore";
 import { usePluginStore } from "../plugins/pluginStore";
-import { BUILT_IN_PLUGINS } from "../plugins/registry";
-import type { DueFlashcard } from "../db/repositories/flashcardRepo";
+import {
+  BUILT_IN_PLUGINS,
+  FLASHCARDS_PLUGIN_ID,
+} from "../plugins/registry";
+import type {
+  DueFlashcard,
+  WorkspaceFlashcard,
+} from "../db/repositories/flashcardRepo";
 import {
   countDocumentChunks,
   searchVaultFts,
@@ -55,6 +68,7 @@ import type {
   CurriculumSourceDocument,
 } from "../ai/curriculumService";
 import type {
+  GraphNode,
   QuizAnswer,
   QuizDraft,
   QuizGenerationConfig,
@@ -85,6 +99,7 @@ interface ModalsProps {
   curriculumProgress: CurriculumProgress | null;
   masteryPassThreshold: UserPreferences["masteryPassThreshold"];
   dueCards: DueFlashcard[];
+  flashcardNodes: GraphNode[];
   documents: StoredDocument[];
   diagnosticQuestions: QuizQuestion[];
   diagnosticConfig: QuizGenerationConfig | null;
@@ -103,6 +118,18 @@ interface ModalsProps {
     sourceDocument?: CurriculumSourceDocument
   ) => Promise<void>;
   onGradeCard: (card: DueFlashcard, grade: ReviewGrade) => Promise<void>;
+  onLoadFlashcards: (workspaceId: string) => Promise<WorkspaceFlashcard[]>;
+  onCreateFlashcard: (
+    nodeId: string,
+    front: string,
+    back: string
+  ) => Promise<WorkspaceFlashcard>;
+  onEditFlashcard: (
+    card: WorkspaceFlashcard,
+    front: string,
+    back: string
+  ) => Promise<WorkspaceFlashcard>;
+  onRemoveFlashcard: (card: WorkspaceFlashcard) => Promise<void>;
   onStartDiagnostic: (nodeId: string) => Promise<void>;
   onConfigureDiagnostic: (nodeId: string) => void;
   onCancelDiagnosticConfiguration: () => void;
@@ -136,6 +163,7 @@ export function Modals({
   curriculumProgress,
   masteryPassThreshold,
   dueCards,
+  flashcardNodes,
   documents,
   diagnosticQuestions,
   diagnosticConfig,
@@ -151,6 +179,10 @@ export function Modals({
   onCreateWorkspace,
   onGenerateCurriculum,
   onGradeCard,
+  onLoadFlashcards,
+  onCreateFlashcard,
+  onEditFlashcard,
+  onRemoveFlashcard,
   onStartDiagnostic,
   onConfigureDiagnostic,
   onCancelDiagnosticConfiguration,
@@ -187,7 +219,13 @@ export function Modals({
         )}
         {activeModal === "review" && (
           <ReviewQueueModal
+            workspaceId={activeWorkspaceId}
+            nodes={flashcardNodes}
             dueCards={dueCards}
+            onLoadFlashcards={onLoadFlashcards}
+            onCreateFlashcard={onCreateFlashcard}
+            onEditFlashcard={onEditFlashcard}
+            onRemoveFlashcard={onRemoveFlashcard}
             onGrade={onGradeCard}
             onToast={onToast}
             onClose={onClose}
@@ -330,11 +368,16 @@ function NewWorkspaceModal({
   };
 
   return (
-    <div className="w-full max-w-lg rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-6 text-[var(--color-ink)] shadow-[0_24px_70px_rgba(27,39,47,0.2)]">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="create-workspace-title"
+      className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-6 text-[var(--color-ink)] shadow-[0_24px_70px_rgba(27,39,47,0.2)]"
+    >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-base font-bold text-[var(--color-ink)]">
           <Layers className="h-5 w-5 text-[var(--color-accent)]" />
-          <span>Create a Workspace</span>
+          <span id="create-workspace-title">Create a Workspace</span>
         </div>
         <button
           type="button"
@@ -516,107 +559,741 @@ function NewWorkspaceModal({
 }
 
 function ReviewQueueModal({
+  workspaceId,
+  nodes,
   dueCards,
+  onLoadFlashcards,
+  onCreateFlashcard,
+  onEditFlashcard,
+  onRemoveFlashcard,
   onGrade,
   onToast,
   onClose,
 }: {
+  workspaceId: string | null;
+  nodes: GraphNode[];
   dueCards: DueFlashcard[];
+  onLoadFlashcards: (workspaceId: string) => Promise<WorkspaceFlashcard[]>;
+  onCreateFlashcard: (
+    nodeId: string,
+    front: string,
+    back: string
+  ) => Promise<WorkspaceFlashcard>;
+  onEditFlashcard: (
+    card: WorkspaceFlashcard,
+    front: string,
+    back: string
+  ) => Promise<WorkspaceFlashcard>;
+  onRemoveFlashcard: (card: WorkspaceFlashcard) => Promise<void>;
   onGrade: (card: DueFlashcard, grade: ReviewGrade) => Promise<void>;
   onToast: (msg: string) => void;
   onClose: () => void;
 }) {
+  const [activeView, setActiveView] = useState<"study" | "library">("study");
   const [revealed, setRevealed] = useState(false);
+  const [reviewedCount, setReviewedCount] = useState(0);
+  const [isGrading, setIsGrading] = useState(false);
+  const [libraryCards, setLibraryCards] = useState<WorkspaceFlashcard[]>([]);
+  const [isLoadingLibrary, setIsLoadingLibrary] = useState(false);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
+  const [editingCard, setEditingCard] = useState<WorkspaceFlashcard | null>(
+    null
+  );
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(
+    null
+  );
+  const [formNodeId, setFormNodeId] = useState(nodes[0]?.id ?? "");
+  const [frontDraft, setFrontDraft] = useState("");
+  const [backDraft, setBackDraft] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isSavingCard, setIsSavingCard] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const isGradingRef = useRef(false);
   const current = dueCards[0];
+  const totalCards = reviewedCount + dueCards.length;
+  const progressPercent = totalCards
+    ? Math.round((reviewedCount / totalCards) * 100)
+    : 0;
+  const availableNodes = nodes.filter((node) => !node.archived_at);
+  const filteredCards = libraryCards.filter((card) => {
+    const query = searchQuery.trim().toLocaleLowerCase();
+    return (
+      !query ||
+      card.front.toLocaleLowerCase().includes(query) ||
+      card.back.toLocaleLowerCase().includes(query) ||
+      card.node_title.toLocaleLowerCase().includes(query)
+    );
+  });
+
+  useEffect(() => {
+    dialogRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (!workspaceId) {
+      setLibraryCards([]);
+      return;
+    }
+
+    let isCurrent = true;
+    setIsLoadingLibrary(true);
+    setLibraryError(null);
+    onLoadFlashcards(workspaceId)
+      .then((cards) => {
+        if (isCurrent) setLibraryCards(cards);
+      })
+      .catch((error: unknown) => {
+        if (isCurrent) {
+          setLibraryError(
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      })
+      .finally(() => {
+        if (isCurrent) setIsLoadingLibrary(false);
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [workspaceId, onLoadFlashcards]);
 
   const handleRate = async (grade: ReviewGrade) => {
-    if (!current) return;
+    if (!current || isGradingRef.current) return;
+    isGradingRef.current = true;
+    setIsGrading(true);
     try {
       await onGrade(current, grade);
-      setRevealed(false);
+      setReviewedCount((count) => count + 1);
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRevealed(false);
+      isGradingRef.current = false;
+      setIsGrading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeView !== "study" || !current) return;
+
+    const handleStudyKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isEditingText =
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          Boolean(
+            target.closest(
+              "input, textarea, select, [contenteditable='true']"
+            )
+          ));
+      if (isEditingText) return;
+
+      if (event.code === "Space") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!revealed) setRevealed(true);
+      } else if (revealed && /^[1-4]$/.test(event.key)) {
+        event.preventDefault();
+        event.stopPropagation();
+        const gradeByKey: Record<string, ReviewGrade> = {
+          "1": 0,
+          "2": 1,
+          "3": 2,
+          "4": 3,
+        };
+        void handleRate(gradeByKey[event.key]);
+      }
+    };
+
+    window.addEventListener("keydown", handleStudyKeyDown);
+    return () => window.removeEventListener("keydown", handleStudyKeyDown);
+  }, [activeView, current, handleRate, revealed]);
+
+  const startCreating = () => {
+    setEditingCard(null);
+    setIsCreating(true);
+    setFormNodeId(availableNodes[0]?.id ?? "");
+    setFrontDraft("");
+    setBackDraft("");
+    setFormError(null);
+    setConfirmingDeleteId(null);
+  };
+
+  const startEditing = (card: WorkspaceFlashcard) => {
+    setIsCreating(false);
+    setEditingCard(card);
+    setFormNodeId(card.node_id);
+    setFrontDraft(card.front);
+    setBackDraft(card.back);
+    setFormError(null);
+    setConfirmingDeleteId(null);
+  };
+
+  const retryLibraryLoad = () => {
+    if (!workspaceId) return;
+    setIsLoadingLibrary(true);
+    setLibraryError(null);
+    onLoadFlashcards(workspaceId)
+      .then(setLibraryCards)
+      .catch((error: unknown) =>
+        setLibraryError(error instanceof Error ? error.message : String(error))
+      )
+      .finally(() => setIsLoadingLibrary(false));
+  };
+
+  const closeEditor = () => {
+    setIsCreating(false);
+    setEditingCard(null);
+    setFormError(null);
+  };
+
+  const handleSaveCard = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const front = frontDraft.trim();
+    const back = backDraft.trim();
+    if (!front || !back) {
+      setFormError("Add both a prompt and an answer before saving.");
+      return;
+    }
+    if (!editingCard && !formNodeId) {
+      setFormError("Choose a lesson for this card.");
+      return;
+    }
+
+    setIsSavingCard(true);
+    setFormError(null);
+    try {
+      const savedCard = editingCard
+        ? await onEditFlashcard(editingCard, front, back)
+        : await onCreateFlashcard(formNodeId, front, back);
+      setLibraryCards((cards) =>
+        editingCard
+          ? cards.map((card) =>
+              card.id === savedCard.id ? savedCard : card
+            )
+          : [...cards, savedCard].sort((a, b) =>
+              a.node_title.localeCompare(b.node_title)
+            )
+      );
+      closeEditor();
+      onToast(editingCard ? "Flashcard updated." : "Flashcard added.");
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSavingCard(false);
+    }
+  };
+
+  const handleRemoveCard = async (card: WorkspaceFlashcard) => {
+    try {
+      await onRemoveFlashcard(card);
+      setLibraryCards((cards) => cards.filter((item) => item.id !== card.id));
+      setConfirmingDeleteId(null);
+      onToast("Flashcard removed.");
+    } catch (error) {
+      setLibraryError(
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  };
+
+  const handleDialogKeyDown = (
+    event: ReactKeyboardEvent<HTMLDivElement>
+  ) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (isCreating || editingCard) closeEditor();
+      else onClose();
     }
   };
 
   return (
-    <div     className="w-full max-w-lg rounded-2xl border border-[#e1dfd9] bg-white p-6 shadow-[0_16px_48px_rgba(27,39,47,0.14)]">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 text-base font-bold text-[#2c414f]">
-          <RotateCcw className="h-5 w-5 text-[#b47a2c]" />
-          <span>SM-2 Daily Review Queue ({dueCards.length} due)</span>
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="flashcards-title"
+      tabIndex={-1}
+      onKeyDown={handleDialogKeyDown}
+      className="flex max-h-[92vh] min-h-[min(680px,88vh)] w-full max-w-3xl flex-col overflow-hidden rounded-[24px] border border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] shadow-[0_24px_70px_rgba(27,39,47,0.2)] outline-none"
+    >
+      <header className="border-b border-[var(--color-border)] px-5 py-4 sm:px-7">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="min-w-0">
+              <h2
+                id="flashcards-title"
+                className="text-lg font-bold tracking-tight text-[var(--color-ink)]"
+              >
+                Flashcards
+              </h2>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close flashcards"
+            className="rounded-xl p-2 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-accent)]"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
         </div>
-        <button
-          onClick={onClose}
-          className="rounded-lg p-1 text-slate-400 transition hover:bg-[#f3f2ee] hover:text-slate-700"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
+        <div className="mt-3">
+          <div
+            role="group"
+            aria-label="Flashcard activity"
+            className="flex rounded-xl bg-[var(--color-panel-subtle)] p-1"
+          >
+            <button
+              type="button"
+              aria-pressed={activeView === "study"}
+              onClick={() => {
+                closeEditor();
+                setActiveView("study");
+              }}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                activeView === "study"
+                  ? "bg-[var(--color-panel)] text-[var(--color-ink)] shadow-sm"
+                  : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+              }`}
+            >
+              Study
+            </button>
+            <button
+              type="button"
+              aria-pressed={activeView === "library"}
+              onClick={() => setActiveView("library")}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                activeView === "library"
+                  ? "bg-[var(--color-panel)] text-[var(--color-ink)] shadow-sm"
+                  : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+              }`}
+            >
+              Library
+            </button>
+          </div>
+        </div>
+      </header>
 
-      {!current ? (
-        <div className="py-12 text-center">
-          <CheckCircle2 className="mx-auto h-10 w-10 text-[#267565]" />
-          <p className="mt-3 text-sm font-semibold text-slate-800">
-            No cards remaining in today's review queue.
-          </p>
-          <p className="mt-1 text-xs text-slate-500">
-            No cards are due, or today's review limit has been reached.
-          </p>
-        </div>
-      ) : (
-        <div className="mt-5">
-          <span className="rounded-full bg-[#eef4f7] px-2.5 py-0.5 text-[10px] font-medium text-[#426b85]">
-            {current.node_title}
-          </span>
-          <div className="mt-3 min-h-[160px] rounded-xl border border-[#e4e5e1] bg-[#fbfaf8] p-5 select-text">
-            <RichContent className="prose prose-sm max-w-none font-semibold leading-6 text-slate-800">
-              {current.front}
-            </RichContent>
-            {revealed && (
-              <RichContent className="prose prose-sm mt-4 max-w-none border-t border-[#e4e5e1] pt-4 text-[#26705f]">
-                {current.back}
-              </RichContent>
+      <main className="min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-7 sm:py-5">
+        {activeView === "study" ? (
+          <>
+            <div className="mb-5">
+              <div className="mb-2 flex items-center justify-between text-xs font-medium text-[var(--color-muted)]">
+                <span>
+                  {current
+                    ? `Card ${reviewedCount + 1} of ${totalCards}`
+                    : reviewedCount
+                      ? "Session progress"
+                      : "Ready when you are"}
+                </span>
+              </div>
+              <div
+                role="progressbar"
+                aria-label="Flashcard session progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progressPercent}
+                className="h-2 overflow-hidden rounded-full bg-[var(--color-border)]"
+              >
+                <div
+                  className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-300 motion-reduce:transition-none"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+            </div>
+
+            {!current ? (
+              <div className="flex min-h-[280px] flex-col items-center justify-center rounded-3xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-panel-subtle)] px-6 py-8 text-center">
+                <div className="rounded-2xl bg-[var(--color-success)]/10 p-3 text-[var(--color-success)]">
+                  <CheckCircle2 className="h-7 w-7" aria-hidden="true" />
+                </div>
+                <h3 className="mt-3 text-lg font-bold text-[var(--color-ink)]">
+                  {reviewedCount > 0
+                    ? "Nice work. Session complete."
+                    : "You’re all caught up"}
+                </h3>
+                <p className="mt-1 max-w-md text-sm leading-5 text-[var(--color-muted)]">
+                  {reviewedCount > 0
+                    ? `You studied ${reviewedCount} card${reviewedCount === 1 ? "" : "s"}.`
+                    : "No cards are due right now."}
+                </p>
+                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveView("library")}
+                    className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+                  >
+                    Browse my cards
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveView("library");
+                      startCreating();
+                    }}
+                    disabled={availableNodes.length === 0}
+                    className="inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-[var(--color-accent-foreground)] transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    Add a card
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="mx-auto max-w-2xl">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <span className="max-w-[70%] truncate rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3 py-1.5 text-xs font-semibold text-[var(--color-muted)]">
+                    {current.node_title}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      startEditing(current);
+                      setActiveView("library");
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                  >
+                    <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                    Edit card
+                  </button>
+                </div>
+                <div className="relative min-h-[260px] overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-6 sm:p-8">
+                  <div className="absolute left-0 top-0 h-1 w-full bg-[var(--color-accent)]/70" />
+                  <div className="mb-4">
+                    <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-[var(--color-accent)]">
+                      {revealed ? "Answer" : "Prompt"}
+                    </span>
+                  </div>
+                  <RichContent className="prose prose-base max-w-none select-text font-semibold leading-8 text-[var(--color-ink)]">
+                    {current.front}
+                  </RichContent>
+                  {revealed && (
+                    <RichContent className="prose prose-base mt-7 max-w-none select-text border-t border-[var(--color-border)] pt-6 leading-7 text-[var(--color-ink)]">
+                      {current.back}
+                    </RichContent>
+                  )}
+                </div>
+
+                {!revealed ? (
+                  <button
+                    type="button"
+                    onClick={() => setRevealed(true)}
+                    aria-keyshortcuts="Space"
+                    className="mt-4 w-full rounded-2xl bg-[var(--color-accent)] py-3.5 text-sm font-bold text-[var(--color-accent-foreground)] transition hover:brightness-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
+                  >
+                    Show answer
+                    <span className="ml-2 text-xs font-medium opacity-80">
+                      Space
+                    </span>
+                  </button>
+                ) : (
+                  <>
+                    <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      <button
+                        type="button"
+                        disabled={isGrading}
+                        onClick={() => void handleRate(0)}
+                        aria-keyshortcuts="1"
+                        aria-label="Again"
+                        className="flex items-center justify-center rounded-2xl border border-[var(--color-warning)]/70 bg-[var(--color-warning)]/20 px-2 py-4 text-sm font-semibold text-[var(--color-ink)] transition hover:brightness-95 disabled:opacity-60"
+                      >
+                        Again
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isGrading}
+                        onClick={() => void handleRate(1)}
+                        aria-keyshortcuts="2"
+                        aria-label="Hard"
+                        className="flex items-center justify-center rounded-2xl border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-2 py-4 text-sm font-semibold text-[var(--color-ink)] transition hover:brightness-95 disabled:opacity-60"
+                      >
+                        Hard
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isGrading}
+                        onClick={() => void handleRate(2)}
+                        aria-keyshortcuts="3"
+                        aria-label="Good"
+                        className="flex items-center justify-center rounded-2xl border border-[var(--color-accent)]/70 bg-[var(--color-accent-soft)] px-2 py-4 text-sm font-semibold text-[var(--color-ink)] transition hover:brightness-95 disabled:opacity-60"
+                      >
+                        Good
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isGrading}
+                        onClick={() => void handleRate(3)}
+                        aria-keyshortcuts="4"
+                        aria-label="Easy"
+                        className="flex items-center justify-center rounded-2xl border border-[var(--color-success)]/70 bg-[var(--color-success)]/20 px-2 py-4 text-sm font-semibold text-[var(--color-ink)] transition hover:brightness-95 disabled:opacity-60"
+                      >
+                        Easy
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="mx-auto max-w-2xl">
+            {isCreating || editingCard ? (
+              <form onSubmit={handleSaveCard} className="space-y-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-bold text-[var(--color-ink)]">
+                      {editingCard ? "Edit flashcard" : "Create a flashcard"}
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={closeEditor}
+                    aria-label="Cancel editing"
+                    className="rounded-lg p-2 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                  >
+                    <X className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                </div>
+                {editingCard ? (
+                  <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-4 py-3">
+                    <span className="block text-[11px] font-bold uppercase tracking-wide text-[var(--color-muted)]">
+                      Lesson
+                    </span>
+                    <span className="mt-1 block text-sm font-semibold text-[var(--color-ink)]">
+                      {editingCard.node_title}
+                    </span>
+                  </div>
+                ) : (
+                  <label className="block text-sm font-semibold text-[var(--color-ink)]">
+                    Lesson
+                    <select
+                      value={formNodeId}
+                      onChange={(event) => setFormNodeId(event.target.value)}
+                      className="mt-2 block w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-panel)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/20"
+                    >
+                      {availableNodes.map((node) => (
+                        <option key={node.id} value={node.id}>
+                          {node.title}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <label className="block text-sm font-semibold text-[var(--color-ink)]">
+                  Front · prompt
+                  <textarea
+                    autoFocus
+                    rows={4}
+                    value={frontDraft}
+                    onChange={(event) => setFrontDraft(event.target.value)}
+                    placeholder="What do you want to remember?"
+                    className="mt-2 block w-full resize-y rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-panel)] px-4 py-3 text-sm font-normal leading-6 text-[var(--color-ink)] outline-none placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/20"
+                  />
+                </label>
+                <label className="block text-sm font-semibold text-[var(--color-ink)]">
+                  Back · answer
+                  <textarea
+                    rows={5}
+                    value={backDraft}
+                    onChange={(event) => setBackDraft(event.target.value)}
+                    placeholder="Write the answer in your own words."
+                    className="mt-2 block w-full resize-y rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-panel)] px-4 py-3 text-sm font-normal leading-6 text-[var(--color-ink)] outline-none placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/20"
+                  />
+                </label>
+                {formError && (
+                  <p role="alert" className="text-sm font-medium text-rose-700">
+                    {formError}
+                  </p>
+                )}
+                <div className="flex justify-end gap-2 border-t border-[var(--color-border)] pt-4">
+                  <button
+                    type="button"
+                    onClick={closeEditor}
+                    className="rounded-xl px-4 py-2.5 text-sm font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={
+                      isSavingCard ||
+                      (!editingCard && availableNodes.length === 0)
+                    }
+                    className="rounded-xl bg-[var(--color-accent)] px-5 py-2.5 text-sm font-bold text-[var(--color-accent-foreground)] transition hover:brightness-95 disabled:cursor-wait disabled:opacity-60"
+                  >
+                    {isSavingCard
+                      ? "Saving…"
+                      : editingCard
+                        ? "Save changes"
+                        : "Add flashcard"}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-bold text-[var(--color-ink)]">
+                      Your cards
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={startCreating}
+                    disabled={availableNodes.length === 0}
+                    className="inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-bold text-[var(--color-accent-foreground)] transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    Add card
+                  </button>
+                </div>
+                <label className="relative mb-4 block">
+                  <Search
+                    className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-muted)]"
+                    aria-hidden="true"
+                  />
+                  <input
+                    type="search"
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    placeholder="Search cards"
+                    aria-label="Search flashcards"
+                    className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] py-2.5 pl-10 pr-3 text-sm text-[var(--color-ink)] outline-none placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/20"
+                  />
+                </label>
+                {libraryError && (
+                  <div
+                    role="alert"
+                    className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-800"
+                  >
+                    {libraryError}
+                    <button
+                      type="button"
+                      onClick={retryLibraryLoad}
+                      className="rounded-lg border border-rose-300 px-3 py-1.5 text-xs font-bold transition hover:bg-rose-100"
+                    >
+                      Try again
+                    </button>
+                  </div>
+                )}
+                {isLoadingLibrary ? (
+                  <div className="py-16 text-center text-sm text-[var(--color-muted)]">
+                    Loading your cards…
+                  </div>
+                ) : libraryError ? null : filteredCards.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-panel-subtle)] px-5 py-12 text-center">
+                    <Layers
+                      className="mx-auto h-8 w-8 text-[var(--color-muted)]"
+                      aria-hidden="true"
+                    />
+                    <h4 className="mt-3 font-bold text-[var(--color-ink)]">
+                      {libraryCards.length
+                        ? "No cards match that search"
+                        : "Your deck starts here"}
+                    </h4>
+                    <p className="mt-1 text-sm text-[var(--color-muted)]">
+                      {libraryCards.length
+                        ? "Try a different prompt, answer, or lesson title."
+                        : "Create a card for an idea you want to remember."}
+                    </p>
+                    {libraryCards.length === 0 && (
+                      <button
+                        type="button"
+                        onClick={startCreating}
+                        disabled={availableNodes.length === 0}
+                        className="mt-4 inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-bold text-[var(--color-accent-foreground)] transition hover:brightness-95 disabled:opacity-50"
+                      >
+                        <Plus className="h-4 w-4" aria-hidden="true" />
+                        Create your first card
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {filteredCards.map((card) => (
+                      <article
+                        key={card.id}
+                        className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-3 transition hover:border-[var(--color-border-strong)]"
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0 flex-1">
+                            <span className="inline-flex max-w-full truncate rounded-full bg-[var(--color-panel-subtle)] px-2.5 py-1 text-[11px] font-semibold text-[var(--color-muted)]">
+                              {card.node_title}
+                            </span>
+                            <RichContent className="prose prose-sm mt-2 max-w-none font-semibold leading-6 text-[var(--color-ink)]">
+                              {card.front}
+                            </RichContent>
+                            <RichContent className="prose prose-sm mt-1 max-h-16 overflow-hidden max-w-none leading-5 text-[var(--color-muted)]">
+                              {card.back}
+                            </RichContent>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => startEditing(card)}
+                              aria-label={`Edit card: ${card.front}`}
+                              className="rounded-lg p-2 text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-accent)]"
+                            >
+                              <Pencil
+                                className="h-4 w-4"
+                                aria-hidden="true"
+                              />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setConfirmingDeleteId(
+                                  confirmingDeleteId === card.id
+                                    ? null
+                                    : card.id
+                                )
+                              }
+                              aria-label={`Remove card: ${card.front}`}
+                              className="rounded-lg p-2 text-[var(--color-muted)] transition hover:bg-rose-50 hover:text-rose-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-600"
+                            >
+                              <Trash2
+                                className="h-4 w-4"
+                                aria-hidden="true"
+                              />
+                            </button>
+                          </div>
+                        </div>
+                        {confirmingDeleteId === card.id && (
+                          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-rose-50 px-3 py-2.5">
+                            <p className="text-xs font-medium text-[var(--color-ink)]">
+                              Remove this card permanently?
+                            </p>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setConfirmingDeleteId(null)}
+                                className="rounded-lg px-3 py-1.5 text-xs font-semibold text-[var(--color-muted)] hover:bg-[var(--color-hover)]"
+                              >
+                                Keep it
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleRemoveCard(card)}
+                                className="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-rose-700"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
-
-          {!revealed ? (
-            <button
-              onClick={() => setRevealed(true)}
-              className="mt-4 w-full rounded-xl bg-[#245f9e] py-2.5 text-xs font-semibold text-white transition hover:bg-[#194d83]"
-            >
-              Show Answer
-            </button>
-          ) : (
-            <div className="mt-4 grid grid-cols-4 gap-2">
-              <button
-                onClick={() => handleRate(0)}
-                className="rounded-lg border border-rose-200 bg-rose-50 py-2 text-xs font-semibold text-rose-800 transition hover:bg-rose-100"
-              >
-                Again (1d)
-              </button>
-              <button
-                onClick={() => handleRate(1)}
-                className="rounded-lg border border-amber-200 bg-amber-50 py-2 text-xs font-semibold text-amber-800 transition hover:bg-amber-100"
-              >
-                Hard
-              </button>
-              <button
-                onClick={() => handleRate(2)}
-                className="rounded-lg border border-sky-200 bg-sky-50 py-2 text-xs font-semibold text-sky-800 transition hover:bg-sky-100"
-              >
-                Good
-              </button>
-              <button
-                onClick={() => handleRate(3)}
-                className="rounded-lg border border-emerald-200 bg-emerald-50 py-2 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-100"
-              >
-                Easy
-              </button>
-            </div>
-          )}
-        </div>
-      )}
+        )}
+      </main>
     </div>
   );
 }
@@ -650,13 +1327,18 @@ function CompletionPromptModal({
   };
 
   return (
-    <div className="w-full max-w-md rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-6 text-[var(--color-ink)] shadow-[0_24px_70px_rgba(27,39,47,0.2)]">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="completion-prompt-title"
+      className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-6 text-[var(--color-ink)] shadow-[0_24px_70px_rgba(27,39,47,0.2)]"
+    >
       <div className="flex items-start gap-3">
         <div className="rounded-xl bg-[var(--color-panel-subtle)] p-2 text-[var(--color-accent)]">
           <GraduationCap className="h-5 w-5" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-base font-bold">Ready to complete this module?</h3>
+          <h3 id="completion-prompt-title" className="text-base font-bold">Ready to complete this module?</h3>
           <p className="mt-1.5 text-xs leading-5 text-[var(--color-muted)]">
             Take the mastery quiz to check your understanding, or finish now to
             mark this module complete and unlock the next available lesson.
@@ -767,7 +1449,9 @@ function DocumentVaultModal({
       for (const p of paths) {
         const res = await ingestLocalFilePath(p, workspaceId);
         if (res.deduplicated) {
-          onToast(`Skipped duplicate (SHA-256 matched): ${res.document.file_name}`);
+          onToast(
+            `Already indexed and available here: ${res.document.file_name}`
+          );
         } else {
           onToast(`Indexed ${res.document.file_name} (${res.chunkCount} FTS5 chunks)`);
         }
@@ -806,14 +1490,21 @@ function DocumentVaultModal({
 
   return (
     <>
-    <div className="w-full max-w-lg rounded-2xl border border-[#e1dfd9] bg-white p-6 shadow-[0_24px_70px_rgba(27,39,47,0.2)]">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="document-vault-title"
+      className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-[#e1dfd9] bg-white p-6 shadow-[0_24px_70px_rgba(27,39,47,0.2)]"
+    >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-base font-bold text-[#2c414f]">
           <Layers className="h-5 w-5 text-[#527a91]" />
-          <span>Local FTS5 Document Vault</span>
+          <span id="document-vault-title">Local FTS5 Document Vault</span>
         </div>
         <button
+          type="button"
           onClick={onClose}
+          aria-label="Close document vault"
           className="rounded-lg p-1 text-slate-400 transition hover:bg-[#f3f2ee] hover:text-slate-700"
         >
           <X className="h-4 w-4" />
@@ -947,7 +1638,7 @@ function SettingsModal({
     { id: "canvas", title: "Appearance & Themes", icon: Monitor },
     { id: "plugins", title: "Plugins", icon: Puzzle },
     { id: "ai", title: "AI & Speed", icon: Sparkles },
-    { id: "study", title: "Study & SM-2", icon: GraduationCap },
+    { id: "study", title: "Study", icon: GraduationCap },
     { id: "vault", title: "Vault & Data", icon: HardDrive },
   ];
   const store = useNoesisStore();
@@ -1217,15 +1908,18 @@ function SettingsModal({
   return (
     <>
     <form
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-dialog-title"
       onSubmit={handleSave}
-      className="flex h-[min(680px,88vh)] w-full max-w-[920px] overflow-hidden rounded-2xl border border-[#e1dfd9] bg-white shadow-[0_16px_48px_rgba(27,39,47,0.14)]"
+      className="settings-shell flex h-[min(680px,88vh)] w-full max-w-[920px] overflow-hidden rounded-2xl border border-[#e1dfd9] bg-white shadow-[0_16px_48px_rgba(27,39,47,0.14)]"
     >
-      <aside className="flex w-[218px] shrink-0 flex-col border-r border-[#e9e7e1] bg-[#f8f9f6] p-4">
+      <aside className="settings-sections flex w-[218px] shrink-0 flex-col border-r border-[#e9e7e1] bg-[#f8f9f6] p-4">
         <div className="flex items-center gap-2 px-2 py-2 text-sm font-bold text-[var(--color-ink)]">
           <KeyRound className="h-4 w-4 text-[var(--color-ink)]" />
-          Settings
+          <span id="settings-dialog-title">Settings</span>
         </div>
-        <nav className="mt-4 space-y-1">
+        <nav aria-label="Settings sections" className="mt-4 space-y-1">
           {sections.map(({ id, title, icon: Icon }) => (
             <button
               key={id}
@@ -1317,6 +2011,11 @@ function SettingsModal({
                     </div>
                   </section>
 
+                  <details className="disclosure-chevron settings-disclosure rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-4">
+                    <summary className="cursor-pointer py-3 text-xs font-semibold text-[var(--color-ink)]">
+                      Model selection
+                    </summary>
+                    <div className="space-y-5 border-t border-[var(--color-border)] py-4">
                   <SettingsField label="Fast model">
                     <select
                       value={fastModelSelection}
@@ -1363,6 +2062,8 @@ function SettingsModal({
                       />
                     )}
                   </SettingsField>
+                    </div>
+                  </details>
                 </>
               ) : (
                 <>
@@ -1419,10 +2120,11 @@ function SettingsModal({
                       </select>
                     )}
                   </SettingsField>
-                  <section className="rounded-xl border border-[#e4e6e1] bg-[#fafaf7] p-4">
-                    <h3 className="text-xs font-semibold text-slate-800">
-                      Local inference limits
-                    </h3>
+                  <details className="disclosure-chevron settings-disclosure rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-4">
+                    <summary className="cursor-pointer py-3 text-xs font-semibold text-[var(--color-ink)]">
+                      Advanced local inference limits
+                    </summary>
+                    <section className="border-t border-[var(--color-border)] py-4">
                     <p className="mt-1 text-[11px] leading-5 text-slate-500">
                       These limits budget requests in Noesis; set the model
                       runtime to support the same or a larger context window.
@@ -1484,9 +2186,15 @@ function SettingsModal({
                         ? `Prompt budget up to ~${estimatedPromptTokenBudget.toLocaleString()} tokens after response allowance and safety buffer.`
                         : "Enter a valid context and response token limit to see the prompt budget."}
                     </p>
-                  </section>
+                    </section>
+                  </details>
                 </>
               )}
+              <details className="disclosure-chevron settings-disclosure rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-4">
+                <summary className="cursor-pointer py-3 text-xs font-semibold text-[var(--color-ink)]">
+                  Lesson generation preferences
+                </summary>
+                <div className="space-y-5 border-t border-[var(--color-border)] py-4">
               <SettingsField label="Lesson length / depth">
                 <select
                   value={lessonDepth}
@@ -1519,6 +2227,8 @@ function SettingsModal({
                   <option value="exploratory">Exploratory · broader variation</option>
                 </select>
               </SettingsField>
+                </div>
+              </details>
             </>
           )}
 
@@ -1616,6 +2326,34 @@ function SettingsModal({
                   }
                 />
               </SettingsField>
+              <SettingsField label="Text visibility">
+                <label className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3 py-3">
+                  <span className="min-w-0">
+                    <span className="block text-xs font-medium text-[var(--color-ink)]">
+                      High-contrast text
+                    </span>
+                    <span className="mt-1 block text-[11px] leading-4 text-[var(--color-muted)]">
+                      Strengthen text contrast while keeping your theme colors.
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={preferences.highContrastText}
+                    onChange={(event) =>
+                      setPreferences({
+                        ...preferences,
+                        highContrastText: event.target.checked,
+                      })
+                    }
+                    className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
+                  />
+                </label>
+              </SettingsField>
+              <details className="disclosure-chevron settings-disclosure rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-4">
+                <summary className="cursor-pointer py-3 text-xs font-semibold text-[var(--color-ink)]">
+                  Advanced canvas and window options
+                </summary>
+                <div className="space-y-5 border-t border-[var(--color-border)] py-4">
               <SettingsField label="Canvas background">
                 <label className="flex items-center justify-between rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] px-3 py-3 text-xs text-slate-700">
                   <span>Show subtle canvas dots</span>
@@ -1628,7 +2366,7 @@ function SettingsModal({
                         showCanvasDots: event.target.checked,
                       })
                     }
-                    className="h-4 w-4 accent-[#326a9f]"
+                    className="h-4 w-4 accent-[var(--color-accent-button)]"
                   />
                 </label>
               </SettingsField>
@@ -1674,10 +2412,12 @@ function SettingsModal({
                         launchInFullscreen: event.target.checked,
                       })
                     }
-                    className="h-4 w-4 accent-[#326a9f]"
+                    className="h-4 w-4 accent-[var(--color-accent-button)]"
                   />
                 </label>
               </SettingsField>
+                </div>
+              </details>
             </>
           )}
 
@@ -1712,7 +2452,7 @@ function SettingsModal({
                             : current.filter((id) => id !== plugin.id)
                         );
                       }}
-                      className="mt-0.5 h-4 w-4 shrink-0 accent-[#326a9f]"
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--color-accent-button)]"
                       aria-label={`Enable ${plugin.name}`}
                     />
                   </label>
@@ -1741,33 +2481,35 @@ function SettingsModal({
                   <option value={90}>90% · Rigorous</option>
                 </select>
               </SettingsField>
-              <SettingsField label="Daily SM-2 review limit">
-                <select
-                  value={preferences.dailyReviewLimit}
-                  onChange={(event) =>
-                    setPreferences({
-                      ...preferences,
-                      dailyReviewLimit: Number(
-                        event.target.value
-                      ) as UserPreferences["dailyReviewLimit"],
-                    })
-                  }
-                  className={settingsDropdownClass}
-                >
-                  <option value={10}>10 cards per day</option>
-                  <option value={20}>20 cards per day</option>
-                  <option value={40}>40 cards per day</option>
-                  <option value={0}>No daily limit</option>
-                </select>
-                <p className="mt-1.5 text-[10px] text-slate-500">
-                  {preferences.dailyReviewLimit === 0
-                    ? "The queue includes every card currently due."
-                    : `Reviews completed today: ${Math.min(
-                        preferences.dailyReviewLimit,
-                        getReviewsCompletedToday()
-                      )} / ${preferences.dailyReviewLimit}`}
-                </p>
-              </SettingsField>
+              {enabledPluginIds.includes(FLASHCARDS_PLUGIN_ID) && (
+                <SettingsField label="Daily flashcard review limit">
+                  <select
+                    value={preferences.dailyReviewLimit}
+                    onChange={(event) =>
+                      setPreferences({
+                        ...preferences,
+                        dailyReviewLimit: Number(
+                          event.target.value
+                        ) as UserPreferences["dailyReviewLimit"],
+                      })
+                    }
+                    className={settingsDropdownClass}
+                  >
+                    <option value={10}>10 cards per day</option>
+                    <option value={20}>20 cards per day</option>
+                    <option value={40}>40 cards per day</option>
+                    <option value={0}>No daily limit</option>
+                  </select>
+                  <p className="mt-1.5 text-[10px] text-slate-500">
+                    {preferences.dailyReviewLimit === 0
+                      ? "The queue includes every card currently due."
+                      : `Reviews completed today: ${Math.min(
+                          preferences.dailyReviewLimit,
+                          getReviewsCompletedToday()
+                        )} / ${preferences.dailyReviewLimit}`}
+                  </p>
+                </SettingsField>
+              )}
               <SettingsField label="Show guide on startup">
                 <label className="flex items-center justify-between rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] px-3 py-3 text-xs text-slate-700">
                   <span>Show guide on startup</span>
@@ -1777,7 +2519,7 @@ function SettingsModal({
                     onChange={(event) =>
                       updateShowGuideOnStartup(event.target.checked)
                     }
-                    className="h-4 w-4 accent-[#326a9f]"
+                    className="h-4 w-4 accent-[var(--color-accent-button)]"
                   />
                 </label>
               </SettingsField>
@@ -1854,7 +2596,7 @@ function SettingsModal({
           </button>
           <button
             type="submit"
-            className="rounded-lg bg-[#245f9e] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#194d83]"
+            className="rounded-lg bg-[var(--color-accent-button)] px-4 py-2 text-xs font-semibold text-[var(--color-accent-foreground)] transition hover:brightness-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent-button)]"
           >
             Save preferences
           </button>
@@ -1911,7 +2653,7 @@ function SettingsModal({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-lg bg-[#245f9e] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#194d83]"
+              className="rounded-lg bg-[var(--color-accent-button)] px-3.5 py-2 text-xs font-semibold text-[var(--color-accent-foreground)] hover:brightness-95"
             >
               Discard changes
             </button>

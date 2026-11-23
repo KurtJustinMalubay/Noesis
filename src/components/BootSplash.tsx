@@ -27,9 +27,8 @@ export function BootSplash({ ready, status }: BootSplashProps) {
 
   useEffect(() => {
     if (!isExiting) return;
-    const reducedMotion = window.matchMedia(
-      "(prefers-reduced-motion: reduce)"
-    ).matches;
+    const reducedMotion =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     exitTimerRef.current = window.setTimeout(
       () => setIsMounted(false),
       reducedMotion ? 120 : EXIT_FALLBACK_MS
@@ -44,9 +43,8 @@ export function BootSplash({ ready, status }: BootSplashProps) {
 
   const handleTransitionEnd = (event: TransitionEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget || !isExiting) return;
-    const reducedMotion = window.matchMedia(
-      "(prefers-reduced-motion: reduce)"
-    ).matches;
+    const reducedMotion =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     if (event.propertyName !== (reducedMotion ? "opacity" : "transform")) {
       return;
     }
@@ -85,7 +83,7 @@ export function BootSplash({ ready, status }: BootSplashProps) {
           role="status"
           aria-live="polite"
         >
-          {status ?? (ready ? "Ready" : "Initializing local vault…")}
+          {status ?? (ready ? "Ready" : "Checking local vault integrity…")}
         </p>
       </div>
     </div>

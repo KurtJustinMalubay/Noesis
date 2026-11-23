@@ -5,84 +5,71 @@ import { useDelayedUnmount } from "./AnimatedPresence";
 const STEPS = [
   {
     target: "settings",
-    category: "Start here",
-    title: "Welcome to Noesis",
-    description:
-      "Noesis keeps your learning workspace local-first with SQLite and FTS5, while letting you choose how AI is provided.",
+    title: "Welcome",
+    description: "Set up Noesis to look and work the way you like.",
     points: [
-      "In Settings → AI, choose Google Gemini or a local OpenAI-compatible server such as Foundry Local, Ollama, or LM Studio. Local servers support one-click model detection.",
-      "In Appearance & Themes, filter Dark and Light palettes, choose a low-glare or Mihon-inspired theme, and set your reading font.",
-      "Set Lesson Depth to Concise, Standard, or Comprehensive to match the amount of detail you want.",
+      "Choose an AI service in Settings → AI. Follow the on-screen steps to connect it.",
+      "Choose a theme and font in Appearance & Themes. Set lesson length in AI & Speed.",
     ],
   },
   {
     target: "new-dag",
-    category: "Build your workspace",
-    title: "Bring in notes, then create a workspace",
+    title: "Create a workspace",
     description:
-      "Organize concepts in a workspace. Build the graph yourself or let AI draft a starting point.",
+      "A workspace is where you organize and study a subject.",
     points: [
-      "Import local PDF, Markdown, and TXT files through Document Vault. Notes are indexed locally with SQLite FTS5 and searchable after a 400 ms debounce.",
-      "Use New Workspace → Start manually to create a blank graph, or choose Generate with AI to draft one from a topic or uploaded syllabus.",
-      "Archive a workspace from Recent or archive a concept from its DAG toolbar. Restore archived items later, or permanently delete them from their archive.",
-      "Vault sources can ground lessons and tutor answers with citations.",
+      "Choose New Workspace → Generate with AI to build a learning map from a topic or your notes.",
+      "Choose Start manually to make your own map. Add PDFs or notes in Document Vault.",
     ],
   },
   {
     target: "canvas",
-    category: "Map your learning",
-    title: "Choose how to arrange the canvas",
+    title: "Organize your topics",
     description:
-      "Switch between a structured prerequisite map and an open canvas from the DAG toolbar.",
+      "Arrange topics and show how they connect.",
     points: [
-      "Auto-Layout organizes concepts into LAYER 1, LAYER 2, and later prerequisite layers. Cards show locked, in-progress, and mastered states.",
-      "Free Place removes the layer boxes and lets you drag concepts anywhere. Hold Shift while dragging to snap to the 16 px grid.",
-      "Double-click empty canvas space or use + Add Node to create a custom concept. Drag a node’s bottom output port to another node’s top input port to add a prerequisite; cycle protection blocks circular links.",
+      "Choose Auto Layout to arrange topics for you, or Free Place to move them anywhere.",
+      "Drag a topic’s bottom dot to another topic’s top dot to connect them. Select a line and choose Disconnect to remove it.",
+      "In Free Place, double-click an empty area to add a topic.",
     ],
   },
   {
     target: "canvas",
-    category: "Study concepts",
-    title: "Open lessons and add worked examples",
+    title: "Open a lesson",
     description:
-      "Select an unlocked concept to create and read its structured AI lesson, then make the material your own with examples.",
+      "Each topic has a lesson to help you learn about it.",
     points: [
-      "Lessons support crisp KaTeX math and Mermaid diagrams. Drag the reader’s left edge to resize it.",
-      "Choose + Generate Example, enter a scenario prompt, and append the result directly to the lesson.",
-      "Example tools include Mermaid Diagram / Automata Graph, Step-by-Step Math, Code Walkthrough, State / Trace Table, and Real-World Analogy.",
+      "Click a topic without a lock to open its lesson.",
+      "Choose Generate Example to see a worked example.",
     ],
   },
   {
     target: "tutor",
-    category: "Practice and review",
-    title: "Build mastery with quizzes, Tutor, and review",
+    title: "Practice and get help",
     description:
-      "Practice until concepts are mastered, ask follow-up questions, and revisit flashcards when they are due.",
+      "Check what you’ve learned and ask questions when you need help.",
     points: [
-      "Assess with MCQ, open-ended, or coding questions—up to 12 per quiz—at Easy, Medium, Hard, or Hybrid difficulty. Passing unlocks dependent concepts.",
-      "Use the Tutor button to open or close the chat. In chat settings, choose Socratic Tutor for guided learning or AI Assistant for direct answers. Replies can use the active lesson and cite your Document Vault sources.",
-      "Use the daily SM-2 Review Queue to reinforce long-term recall.",
+      "Take a quiz to check your understanding. Passing a quiz opens the next topics.",
+      "Open Tutor to ask a question. Choose Socratic Tutor for hints or AI Assistant for direct answers.",
+      "Use Flashcards to review cards when they’re due.",
     ],
   },
   {
     target: "guide",
-    category: "Keep these handy",
-    title: "Keyboard shortcuts",
-    description:
-      "Use these shortcuts to move around Noesis without interrupting your study flow.",
+    title: "Quick shortcuts",
+    description: "Use these keys to move around faster.",
     shortcuts: [
-      ["F11", "Toggle Fullscreen"],
-      ["Ctrl + \\", "Collapse / Expand Sidebar"],
-      ["Double-Click Canvas", "Add Custom Node (in Free Place)"],
-      ["Shift + Drag", "Snap Node to 16 px Grid"],
-      ["Delete / Backspace", "Disconnect Selected Edge"],
-      ["Esc", "Close Active Modal or Drawer"],
+      ["F11", "Turn full screen on or off"],
+      ["Ctrl + \\", "Show or hide the sidebar"],
+      ["Delete / Backspace", "Remove a selected connection"],
+      ["Esc", "Close the open window or panel"],
     ],
   },
 ] as const;
 
 interface AppGuideProps {
   isOpen: boolean;
+  flashcardsEnabled: boolean;
   onClose: () => void;
   showOnStartup: boolean;
   onShowOnStartupChange: (show: boolean) => void;
@@ -90,6 +77,7 @@ interface AppGuideProps {
 
 export function AppGuide({
   isOpen,
+  flashcardsEnabled,
   onClose,
   showOnStartup,
   onShowOnStartupChange,
@@ -104,6 +92,15 @@ export function AppGuide({
   const onCloseRef = useRef(onClose);
   const { mounted, visible } = useDelayedUnmount(isOpen, 170);
   const step = STEPS[stepIndex];
+  const visiblePoints =
+    "points" in step
+      ? step.points.filter(
+          (point) =>
+            flashcardsEnabled ||
+            (!point.toLowerCase().includes("flashcard") &&
+              !point.toLowerCase().includes("review queue"))
+        )
+      : [];
 
   onCloseRef.current = onClose;
 
@@ -214,10 +211,7 @@ export function AppGuide({
       >
         <header className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
-              Noesis · {step.category}
-            </p>
-            <p className="mt-1 text-[10px] font-medium text-[var(--text-secondary)]">
+            <p className="text-xs font-medium text-[var(--text-secondary)]">
               Step {stepIndex + 1} of {STEPS.length}
             </p>
           </div>
@@ -255,16 +249,16 @@ export function AppGuide({
         <h2 className="mt-4 text-base font-semibold tracking-tight">
           {step.title}
         </h2>
-        <p className="mt-1.5 text-xs leading-5 text-[var(--text-secondary)]">
+        <p className="mt-1.5 text-sm leading-6 text-[var(--text-secondary)]">
           {step.description}
         </p>
 
         {"points" in step && (
           <ul className="mt-4 space-y-2.5">
-            {step.points.map((point) => (
+            {visiblePoints.map((point) => (
               <li
                 key={point}
-                className="flex gap-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 text-xs leading-5 text-[var(--text-primary)]"
+                className="flex gap-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 text-sm leading-6 text-[var(--text-primary)]"
               >
                 <span
                   className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent-primary)]"
@@ -288,7 +282,7 @@ export function AppGuide({
                     {shortcut}
                   </kbd>
                 </dt>
-                <dd className="mt-1.5 text-[11px] leading-4 text-[var(--text-secondary)]">
+                <dd className="mt-1.5 text-xs leading-5 text-[var(--text-secondary)]">
                   {action}
                 </dd>
               </div>
@@ -312,7 +306,7 @@ export function AppGuide({
             onClick={onClose}
             className="text-[11px] font-medium text-[var(--text-secondary)] transition hover:text-[var(--text-primary)]"
           >
-            {stepIndex === STEPS.length - 1 ? "Close" : "Skip / Close"}
+            Close guide
           </button>
           <div className="flex items-center gap-2">
             <button

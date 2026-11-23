@@ -6,6 +6,7 @@ import {
   CircleHelp,
   Database,
   FolderKanban,
+  Layers,
   LoaderCircle,
   Plus,
   RotateCcw,
@@ -30,6 +31,7 @@ interface WorkspaceSidebarProps {
   activeWorkspaceId: string | null;
   nodes: GraphNode[];
   dueCount: number;
+  flashcardsEnabled: boolean;
   documentCount: number;
   onToggle: () => void;
   onSelect: (id: string) => Promise<void>;
@@ -53,6 +55,7 @@ export function WorkspaceSidebar({
   activeWorkspaceId,
   nodes,
   dueCount,
+  flashcardsEnabled,
   documentCount,
   onToggle,
   onSelect,
@@ -67,6 +70,9 @@ export function WorkspaceSidebar({
   onSettings,
   onToast,
 }: WorkspaceSidebarProps) {
+  const [isCompactViewport, setIsCompactViewport] = useState(() =>
+    window.matchMedia("(max-width: 760px)").matches
+  );
   const [query, setQuery] = useState("");
   const [showArchivedWorkspaces, setShowArchivedWorkspaces] = useState(false);
   const [confirmationTarget, setConfirmationTarget] = useState<{
@@ -113,6 +119,17 @@ export function WorkspaceSidebar({
     },
     []
   );
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 760px)");
+    const updateViewport = () => setIsCompactViewport(mediaQuery.matches);
+    mediaQuery.addEventListener("change", updateViewport);
+    return () => mediaQuery.removeEventListener("change", updateViewport);
+  }, []);
+
+  useEffect(() => {
+    if (isCompactViewport && !collapsed) onToggle();
+  }, [isCompactViewport]);
 
   const selectWorkspace = async (id: string) => {
     if (loadingWorkspaceId || id === activeWorkspaceId) return;
@@ -198,10 +215,10 @@ export function WorkspaceSidebar({
     <aside
       data-collapsed={collapsed}
       className={`relative z-20 flex h-full shrink-0 flex-col overflow-hidden border-r border-[var(--color-border)] bg-[var(--color-sidebar)] transition-[width] duration-300 ease-[var(--ease-spring)] ${
-        collapsed ? "w-16" : "w-[260px]"
+        collapsed ? "w-16" : "w-[280px]"
       }`}
     >
-      <header className="relative h-14 shrink-0">
+      <header className="relative h-16 shrink-0">
         <div
           className={`sidebar-crossfade absolute left-4 top-1/2 flex -translate-y-1/2 items-center gap-2.5 ${
             collapsed
@@ -215,7 +232,7 @@ export function WorkspaceSidebar({
             alt=""
             className="h-8 w-8 rounded-lg object-cover"
           />
-          <span className="text-[11px] font-bold tracking-[0.14em] text-[var(--color-ink)]">
+          <span className="text-xs font-bold tracking-[0.14em] text-[var(--color-ink)]">
             NOESIS
           </span>
         </div>
@@ -258,10 +275,11 @@ export function WorkspaceSidebar({
           data-sidebar-new
           data-collapsed={collapsed}
           onClick={onNewWorkspace}
-          className={`relative flex h-10 w-full items-center overflow-hidden rounded-xl bg-[var(--color-accent-button)] text-[11px] font-semibold text-white hover:brightness-95 active:scale-[0.99] ${
+          className={`relative flex h-11 w-full items-center overflow-hidden rounded-xl bg-[var(--color-accent-button)] text-xs font-semibold text-white shadow-sm transition hover:brightness-95 active:scale-[0.99] ${
             collapsed ? "justify-center" : "gap-2.5 px-3"
           }`}
           title="New workspace"
+          aria-label="New workspace"
         >
           <Plus className="sidebar-new-icon h-4 w-4 shrink-0" />
           <span
@@ -286,11 +304,12 @@ export function WorkspaceSidebar({
           }`}
           aria-hidden={collapsed}
         >
-          <label className="flex h-9 items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-2.5 text-[var(--color-muted)] focus-within:border-[var(--color-accent)]">
+          <label className="flex h-10 items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-3 text-[var(--color-muted)] transition focus-within:border-[var(--color-accent)] focus-within:ring-2 focus-within:ring-[var(--color-accent-soft)]">
             <Search className="h-3.5 w-3.5 shrink-0" />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
+              aria-label={showArchivedWorkspaces ? "Search archived workspaces" : "Search workspaces"}
               tabIndex={collapsed ? -1 : 0}
               placeholder={
                 showArchivedWorkspaces ? "Search archive" : "Search workspaces"
@@ -446,8 +465,11 @@ export function WorkspaceSidebar({
                     title={collapsed ? workspace.title : undefined}
                     aria-busy={isLoading}
                     className={`relative flex min-w-0 items-center overflow-hidden rounded-lg text-left ${
-                      collapsed ? "h-10 w-10 justify-center" : "min-h-10 flex-1 gap-2.5 px-2.5 py-2"
+                      collapsed
+                        ? "h-10 w-10 justify-center"
+                        : "min-h-11 flex-1 gap-2.5 px-2.5 py-2"
                     }`}
+                    aria-current={active ? "page" : undefined}
                   >
                     {isLoading ? (
                       <LoaderCircle
@@ -488,10 +510,10 @@ export function WorkspaceSidebar({
                         />
                       )}
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[11px] font-medium">
+                        <span className="block truncate text-xs font-medium">
                           {workspace.title}
                         </span>
-                        <span className="mt-0.5 block truncate text-[9px] text-[var(--color-muted)]">
+                        <span className="mt-0.5 block truncate text-[10px] text-[var(--color-muted)]">
                           {isLoading
                             ? "Opening workspace…"
                             : workspace.root_domain}
@@ -570,14 +592,15 @@ export function WorkspaceSidebar({
           guide="vault"
           onClick={onVault}
         />
-        <SidebarAction
-          collapsed={collapsed}
-          icon={RotateCcw}
-          label="Review Queue"
-          badge={dueCount || undefined}
-          guide="review-queue"
-          onClick={onReview}
-        />
+        {flashcardsEnabled && (
+          <SidebarAction
+            collapsed={collapsed}
+            icon={Layers}
+            label="Flashcards"
+            badge={dueCount || undefined}
+            onClick={onReview}
+          />
+        )}
         <SidebarAction
           collapsed={collapsed}
           icon={CircleHelp}
@@ -683,7 +706,7 @@ function SidebarAction({
       onClick={onClick}
       title={collapsed ? label : undefined}
       aria-label={collapsed ? label : undefined}
-      className={`relative flex h-10 w-full items-center overflow-hidden rounded-lg text-[11px] font-medium transition ${
+      className={`relative flex h-11 w-full items-center overflow-hidden rounded-xl text-xs font-medium transition ${
         active
           ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
           : "text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
