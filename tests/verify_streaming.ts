@@ -220,9 +220,8 @@ async function run(): Promise<void> {
       const url = String(input);
       retryUrls.push(url);
       if (
-        url.includes("/models/gemini-3.5-flash-lite:") ||
-        url.includes("/models/gemini-4-hydrogen:") ||
-        url.includes("/models/gemini-3.8-flash:")
+        url.includes("/models/gemini-3.5-flash-lite:") &&
+        unavailableAttempts < 4
       ) {
         unavailableAttempts += 1;
         return new Response(
@@ -249,11 +248,12 @@ async function run(): Promise<void> {
     );
     assert(
       fallbackReply === "Fallback succeeded" &&
-        unavailableAttempts === 6 &&
-        retryUrls.some((url) => url.includes("/models/gemini-4-hydrogen:")) &&
-        retryUrls.some((url) => url.includes("/models/gemini-3.8-flash:")) &&
-        retryUrls.some((url) => url.includes("/models/gemini-3.1-flash-lite:")),
-      "generation should retry 503s and continue through alternate models until one succeeds"
+        unavailableAttempts === 4 &&
+        retryUrls.length === 5 &&
+        retryUrls.every((url) =>
+          url.includes("/models/gemini-3.5-flash-lite:")
+        ),
+      "generation should retry the selected model before switching to an alternate"
     );
 
     storedAiSettings = JSON.stringify({
@@ -291,13 +291,11 @@ async function run(): Promise<void> {
     );
     assert(
       alternateModelReply === "Alternate model succeeded" &&
+        sameModelUrls.some((url) => url.includes("/models/gemini-3.8-flash:")) &&
         sameModelUrls.some((url) =>
-          url.includes("/models/gemini-3.1-flash-lite:")
-        ) &&
-        !sameModelUrls.some((url) =>
           url.includes("/models/gemini-3.5-flash-lite:")
         ),
-      "an overloaded model should be bypassed during cooldown and use a distinct supported fallback"
+      "an overloaded model should be retried before using a distinct supported fallback"
     );
 
     storedAiSettings = JSON.stringify({

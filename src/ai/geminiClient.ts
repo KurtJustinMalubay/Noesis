@@ -300,7 +300,6 @@ const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 const LOCAL_CONTEXT_SAFETY_TOKENS = 128;
 const LOCAL_MIN_INPUT_TOKENS = 384;
 const GEMINI_OVERLOAD_COOLDOWN_MS = 60_000;
-const MAX_GEMINI_MODEL_FALLBACKS = 3;
 const overloadedGeminiModels = new Map<string, number>();
 
 export function isTransientGeminiApiError(error: unknown): boolean {
@@ -426,11 +425,11 @@ function getRetryDelay(response: Response, attempt: number): number {
   if (retryAfter) {
     const seconds = Number(retryAfter);
     if (Number.isFinite(seconds)) {
-      return Math.min(15_000, Math.max(0, seconds * 1000));
+      return Math.min(30_000, Math.max(0, seconds * 1000));
     }
     const retryAt = Date.parse(retryAfter);
     if (Number.isFinite(retryAt)) {
-      return Math.min(15_000, Math.max(0, retryAt - Date.now()));
+      return Math.min(30_000, Math.max(0, retryAt - Date.now()));
     }
   }
   return Math.min(8000, 1000 * 2 ** attempt);
@@ -477,7 +476,7 @@ async function fetchWithTransientRetry(
       continue;
     }
 
-    const retryLimit = response.status === 503 ? 1 : MAX_TRANSIENT_RETRIES;
+    const retryLimit = response.status === 503 ? 4 : MAX_TRANSIENT_RETRIES;
     if (
       response.ok ||
       !RETRYABLE_HTTP_STATUSES.has(response.status) ||
@@ -510,10 +509,10 @@ function markGeminiModelOverloaded(model: string): void {
   overloadedGeminiModels.set(model, Date.now() + GEMINI_OVERLOAD_COOLDOWN_MS);
 }
 
-function getFallbackGeminiModels(
+function getFallbackGeminiModel(
   opts: GeminiRequestOptions,
   currentModel: string
-): string[] {
+): string | undefined {
   const settings = loadAiSettings();
   const configuredFallback =
     opts.tier === "fast" ? settings.synthesisModel : settings.fastModel;
@@ -522,19 +521,15 @@ function getFallbackGeminiModels(
       ? ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-3.1-flash-lite"]
       : ["gemini-4-hydrogen", "gemini-3.1-flash-lite", "gemini-3.8-flash"];
   return [
-    ...new Set([
-      configuredFallback,
-      ...defaultFallbacks,
-      ...GEMINI_MODEL_OPTIONS.map(({ id }) => id),
-    ]),
-  ]
-    .filter(
-      (model) =>
-        model.trim() &&
-        model !== currentModel &&
-        !isGeminiModelCoolingDown(model)
-    )
-    .slice(0, MAX_GEMINI_MODEL_FALLBACKS);
+    configuredFallback,
+    ...defaultFallbacks,
+    ...GEMINI_MODEL_OPTIONS.map(({ id }) => id),
+  ].find(
+    (model) =>
+      model.trim() &&
+      model !== currentModel &&
+      !isGeminiModelCoolingDown(model)
+  );
 }
 
 function isRetryableGeminiError(error: unknown): error is AiApiError {
@@ -574,42 +569,29 @@ async function withConfiguredFallback<T>(
     }
   }
 
-  const fallbackModels = getFallbackGeminiModels(opts, currentModel);
-  if (fallbackModels.length === 0) throw primaryError;
+  const fallbackModel = getFallbackGeminiModel(opts, currentModel);
+  if (!fallbackModel) throw primaryError;
 
-  const fallbackErrors: string[] = [];
-  for (const fallbackModel of fallbackModels) {
-    try {
-      return await request({ ...opts, modelId: fallbackModel });
-    } catch (fallbackError) {
-      if (
-        fallbackError instanceof Error &&
-        fallbackError.name === "AbortError"
-      ) {
-        throw fallbackError;
-      }
-      if (
-        isRetryableGeminiError(fallbackError) &&
-        fallbackError.status === 503
-      ) {
-        markGeminiModelOverloaded(fallbackModel);
-      }
-      const fallbackDetail =
-        fallbackError instanceof Error
-          ? fallbackError.message
-          : String(fallbackError);
-      fallbackErrors.push(`${fallbackModel}: ${fallbackDetail}`);
-      if (!isRetryableGeminiError(fallbackError)) break;
+  try {
+    return await request({ ...opts, modelId: fallbackModel });
+  } catch (fallbackError) {
+    if (
+      fallbackError instanceof AiApiError &&
+      fallbackError.provider === "gemini" &&
+      fallbackError.status === 503
+    ) {
+      markGeminiModelOverloaded(fallbackModel);
     }
+    const primaryDetail =
+      primaryError instanceof Error ? primaryError.message : String(primaryError);
+    const fallbackDetail =
+      fallbackError instanceof Error
+        ? fallbackError.message
+        : String(fallbackError);
+    throw new Error(
+      `${primaryDetail} Automatic fallback to ${fallbackModel} also failed: ${fallbackDetail}`
+    );
   }
-
-  const primaryDetail =
-    primaryError instanceof Error ? primaryError.message : String(primaryError);
-  throw new Error(
-    `${primaryDetail} Automatic model fallbacks failed: ${fallbackErrors.join(
-      " | "
-    )}`
-  );
 }
 
 function getGeminiRequestBody(opts: GeminiRequestOptions): Record<string, unknown> {
