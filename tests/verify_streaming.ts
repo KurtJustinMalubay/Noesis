@@ -219,7 +219,11 @@ async function run(): Promise<void> {
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = String(input);
       retryUrls.push(url);
-      if (url.includes("/models/gemini-3.5-flash-lite:")) {
+      if (
+        url.includes("/models/gemini-3.5-flash-lite:") ||
+        url.includes("/models/gemini-4-hydrogen:") ||
+        url.includes("/models/gemini-3.8-flash:")
+      ) {
         unavailableAttempts += 1;
         return new Response(
           JSON.stringify({
@@ -245,9 +249,11 @@ async function run(): Promise<void> {
     );
     assert(
       fallbackReply === "Fallback succeeded" &&
-        unavailableAttempts === 2 &&
-        retryUrls.some((url) => url.includes("/models/gemini-4-hydrogen:")),
-      "503 responses should retry once and fail over to the configured alternate"
+        unavailableAttempts === 6 &&
+        retryUrls.some((url) => url.includes("/models/gemini-4-hydrogen:")) &&
+        retryUrls.some((url) => url.includes("/models/gemini-3.8-flash:")) &&
+        retryUrls.some((url) => url.includes("/models/gemini-3.1-flash-lite:")),
+      "generation should retry 503s and continue through alternate models until one succeeds"
     );
 
     storedAiSettings = JSON.stringify({
@@ -285,7 +291,9 @@ async function run(): Promise<void> {
     );
     assert(
       alternateModelReply === "Alternate model succeeded" &&
-        sameModelUrls.some((url) => url.includes("/models/gemini-3.8-flash:")) &&
+        sameModelUrls.some((url) =>
+          url.includes("/models/gemini-3.1-flash-lite:")
+        ) &&
         !sameModelUrls.some((url) =>
           url.includes("/models/gemini-3.5-flash-lite:")
         ),
@@ -310,6 +318,7 @@ async function run(): Promise<void> {
     try {
       await generateGeminiText({
         tier: "fast",
+        modelId: "gemini-4-hydrogen",
         apiKey: "test-key",
         systemInstruction: "Test",
         userPrompt: "Fail",
@@ -329,6 +338,7 @@ async function run(): Promise<void> {
       await streamGeminiText(
         {
           tier: "fast",
+          modelId: "gemini-4-hydrogen",
           apiKey: "test-key",
           systemInstruction: "Test",
           userPrompt: "Fail stream",

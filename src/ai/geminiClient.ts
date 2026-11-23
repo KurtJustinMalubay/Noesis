@@ -300,6 +300,7 @@ const RETRYABLE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504]);
 const LOCAL_CONTEXT_SAFETY_TOKENS = 128;
 const LOCAL_MIN_INPUT_TOKENS = 384;
 const GEMINI_OVERLOAD_COOLDOWN_MS = 60_000;
+const MAX_GEMINI_MODEL_FALLBACKS = 3;
 const overloadedGeminiModels = new Map<string, number>();
 
 export function isTransientGeminiApiError(error: unknown): boolean {
@@ -509,10 +510,10 @@ function markGeminiModelOverloaded(model: string): void {
   overloadedGeminiModels.set(model, Date.now() + GEMINI_OVERLOAD_COOLDOWN_MS);
 }
 
-function getFallbackGeminiModel(
+function getFallbackGeminiModels(
   opts: GeminiRequestOptions,
   currentModel: string
-): string | undefined {
+): string[] {
   const settings = loadAiSettings();
   const configuredFallback =
     opts.tier === "fast" ? settings.synthesisModel : settings.fastModel;
@@ -521,14 +522,27 @@ function getFallbackGeminiModel(
       ? ["gemini-3.8-flash", "gemini-4-hydrogen", "gemini-3.1-flash-lite"]
       : ["gemini-4-hydrogen", "gemini-3.1-flash-lite", "gemini-3.8-flash"];
   return [
-    configuredFallback,
-    ...defaultFallbacks,
-    ...GEMINI_MODEL_OPTIONS.map(({ id }) => id),
-  ].find(
-    (model) =>
-      model.trim() &&
-      model !== currentModel &&
-      !isGeminiModelCoolingDown(model)
+    ...new Set([
+      configuredFallback,
+      ...defaultFallbacks,
+      ...GEMINI_MODEL_OPTIONS.map(({ id }) => id),
+    ]),
+  ]
+    .filter(
+      (model) =>
+        model.trim() &&
+        model !== currentModel &&
+        !isGeminiModelCoolingDown(model)
+    )
+    .slice(0, MAX_GEMINI_MODEL_FALLBACKS);
+}
+
+function isRetryableGeminiError(error: unknown): error is AiApiError {
+  return (
+    error instanceof AiApiError &&
+    error.provider === "gemini" &&
+    typeof error.status === "number" &&
+    RETRYABLE_HTTP_STATUSES.has(error.status)
   );
 }
 
@@ -554,42 +568,48 @@ async function withConfiguredFallback<T>(
     try {
       return await request(opts);
     } catch (error) {
-      if (
-        !(error instanceof AiApiError) ||
-        error.provider !== "gemini" ||
-        typeof error.status !== "number" ||
-        !RETRYABLE_HTTP_STATUSES.has(error.status)
-      ) {
-        throw error;
-      }
+      if (!isRetryableGeminiError(error)) throw error;
       if (error.status === 503) markGeminiModelOverloaded(currentModel);
       primaryError = error;
     }
   }
 
-  const fallbackModel = getFallbackGeminiModel(opts, currentModel);
-  if (!fallbackModel) throw primaryError;
+  const fallbackModels = getFallbackGeminiModels(opts, currentModel);
+  if (fallbackModels.length === 0) throw primaryError;
 
-  try {
-    return await request({ ...opts, modelId: fallbackModel });
-  } catch (fallbackError) {
-    if (
-      fallbackError instanceof AiApiError &&
-      fallbackError.provider === "gemini" &&
-      fallbackError.status === 503
-    ) {
-      markGeminiModelOverloaded(fallbackModel);
+  const fallbackErrors: string[] = [];
+  for (const fallbackModel of fallbackModels) {
+    try {
+      return await request({ ...opts, modelId: fallbackModel });
+    } catch (fallbackError) {
+      if (
+        fallbackError instanceof Error &&
+        fallbackError.name === "AbortError"
+      ) {
+        throw fallbackError;
+      }
+      if (
+        isRetryableGeminiError(fallbackError) &&
+        fallbackError.status === 503
+      ) {
+        markGeminiModelOverloaded(fallbackModel);
+      }
+      const fallbackDetail =
+        fallbackError instanceof Error
+          ? fallbackError.message
+          : String(fallbackError);
+      fallbackErrors.push(`${fallbackModel}: ${fallbackDetail}`);
+      if (!isRetryableGeminiError(fallbackError)) break;
     }
-    const primaryDetail =
-      primaryError instanceof Error ? primaryError.message : String(primaryError);
-    const fallbackDetail =
-      fallbackError instanceof Error
-        ? fallbackError.message
-        : String(fallbackError);
-    throw new Error(
-      `${primaryDetail} Automatic fallback to ${fallbackModel} also failed: ${fallbackDetail}`
-    );
   }
+
+  const primaryDetail =
+    primaryError instanceof Error ? primaryError.message : String(primaryError);
+  throw new Error(
+    `${primaryDetail} Automatic model fallbacks failed: ${fallbackErrors.join(
+      " | "
+    )}`
+  );
 }
 
 function getGeminiRequestBody(opts: GeminiRequestOptions): Record<string, unknown> {
