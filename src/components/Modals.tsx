@@ -3,12 +3,13 @@ import {
   useRef,
   useState,
   type FormEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatedPresence } from "./AnimatedPresence";
 import {
   CheckCircle2,
+  Command,
+  LogOut,
   Plus,
   Pencil,
   Eye,
@@ -87,11 +88,16 @@ import { RichContent } from "./ui/RichContent";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 import type { QuizBatchProgress } from "../ai/quizService";
+import {
+  getNativeFullscreen,
+  setNativeFullscreen,
+} from "../utils/windowControls";
 
 interface ModalsProps {
   activeModal: ActiveModal;
   activeWorkspaceId: string | null;
   selectedNodeId: string | null;
+  initialWorkspacePrompt?: string;
   selectedNodeTitle: string;
   theme: AppTheme;
   isGeneratingCurriculum: boolean;
@@ -119,6 +125,10 @@ interface ModalsProps {
   ) => Promise<void>;
   onGradeCard: (card: DueFlashcard, grade: ReviewGrade) => Promise<void>;
   onLoadFlashcards: (workspaceId: string) => Promise<WorkspaceFlashcard[]>;
+  onGenerateFlashcardsForTopic: (
+    nodeId: string,
+    topic: string
+  ) => Promise<WorkspaceFlashcard[]>;
   onCreateFlashcard: (
     nodeId: string,
     front: string,
@@ -150,12 +160,19 @@ interface ModalsProps {
   onRefreshDocuments: () => Promise<void>;
   onRemoveDocument: (docId: string) => Promise<void>;
   onToast: (msg: string) => void;
+  onRequestExit: () => void;
+  settingsGuideRequest: {
+    section: "canvas" | "ai";
+    requestId: number;
+  } | null;
+  settingsCloseRequest: number;
 }
 
 export function Modals({
   activeModal,
   activeWorkspaceId,
   selectedNodeId,
+  initialWorkspacePrompt,
   selectedNodeTitle,
   theme,
   isGeneratingCurriculum,
@@ -180,6 +197,7 @@ export function Modals({
   onGenerateCurriculum,
   onGradeCard,
   onLoadFlashcards,
+  onGenerateFlashcardsForTopic,
   onCreateFlashcard,
   onEditFlashcard,
   onRemoveFlashcard,
@@ -196,6 +214,9 @@ export function Modals({
   onRefreshDocuments,
   onRemoveDocument,
   onToast,
+  onRequestExit,
+  settingsGuideRequest,
+  settingsCloseRequest,
 }: ModalsProps) {
   return (
     <>
@@ -213,6 +234,7 @@ export function Modals({
             onClose={onClose}
             onCreateWorkspace={onCreateWorkspace}
             onGenerate={onGenerateCurriculum}
+            initialTopic={initialWorkspacePrompt ?? ""}
             onRefreshDocuments={onRefreshDocuments}
             onToast={onToast}
           />
@@ -220,9 +242,11 @@ export function Modals({
         {activeModal === "review" && (
           <ReviewQueueModal
             workspaceId={activeWorkspaceId}
+            selectedNodeId={selectedNodeId}
             nodes={flashcardNodes}
             dueCards={dueCards}
             onLoadFlashcards={onLoadFlashcards}
+            onGenerateFlashcardsForTopic={onGenerateFlashcardsForTopic}
             onCreateFlashcard={onCreateFlashcard}
             onEditFlashcard={onEditFlashcard}
             onRemoveFlashcard={onRemoveFlashcard}
@@ -255,6 +279,9 @@ export function Modals({
             onToast={onToast}
             onClose={onClose}
             onQuizCacheCleared={onQuizCacheCleared}
+            onRequestExit={onRequestExit}
+            guideSectionRequest={settingsGuideRequest}
+            closeRequest={settingsCloseRequest}
           />
         )}
       </AnimatedPresence>
@@ -296,6 +323,7 @@ function NewWorkspaceModal({
   onClose,
   onCreateWorkspace,
   onGenerate,
+  initialTopic,
   onRefreshDocuments,
   onToast,
 }: {
@@ -308,13 +336,14 @@ function NewWorkspaceModal({
     topic: string,
     sourceDocument?: CurriculumSourceDocument
   ) => Promise<void>;
+  initialTopic: string;
   onRefreshDocuments: () => Promise<void>;
   onToast: (msg: string) => void;
 }) {
-  const [creationMode, setCreationMode] = useState<"manual" | "ai">("manual");
+  const [creationMode, setCreationMode] = useState<"manual" | "ai">("ai");
   const [workspaceTitle, setWorkspaceTitle] = useState("");
   const [rootDomain, setRootDomain] = useState("");
-  const [topic, setTopic] = useState("");
+  const [topic, setTopic] = useState(initialTopic);
   const [sourceDocument, setSourceDocument] =
     useState<CurriculumSourceDocument | null>(null);
   const [isImporting, setIsImporting] = useState(false);
@@ -323,6 +352,16 @@ function NewWorkspaceModal({
     if (isGenerating) onCancel();
     onClose();
   };
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      handleClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [isGenerating, progress?.phase]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -526,6 +565,7 @@ function NewWorkspaceModal({
             </div>
           </>
         )}
+
         <div className="flex justify-end gap-2">
           <button
             type="button"
@@ -560,9 +600,11 @@ function NewWorkspaceModal({
 
 function ReviewQueueModal({
   workspaceId,
+  selectedNodeId,
   nodes,
   dueCards,
   onLoadFlashcards,
+  onGenerateFlashcardsForTopic,
   onCreateFlashcard,
   onEditFlashcard,
   onRemoveFlashcard,
@@ -571,9 +613,14 @@ function ReviewQueueModal({
   onClose,
 }: {
   workspaceId: string | null;
+  selectedNodeId: string | null;
   nodes: GraphNode[];
   dueCards: DueFlashcard[];
   onLoadFlashcards: (workspaceId: string) => Promise<WorkspaceFlashcard[]>;
+  onGenerateFlashcardsForTopic: (
+    nodeId: string,
+    topic: string
+  ) => Promise<WorkspaceFlashcard[]>;
   onCreateFlashcard: (
     nodeId: string,
     front: string,
@@ -609,6 +656,15 @@ function ReviewQueueModal({
   const [backDraft, setBackDraft] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [isSavingCard, setIsSavingCard] = useState(false);
+  const [isAiGeneratorOpen, setIsAiGeneratorOpen] = useState(false);
+  const [aiNodeId, setAiNodeId] = useState(
+    selectedNodeId ?? nodes[0]?.id ?? ""
+  );
+  const [aiTopic, setAiTopic] = useState("");
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+  const [aiGenerationError, setAiGenerationError] = useState<string | null>(
+    null
+  );
   const dialogRef = useRef<HTMLDivElement>(null);
   const isGradingRef = useRef(false);
   const current = dueCards[0];
@@ -800,15 +856,50 @@ function ReviewQueueModal({
     }
   };
 
-  const handleDialogKeyDown = (
-    event: ReactKeyboardEvent<HTMLDivElement>
+  const handleGenerateAiFlashcards = async (
+    event: FormEvent<HTMLFormElement>
   ) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      if (isCreating || editingCard) closeEditor();
-      else onClose();
+    event.preventDefault();
+    if (!aiNodeId || isGeneratingAi) return;
+    setIsGeneratingAi(true);
+    setAiGenerationError(null);
+    try {
+      const generated = await onGenerateFlashcardsForTopic(aiNodeId, aiTopic);
+      setLibraryCards((cards) =>
+        [...cards, ...generated].sort((a, b) =>
+          a.node_title.localeCompare(b.node_title)
+        )
+      );
+      setAiTopic("");
+      setIsAiGeneratorOpen(false);
+      onToast(`Generated ${generated.length} flashcards from the lesson and matching notes.`);
+    } catch (error) {
+      setAiGenerationError(
+        error instanceof Error ? error.message : String(error)
+      );
+    } finally {
+      setIsGeneratingAi(false);
     }
   };
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (
+        document.querySelector(
+          "[data-confirm-delete], [data-exit-confirmation]"
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (isCreating || editingCard) closeEditor();
+      else onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [editingCard, isCreating, onClose]);
 
   return (
     <div
@@ -817,7 +908,6 @@ function ReviewQueueModal({
       aria-modal="true"
       aria-labelledby="flashcards-title"
       tabIndex={-1}
-      onKeyDown={handleDialogKeyDown}
       className="flex max-h-[92vh] min-h-[min(680px,88vh)] w-full max-w-3xl flex-col overflow-hidden rounded-[24px] border border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] shadow-[0_24px_70px_rgba(27,39,47,0.2)] outline-none"
     >
       <header className="border-b border-[var(--color-border)] px-5 py-4 sm:px-7">
@@ -1141,16 +1231,94 @@ function ReviewQueueModal({
                       Your cards
                     </h3>
                   </div>
-                  <button
-                    type="button"
-                    onClick={startCreating}
-                    disabled={availableNodes.length === 0}
-                    className="inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-bold text-[var(--color-accent-foreground)] transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <Plus className="h-4 w-4" aria-hidden="true" />
-                    Add card
-                  </button>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={startCreating}
+                      disabled={availableNodes.length === 0}
+                      className="inline-flex items-center gap-2 rounded-xl border border-[var(--color-border)] px-3 py-2.5 text-xs font-bold transition hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Plus className="h-4 w-4" aria-hidden="true" />
+                      Add card
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsAiGeneratorOpen((open) => !open);
+                        setAiGenerationError(null);
+                      }}
+                      disabled={availableNodes.length === 0}
+                      className="inline-flex items-center gap-2 rounded-xl bg-[var(--color-accent)] px-3 py-2.5 text-xs font-bold text-[var(--color-accent-foreground)] transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Sparkles className="h-4 w-4" aria-hidden="true" />
+                      Generate with AI
+                    </button>
+                  </div>
                 </div>
+                {isAiGeneratorOpen && (
+                  <form
+                    onSubmit={(event) => void handleGenerateAiFlashcards(event)}
+                    className="mb-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-3"
+                  >
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="text-[11px] font-semibold">
+                        Lesson
+                        <select
+                          value={aiNodeId}
+                          onChange={(event) => setAiNodeId(event.target.value)}
+                          className="mt-1 block w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-2.5 py-2 text-xs"
+                        >
+                          {availableNodes.map((node) => (
+                            <option key={node.id} value={node.id}>
+                              {node.title}
+                              {node.is_hydrated === 1 ? "" : " · lesson not generated"}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="text-[11px] font-semibold">
+                        Focus topic <span className="font-normal text-[var(--color-muted)]">(optional)</span>
+                        <input
+                          value={aiTopic}
+                          onChange={(event) => setAiTopic(event.target.value)}
+                          maxLength={160}
+                          placeholder="e.g. eigenvalues"
+                          className="mt-1 block w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-2.5 py-2 text-xs"
+                        />
+                      </label>
+                    </div>
+                    <p className="mt-2 text-[10px] leading-4 text-[var(--color-muted)]">
+                      Uses the lesson and searches this workspace’s notes for the topic.
+                    </p>
+                    {aiGenerationError && (
+                      <p role="alert" className="mt-2 text-[11px] text-rose-700">
+                        {aiGenerationError}
+                      </p>
+                    )}
+                    <div className="mt-3 flex justify-end gap-2">
+                      <button
+                        type="button"
+                        disabled={isGeneratingAi}
+                        onClick={() => setIsAiGeneratorOpen(false)}
+                        className="rounded-lg px-3 py-2 text-[11px] font-semibold text-[var(--color-muted)] hover:bg-[var(--color-hover)]"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isGeneratingAi || !aiNodeId}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-accent)] px-3 py-2 text-[11px] font-bold text-[var(--color-accent-foreground)] disabled:opacity-50"
+                      >
+                        {isGeneratingAi ? (
+                          <span className="h-3 w-3 animate-spin rounded-full border border-current border-t-transparent" />
+                        ) : (
+                          <Sparkles className="h-3 w-3" />
+                        )}
+                        {isGeneratingAi ? "Generating…" : "Generate cards"}
+                      </button>
+                    </div>
+                  </form>
+                )}
                 <label className="relative mb-4 block">
                   <Search
                     className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-muted)]"
@@ -1312,6 +1480,15 @@ function CompletionPromptModal({
   onClose: () => void;
 }) {
   const [isCompleting, setIsCompleting] = useState(false);
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || isCompleting) return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [isCompleting, onClose]);
 
   const handleCompleteNow = async () => {
     if (!nodeId) return;
@@ -1409,6 +1586,25 @@ function DocumentVaultModal({
   const [searchResults, setSearchResults] = useState<RetrievedChunk[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const searchRequestId = useRef(0);
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || isIngesting) return;
+      if (
+        document.querySelector(
+          "[data-confirm-delete], [data-exit-confirmation]"
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (documentToDelete) setDocumentToDelete(null);
+      else onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [documentToDelete, isIngesting, onClose]);
 
   useEffect(() => {
     const requestId = ++searchRequestId.current;
@@ -1624,12 +1820,21 @@ function SettingsModal({
   onToast,
   onClose,
   onQuizCacheCleared,
+  onRequestExit,
+  guideSectionRequest,
+  closeRequest,
 }: {
   onToast: (msg: string) => void;
   onClose: () => void;
   onQuizCacheCleared: () => void;
+  onRequestExit: () => void;
+  guideSectionRequest: {
+    section: "canvas" | "ai";
+    requestId: number;
+  } | null;
+  closeRequest: number;
 }) {
-  type Section = "ai" | "canvas" | "plugins" | "study" | "vault";
+  type Section = "ai" | "canvas" | "plugins" | "study" | "vault" | "shortcuts";
   const sections: Array<{
     id: Section;
     title: string;
@@ -1640,6 +1845,7 @@ function SettingsModal({
     { id: "ai", title: "AI & Speed", icon: Sparkles },
     { id: "study", title: "Study", icon: GraduationCap },
     { id: "vault", title: "Vault & Data", icon: HardDrive },
+    { id: "shortcuts", title: "Shortcuts", icon: Command },
   ];
   const store = useNoesisStore();
   const pluginStore = usePluginStore();
@@ -1685,7 +1891,9 @@ function SettingsModal({
   const [enabledPluginIds, setEnabledPluginIds] = useState(
     pluginStore.enabledPluginIds
   );
-  const [section, setSection] = useState<Section>("canvas");
+  const [section, setSection] = useState<Section>(
+    guideSectionRequest?.section ?? "canvas"
+  );
   const [showUnsavedChanges, setShowUnsavedChanges] = useState(false);
   const [isKeyVisible, setIsKeyVisible] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
@@ -1696,6 +1904,7 @@ function SettingsModal({
     number | null
   >(null);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const initialDraftSnapshot = useRef<string | null>(null);
   const draftSnapshot = JSON.stringify({
     provider,
@@ -1770,9 +1979,55 @@ function SettingsModal({
     onClose();
   };
 
+  const lastCloseRequest = useRef(closeRequest);
+  useEffect(() => {
+    if (lastCloseRequest.current === closeRequest) return;
+    lastCloseRequest.current = closeRequest;
+    requestClose();
+  }, [closeRequest, hasUnsavedChanges]);
+
+  useEffect(() => {
+    if (guideSectionRequest) {
+      setSection(guideSectionRequest.section);
+    }
+  }, [guideSectionRequest]);
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (
+        document.querySelector(
+          "[data-confirm-delete], [data-exit-confirmation]"
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (showUnsavedChanges) setShowUnsavedChanges(false);
+      else requestClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [hasUnsavedChanges, onClose, showUnsavedChanges]);
+
   useEffect(() => {
     void refreshStats();
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void getNativeFullscreen()
+      .then((fullscreen) => {
+        if (active) setIsFullscreen(fullscreen);
+      })
+      .catch((error: unknown) =>
+        onToast(error instanceof Error ? error.message : String(error))
+      );
+    return () => {
+      active = false;
+    };
+  }, [onToast]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1924,6 +2179,13 @@ function SettingsModal({
             <button
               key={id}
               type="button"
+              data-guide={
+                id === "ai"
+                  ? "settings-ai"
+                  : id === "canvas"
+                    ? "settings-appearance"
+                    : undefined
+              }
               aria-pressed={section === id}
               onClick={() => setSection(id)}
               className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs font-medium transition ${
@@ -1978,6 +2240,9 @@ function SettingsModal({
               </SettingsField>
               {provider === "gemini" ? (
                 <>
+                  <p className="rounded-lg bg-[var(--color-accent-soft)] px-3 py-2 text-[11px] leading-4 text-[var(--color-ink)]">
+                    Free account? Use Flash-Lite.
+                  </p>
                   <section>
                     <h3 className="text-xs font-semibold text-slate-800">Gemini API key</h3>
                     <p className="mt-1 text-[11px] text-slate-500">
@@ -2009,6 +2274,14 @@ function SettingsModal({
                         {isTestingConnection ? "Testing…" : "Test"}
                       </button>
                     </div>
+                    <a
+                      href="https://aistudio.google.com/app/apikey"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-flex text-[11px] font-semibold text-[var(--color-accent)] hover:underline"
+                    >
+                      Get an API key from Google AI Studio
+                    </a>
                   </section>
 
                   <details className="disclosure-chevron settings-disclosure rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-4">
@@ -2326,6 +2599,30 @@ function SettingsModal({
                   }
                 />
               </SettingsField>
+              <SettingsField label="Motion">
+                <label className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3 py-3">
+                  <span className="min-w-0">
+                    <span className="block text-xs font-medium text-[var(--color-ink)]">
+                      Reduce motion
+                    </span>
+                    <span className="mt-1 block text-[11px] leading-4 text-[var(--color-muted)]">
+                      Minimize animations and transitions. System motion
+                      preferences are always respected.
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={preferences.reduceMotion}
+                    onChange={(event) =>
+                      setPreferences({
+                        ...preferences,
+                        reduceMotion: event.target.checked,
+                      })
+                    }
+                    className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
+                  />
+                </label>
+              </SettingsField>
               <SettingsField label="Text visibility">
                 <label className="flex items-center justify-between gap-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3 py-3">
                   <span className="min-w-0">
@@ -2401,20 +2698,35 @@ function SettingsModal({
                 />
               </SettingsField>
               <SettingsField label="Window">
-                <label className="flex items-center justify-between rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] px-3 py-3 text-xs text-slate-700">
-                  <span>Launch in fullscreen</span>
-                  <input
-                    type="checkbox"
-                    checked={preferences.launchInFullscreen}
-                    onChange={(event) =>
-                      setPreferences({
-                        ...preferences,
-                        launchInFullscreen: event.target.checked,
-                      })
+                <div className="space-y-2">
+                  <label className="flex items-center justify-between rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] px-3 py-3 text-xs text-slate-700">
+                    <span>Launch in fullscreen</span>
+                    <input
+                      type="checkbox"
+                      checked={preferences.launchInFullscreen}
+                      onChange={(event) =>
+                        setPreferences({
+                          ...preferences,
+                          launchInFullscreen: event.target.checked,
+                        })
+                      }
+                      className="h-4 w-4 accent-[var(--color-accent-button)]"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void setNativeFullscreen(!isFullscreen)
+                        .then(setIsFullscreen)
+                        .catch((error: unknown) =>
+                          onToast(error instanceof Error ? error.message : String(error))
+                        )
                     }
-                    className="h-4 w-4 accent-[var(--color-accent-button)]"
-                  />
-                </label>
+                    className="w-full rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] px-3 py-2.5 text-left text-xs font-medium text-slate-700 transition hover:bg-white"
+                  >
+                    {isFullscreen ? "Exit fullscreen now" : "Enter fullscreen now"}
+                  </button>
+                </div>
               </SettingsField>
                 </div>
               </details>
@@ -2582,7 +2894,47 @@ function SettingsModal({
                   </button>
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={onRequestExit}
+                className="inline-flex items-center gap-2 rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-50"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                Exit Noesis
+              </button>
             </>
+          )}
+
+          {section === "shortcuts" && (
+            <section className="space-y-2">
+              <p className="text-[11px] leading-5 text-slate-600">
+                Shortcuts work when you are not typing in a field.
+              </p>
+              {[
+                ["F11", "Toggle fullscreen"],
+                ["Ctrl + \\", "Show or hide the sidebar"],
+                ["Ctrl + N", "Create a workspace"],
+                ["Ctrl + ,", "Open settings"],
+                ["Ctrl + Shift + F", "Toggle fullscreen"],
+                ["Ctrl + Z", "Undo the last workspace edit"],
+                ["Ctrl + Y / Ctrl + Shift + Z", "Redo a workspace edit"],
+                ["Esc", "Close the topmost popup or dialog"],
+                ["Space", "Reveal a flashcard answer"],
+                ["1–4", "Rate a revealed flashcard"],
+              ].map(([shortcut, action]) => (
+                <div
+                  key={shortcut}
+                  className="flex items-center justify-between gap-4 rounded-lg border border-[#e7e7e1] bg-[#fbfaf8] px-3 py-2.5"
+                >
+                  <kbd className="rounded-md border border-[#dedfdc] bg-white px-2 py-1 font-mono text-[10px] font-semibold text-slate-700">
+                    {shortcut}
+                  </kbd>
+                  <span className="text-right text-[11px] text-slate-600">
+                    {action}
+                  </span>
+                </div>
+              ))}
+            </section>
           )}
         </div>
 

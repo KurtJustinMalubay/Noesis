@@ -11,6 +11,32 @@ export interface Workspace {
   archived_at: number | null;
 }
 
+export interface CurriculumTree {
+  id: string;
+  title: string;
+  layout_mode: CanvasLayoutMode;
+  created_at: number;
+  updated_at: number;
+  archived_at: number | null;
+}
+
+export interface CurriculumTreeNode {
+  id: string;
+  tree_id: string;
+  workspace_id: string | null;
+  title: string;
+  summary_hint: string;
+  layer_index: number;
+  pos_x: number;
+  pos_y: number;
+}
+
+export interface CurriculumTreeEdge {
+  tree_id: string;
+  source_id: string;
+  target_id: string;
+}
+
 export interface GraphNode {
   id: string;
   workspace_id: string;

@@ -5,13 +5,16 @@ import {
   ChevronLeft,
   ChevronRight,
   Compass,
+  Layers,
   Link2,
   Lock,
   MoreHorizontal,
   Pencil,
   Plus,
   PlayCircle,
+  Redo2,
   Sparkles,
+  Undo2,
   X,
   ZoomIn,
   ZoomOut,
@@ -20,6 +23,7 @@ import type {
   CanvasLayoutMode,
   GraphEdge,
   GraphNode,
+  Workspace,
 } from "../types/domain";
 import { canReach } from "../engine/dagTopology";
 import { DEFAULT_LAYOUT_CONFIG } from "../engine/sugiyamaLayout";
@@ -29,6 +33,9 @@ import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 import { ArchivedConceptsDialog } from "./ArchivedConceptsDialog";
 
 interface DagCanvasProps {
+  nodeKind?: "concept" | "subject";
+  showArchiveControls?: boolean;
+  showHistoryControls?: boolean;
   workspaceId: string | null;
   isNativeFullscreen: boolean;
   nodes: GraphNode[];
@@ -39,6 +46,8 @@ interface DagCanvasProps {
   edgeRouting: UserPreferences["edgeRouting"];
   nodeDensity: UserPreferences["nodeDensity"];
   quizNodeIds: Set<string>;
+  canUndo: boolean;
+  canRedo: boolean;
   onSelectNode: (nodeId: string) => void;
   onSetLayoutMode: (mode: CanvasLayoutMode) => Promise<void>;
   onMoveNode: (nodeId: string, x: number, y: number) => Promise<void>;
@@ -49,23 +58,31 @@ interface DagCanvasProps {
     x: number;
     y: number;
   }) => Promise<string>;
+  existingWorkspaces?: Pick<Workspace, "id" | "title" | "root_domain">[];
+  onAddExistingWorkspace?: (
+    workspaceId: string,
+    x: number,
+    y: number
+  ) => Promise<string>;
   onEditNode: (
     nodeId: string,
     title: string,
     summary: string
   ) => Promise<void>;
   onArchiveNode: (nodeId: string) => Promise<void>;
-  onRestoreArchivedNode: (
+  onRestoreArchivedNode?: (
     workspaceId: string,
     nodeId: string
   ) => Promise<void>;
-  onPermanentlyDeleteArchivedNode: (
+  onPermanentlyDeleteArchivedNode?: (
     workspaceId: string,
     nodeId: string
   ) => Promise<void>;
   onConnectNodes: (sourceId: string, targetId: string) => Promise<void>;
   onDisconnectNodes: (sourceId: string, targetId: string) => Promise<void>;
   onToast: (message: string | null) => void;
+  onUndo: () => Promise<void>;
+  onRedo: () => Promise<void>;
 }
 
 interface NodeDragState {
@@ -102,6 +119,9 @@ const EDGE_MIDPOINT_STAGGER = 12;
 const NODE_DRAG_THRESHOLD = 5;
 
 export function DagCanvas({
+  nodeKind = "concept",
+  showArchiveControls = true,
+  showHistoryControls = true,
   workspaceId,
   isNativeFullscreen,
   nodes,
@@ -112,11 +132,15 @@ export function DagCanvas({
   edgeRouting,
   nodeDensity,
   quizNodeIds,
+  canUndo,
+  canRedo,
   onSelectNode,
   onSetLayoutMode,
   onMoveNode,
   onRealignGrid,
   onAddNode,
+  existingWorkspaces = [],
+  onAddExistingWorkspace,
   onEditNode,
   onArchiveNode,
   onRestoreArchivedNode,
@@ -124,12 +148,15 @@ export function DagCanvas({
   onConnectNodes,
   onDisconnectNodes,
   onToast,
+  onUndo,
+  onRedo,
 }: DagCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphTrackRef = useRef<HTMLDivElement>(null);
   const dotGridRef = useRef<HTMLDivElement>(null);
   const [pan, setPan] = useState({ x: 450, y: 80 });
   const [scale, setScale] = useState(1);
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [cameraDuration, setCameraDuration] = useState<number | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
@@ -150,6 +177,9 @@ export function DagCanvas({
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorTitle, setEditorTitle] = useState("");
   const [editorSummary, setEditorSummary] = useState("");
+  const [isAddingExistingWorkspace, setIsAddingExistingWorkspace] =
+    useState(false);
+  const [existingWorkspaceId, setExistingWorkspaceId] = useState("");
   const [isSavingEditor, setIsSavingEditor] = useState(false);
   const [isAnimatingLayout, setIsAnimatingLayout] = useState(false);
   const [invalidTargetId, setInvalidTargetId] = useState<string | null>(null);
@@ -163,6 +193,19 @@ export function DagCanvas({
   const connectionRef = useRef<ConnectionDragState | null>(null);
   const suppressClickNodeId = useRef<string | null>(null);
   const { nodeWidth, nodeHeight, verticalGap } = DEFAULT_LAYOUT_CONFIG;
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const observer = new ResizeObserver(([entry]) => {
+      setCanvasSize({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      });
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     if (!selectedEdge) return;
 
@@ -253,6 +296,81 @@ export function DagCanvas({
       maxY,
     };
   }, [displayNodes, edges, nodeWidth, nodeHeight]);
+  const minimap = useMemo(() => {
+    if (!displayNodes.length || !canvasSize.width || !canvasSize.height) {
+      return null;
+    }
+
+    const width = 156;
+    const height = 88;
+    const padding = 8;
+    const graphWidth = Math.max(1, graphIndexes.maxX - graphIndexes.minX);
+    const graphHeight = Math.max(1, graphIndexes.maxY - graphIndexes.minY);
+    const mapScale = Math.min(
+      (width - padding * 2) / graphWidth,
+      (height - padding * 2) / graphHeight
+    );
+    const contentWidth = graphWidth * mapScale;
+    const contentHeight = graphHeight * mapScale;
+    const offsetX = (width - contentWidth) / 2;
+    const offsetY = (height - contentHeight) / 2;
+    const mapX = (x: number) => offsetX + (x - graphIndexes.minX) * mapScale;
+    const mapY = (y: number) => offsetY + (y - graphIndexes.minY) * mapScale;
+    const worldLeft = -pan.x / scale;
+    const worldTop = -pan.y / scale;
+    const viewLeft = mapX(worldLeft);
+    const viewTop = mapY(worldTop);
+    const viewRight = mapX(worldLeft + canvasSize.width / scale);
+    const viewBottom = mapY(worldTop + canvasSize.height / scale);
+    const clamp = (value: number, min: number, max: number) =>
+      Math.max(min, Math.min(max, value));
+    const bounds = {
+      left: clamp(Math.min(viewLeft, viewRight), offsetX, offsetX + contentWidth),
+      top: clamp(Math.min(viewTop, viewBottom), offsetY, offsetY + contentHeight),
+      right: clamp(Math.max(viewLeft, viewRight), offsetX, offsetX + contentWidth),
+      bottom: clamp(Math.max(viewTop, viewBottom), offsetY, offsetY + contentHeight),
+    };
+    const centerScreenX =
+      ((graphIndexes.minX + graphIndexes.maxX) / 2) * scale + pan.x;
+    const centerScreenY =
+      ((graphIndexes.minY + graphIndexes.maxY) / 2) * scale + pan.y;
+    const direction =
+      (Math.atan2(
+        centerScreenY - canvasSize.height / 2,
+        centerScreenX - canvasSize.width / 2
+      ) *
+        180) /
+        Math.PI +
+      90;
+
+    return {
+      width,
+      height,
+      offsetX,
+      offsetY,
+      mapScale,
+      mapX,
+      mapY,
+      bounds,
+      direction,
+      isOffscreen:
+        centerScreenX < 0 ||
+        centerScreenX > canvasSize.width ||
+        centerScreenY < 0 ||
+        centerScreenY > canvasSize.height,
+    };
+  }, [
+    canvasSize.height,
+    canvasSize.width,
+    displayNodes.length,
+    graphIndexes.maxX,
+    graphIndexes.maxY,
+    graphIndexes.minX,
+    graphIndexes.minY,
+    pan.x,
+    pan.y,
+    scale,
+  ]);
   const focusNodeId = selectedEdge ? null : hoveredNodeId ?? selectedNodeId;
   const { ancestors, lineageIds } = useMemo(() => {
     const ancestors = new Set<string>();
@@ -513,6 +631,8 @@ export function DagCanvas({
     setOpenMenuNodeId(null);
     setEditorTitle("");
     setEditorSummary("");
+    setIsAddingExistingWorkspace(false);
+    setExistingWorkspaceId("");
     setEditor({
       mode: "add",
       nodeId: null,
@@ -529,6 +649,8 @@ export function DagCanvas({
     setOpenMenuNodeId(null);
     setEditorTitle(node.title);
     setEditorSummary(node.summary_hint);
+    setIsAddingExistingWorkspace(false);
+    setExistingWorkspaceId("");
     setEditor({
       mode: "edit",
       nodeId: node.id,
@@ -542,19 +664,40 @@ export function DagCanvas({
   const handleEditorSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSavingEditor) return;
-    if (!editorTitle.trim()) {
+    const addExistingWorkspace =
+      nodeKind === "subject" &&
+      editor?.mode === "add" &&
+      isAddingExistingWorkspace;
+    if (addExistingWorkspace && !existingWorkspaceId) {
+      onToast("Choose an existing workspace to add to this curriculum map.");
+      return;
+    }
+    if (!addExistingWorkspace && !editorTitle.trim()) {
       onToast("Concept title is required.");
       return;
     }
     setIsSavingEditor(true);
     try {
       if (editor?.mode === "add") {
-        await onAddNode({
-          title: editorTitle,
-          summary: editorSummary,
-          x: editor.worldX,
-          y: editor.worldY,
-        });
+        if (addExistingWorkspace) {
+          if (!onAddExistingWorkspace) {
+            throw new Error(
+              "Adding an existing workspace is not available in this canvas."
+            );
+          }
+          await onAddExistingWorkspace(
+            existingWorkspaceId,
+            editor.worldX,
+            editor.worldY
+          );
+        } else {
+          await onAddNode({
+            title: editorTitle,
+            summary: editorSummary,
+            x: editor.worldX,
+            y: editor.worldY,
+          });
+        }
       } else if (editor?.nodeId) {
         await onEditNode(editor.nodeId, editorTitle, editorSummary);
       }
@@ -1200,7 +1343,11 @@ export function DagCanvas({
             prerequisiteCount === 0
               ? "Foundation"
               : `${prerequisiteCount} prereq${prerequisiteCount === 1 ? "" : "s"}`;
-          const progressLabel = isMastered
+          const progressLabel = nodeKind === "subject"
+            ? node.is_hydrated
+              ? "Workspace linked"
+              : "Workspace not linked"
+            : isMastered
             ? "Mastered"
             : isInProgress
               ? quizNodeIds.has(node.id)
@@ -1293,7 +1440,9 @@ export function DagCanvas({
                     )}
                   </div>
                   <span className={`mt-0.5 shrink-0 ${stateIcon}`}>
-                    {isMastered ? (
+                    {nodeKind === "subject" ? (
+                      <Layers className="h-4 w-4" />
+                    ) : isMastered ? (
                       <CheckCircle2 className="h-4 w-4" />
                     ) : isLocked ? (
                       <Lock className="h-3.5 w-3.5" />
@@ -1455,7 +1604,7 @@ export function DagCanvas({
                     className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)]"
                   >
                     <Archive className="h-3.5 w-3.5" />
-                    Archive Concept
+                    {nodeKind === "subject" ? "Remove Subject" : "Archive Concept"}
                   </button>
                 </div>
               )}
@@ -1474,40 +1623,105 @@ export function DagCanvas({
         >
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-xs font-semibold">
-              {editor.mode === "add" ? "Add concept node" : "Edit concept"}
+              {editor.mode === "add"
+                ? `Add ${nodeKind} node`
+                : `Edit ${nodeKind}`}
             </h2>
             <button
               type="button"
               onClick={() => setEditor(null)}
               className="rounded-md p-1 text-[var(--color-muted)] hover:bg-[var(--color-hover)]"
-              aria-label="Close concept editor"
+              aria-label={`Close ${nodeKind} editor`}
             >
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
-          <label className="block text-[10px] font-medium text-[var(--color-muted)]">
-            Concept Title
-            <input
-              autoFocus
-              value={editorTitle}
-              onChange={(e) => setEditorTitle(e.target.value)}
-              maxLength={120}
-              required
-              className="mt-1.5 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-canvas)] px-2.5 py-2 text-xs text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
-              placeholder="e.g. Graph traversal"
-            />
-          </label>
-          <label className="mt-3 block text-[10px] font-medium text-[var(--color-muted)]">
-            Short Summary <span className="font-normal">(optional)</span>
-            <textarea
-              value={editorSummary}
-              onChange={(e) => setEditorSummary(e.target.value)}
-              maxLength={240}
-              rows={3}
-              className="mt-1.5 w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-canvas)] px-2.5 py-2 text-xs text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
-              placeholder="What will students learn?"
-            />
-          </label>
+          {nodeKind === "subject" &&
+            editor.mode === "add" &&
+            onAddExistingWorkspace && (
+              <div className="mb-3 grid grid-cols-2 gap-1 rounded-lg bg-[var(--color-canvas)] p-1">
+                <button
+                  type="button"
+                  onClick={() => setIsAddingExistingWorkspace(false)}
+                  aria-pressed={!isAddingExistingWorkspace}
+                  className={`rounded-md px-2 py-1.5 text-[10px] font-semibold ${
+                    !isAddingExistingWorkspace
+                      ? "bg-[var(--color-panel)] text-[var(--color-ink)] shadow-sm"
+                      : "text-[var(--color-muted)]"
+                  }`}
+                >
+                  New subject
+                </button>
+                <button
+                  type="button"
+                  disabled={existingWorkspaces.length === 0}
+                  onClick={() => setIsAddingExistingWorkspace(true)}
+                  aria-pressed={isAddingExistingWorkspace}
+                  className={`rounded-md px-2 py-1.5 text-[10px] font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${
+                    isAddingExistingWorkspace
+                      ? "bg-[var(--color-panel)] text-[var(--color-ink)] shadow-sm"
+                      : "text-[var(--color-muted)]"
+                  }`}
+                >
+                  Existing workspace
+                </button>
+              </div>
+            )}
+          {nodeKind === "subject" &&
+          editor.mode === "add" &&
+          isAddingExistingWorkspace ? (
+            <label className="block text-[10px] font-medium text-[var(--color-muted)]">
+              Workspace not yet in this map
+              <select
+                autoFocus
+                required
+                value={existingWorkspaceId}
+                onChange={(event) =>
+                  setExistingWorkspaceId(event.target.value)
+                }
+                className="mt-1.5 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-canvas)] px-2.5 py-2 text-xs text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
+              >
+                <option value="" disabled>
+                  Select workspace
+                </option>
+                {existingWorkspaces.map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>
+                    {workspace.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <>
+              <label className="block text-[10px] font-medium text-[var(--color-muted)]">
+                {nodeKind === "subject" ? "Subject Title" : "Concept Title"}
+                <input
+                  autoFocus
+                  value={editorTitle}
+                  onChange={(e) => setEditorTitle(e.target.value)}
+                  maxLength={120}
+                  required
+                  className="mt-1.5 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-canvas)] px-2.5 py-2 text-xs text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
+                  placeholder={
+                    nodeKind === "subject"
+                      ? "e.g. Data structures"
+                      : "e.g. Graph traversal"
+                  }
+                />
+              </label>
+              <label className="mt-3 block text-[10px] font-medium text-[var(--color-muted)]">
+                Short Summary <span className="font-normal">(optional)</span>
+                <textarea
+                  value={editorSummary}
+                  onChange={(e) => setEditorSummary(e.target.value)}
+                  maxLength={240}
+                  rows={3}
+                  className="mt-1.5 w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-canvas)] px-2.5 py-2 text-xs text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
+                  placeholder="What will students learn?"
+                />
+              </label>
+            </>
+          )}
           <div className="mt-3 flex justify-end gap-2">
             <button
               type="button"
@@ -1524,7 +1738,9 @@ export function DagCanvas({
               {isSavingEditor
                 ? "Saving…"
                 : editor.mode === "add"
-                  ? "Create Node"
+                  ? isAddingExistingWorkspace
+                    ? "Add workspace"
+                    : `Create ${nodeKind === "subject" ? "Subject" : "Node"}`
                   : "Save Changes"}
             </button>
           </div>
@@ -1533,10 +1749,14 @@ export function DagCanvas({
 
       {confirmDeleteNode && (
         <ConfirmDeleteModal
-          mode="archive"
-          title="Archive concept?"
+          mode={nodeKind === "subject" ? "delete" : "archive"}
+          title={nodeKind === "subject" ? "Remove subject?" : "Archive concept?"}
           itemName={confirmDeleteNode.title}
-          description="This removes the concept from the active graph but keeps its lesson, quiz, flashcards, worked examples, and prerequisite connections in this workspace’s Archive. Restore it later or permanently delete it from Archive."
+          description={
+            nodeKind === "subject"
+              ? "This removes the subject from this curriculum map and deletes its prerequisite connections. Its linked workspace will not be deleted."
+              : "This removes the concept from the active graph but keeps its lesson, quiz, flashcards, worked examples, and prerequisite connections in this workspace’s Archive. Restore it later or permanently delete it from Archive."
+          }
           impactItems={[
             {
               label: "Dependent prerequisite edges",
@@ -1547,17 +1767,20 @@ export function DagCanvas({
               ).length,
             },
             {
-              label: "Hydrated lesson",
+              label: nodeKind === "subject" ? "Linked workspace" : "Hydrated lesson",
               value: confirmDeleteNode.is_hydrated === 1 ? "Yes" : "No",
             },
           ]}
-          deleteLabel="Archive concept"
+          deleteLabel={nodeKind === "subject" ? "Remove subject" : "Archive concept"}
           onCancel={() => setConfirmDeleteNode(null)}
           onConfirm={() => deleteNode(confirmDeleteNode)}
           onError={showError}
         />
       )}
-      {showArchivedConcepts && workspaceId && (
+      {showArchivedConcepts &&
+        workspaceId &&
+        onRestoreArchivedNode &&
+        onPermanentlyDeleteArchivedNode && (
         <ArchivedConceptsDialog
           workspaceId={workspaceId}
           onRestore={onRestoreArchivedNode}
@@ -1571,14 +1794,15 @@ export function DagCanvas({
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6">
           <div className="pointer-events-auto max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)]/95 p-6 text-center shadow-[0_12px_36px_rgba(31,43,51,0.12)] backdrop-blur">
             <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">
-              Blank workspace
+              {nodeKind === "subject" ? "Blank curriculum map" : "Blank workspace"}
             </p>
             <h2 className="mt-2 text-base font-semibold text-[var(--color-ink)]">
-              Add your first concept
+              {nodeKind === "subject" ? "Add your first subject" : "Add your first concept"}
             </h2>
             <p className="mt-1.5 text-xs leading-5 text-[var(--color-muted)]">
-              Build the map yourself. Add concepts, then connect each prerequisite
-              from its bottom port to the concept that depends on it.
+              {nodeKind === "subject"
+                ? "Add subjects and connect each prerequisite from its bottom port to the subject that depends on it."
+                : "Build the map yourself. Add concepts, then connect each prerequisite from its bottom port to the concept that depends on it."}
             </p>
             <button
               type="button"
@@ -1592,7 +1816,7 @@ export function DagCanvas({
               }}
               className="mt-4 rounded-lg bg-[var(--color-accent-button)] px-4 py-2 text-xs font-semibold text-white transition hover:brightness-95"
             >
-              Add first concept
+              {nodeKind === "subject" ? "Add first subject" : "Add first concept"}
             </button>
             <p className="mt-2 text-[10px] text-[var(--color-muted)]">
               You can also use Add Node in the canvas toolbar.
@@ -1625,6 +1849,31 @@ export function DagCanvas({
         <div
           className="flex items-center gap-1 rounded-lg bg-[#f2f1ed] p-0.5"
         >
+          {showHistoryControls && (
+            <>
+              <button
+                type="button"
+                disabled={!canUndo}
+                onClick={() => void runCanvasAction(onUndo)}
+                className="tactile-control rounded-lg p-1.5 text-slate-600 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+                title="Undo (Ctrl+Z)"
+                aria-label="Undo"
+              >
+                <Undo2 className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                disabled={!canRedo}
+                onClick={() => void runCanvasAction(onRedo)}
+                className="tactile-control rounded-lg p-1.5 text-slate-600 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+                title="Redo (Ctrl+Y)"
+                aria-label="Redo"
+              >
+                <Redo2 className="h-4 w-4" />
+              </button>
+              <div className="mx-1 h-4 w-px bg-[#e6e3dd]" />
+            </>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -1745,16 +1994,18 @@ export function DagCanvas({
                 </button>
               </>
             )}
-            <button
-              type="button"
-              disabled={!workspaceId}
-              onClick={() => setShowArchivedConcepts(true)}
-              className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-              title="View archived concepts"
-            >
-              <Archive className="h-4 w-4" />
-              Archived concepts
-            </button>
+            {showArchiveControls && (
+              <button
+                type="button"
+                disabled={!workspaceId}
+                onClick={() => setShowArchivedConcepts(true)}
+                className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                title="View archived concepts"
+              >
+                <Archive className="h-4 w-4" />
+                Archived concepts
+              </button>
+            )}
           </div>
         </details>
         <button
@@ -1780,6 +2031,115 @@ export function DagCanvas({
           Hover to trace lineage
         </span>
       </div>
+      {minimap?.isOffscreen && (
+        <div
+          data-canvas-toolbar
+          className="absolute right-4 top-14 z-30 w-[172px] rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)]/95 p-2 shadow-[0_8px_24px_rgba(35,51,60,0.16)] backdrop-blur"
+        >
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <span className="truncate text-[10px] font-semibold text-[var(--color-ink)]">
+              DAG outside view
+            </span>
+            <button
+              type="button"
+              onClick={fitGraph}
+              title="Fit the full DAG to the canvas"
+              aria-label="Find and fit the full DAG"
+              className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--color-accent-soft)] px-2 py-1 text-[9px] font-semibold text-[var(--color-accent)] hover:brightness-95"
+            >
+              <Compass
+                className="h-3 w-3"
+                style={{ transform: `rotate(${minimap.direction}deg)` }}
+              />
+              Find
+            </button>
+          </div>
+          <button
+            type="button"
+            aria-label="Navigate to a location in the DAG overview"
+            title="Click the overview to navigate"
+            className="block h-[88px] w-full overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-canvas)]"
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              const mapX =
+                ((event.clientX - rect.left) / rect.width) * minimap.width;
+              const mapY =
+                ((event.clientY - rect.top) / rect.height) * minimap.height;
+              const worldX = Math.max(
+                graphIndexes.minX,
+                Math.min(
+                  graphIndexes.maxX,
+                  graphIndexes.minX +
+                    (mapX - minimap.offsetX) / minimap.mapScale
+                )
+              );
+              const worldY = Math.max(
+                graphIndexes.minY,
+                Math.min(
+                  graphIndexes.maxY,
+                  graphIndexes.minY +
+                    (mapY - minimap.offsetY) / minimap.mapScale
+                )
+              );
+              const nextPan = {
+                x: canvasSize.width / 2 - worldX * scale,
+                y: canvasSize.height / 2 - worldY * scale,
+              };
+              animateCamera(350);
+              panRef.current = nextPan;
+              setPan(nextPan);
+              updateDotGridCamera(nextPan, scale);
+            }}
+          >
+            <svg
+              aria-hidden="true"
+              viewBox={`0 0 ${minimap.width} ${minimap.height}`}
+              className="h-full w-full"
+            >
+              {edges.map((edge) => {
+                const source = graphIndexes.nodeMap.get(edge.source_id);
+                const target = graphIndexes.nodeMap.get(edge.target_id);
+                if (!source || !target) return null;
+                return (
+                  <line
+                    key={`${edge.source_id}-${edge.target_id}`}
+                    x1={minimap.mapX(source.pos_x + nodeWidth / 2)}
+                    y1={minimap.mapY(source.pos_y + nodeHeight / 2)}
+                    x2={minimap.mapX(target.pos_x + nodeWidth / 2)}
+                    y2={minimap.mapY(target.pos_y + nodeHeight / 2)}
+                    stroke="var(--color-edge-muted)"
+                    strokeWidth="1.5"
+                  />
+                );
+              })}
+              {displayNodes.map((node) => (
+                <rect
+                  key={node.id}
+                  x={minimap.mapX(node.pos_x)}
+                  y={minimap.mapY(node.pos_y)}
+                  width={Math.max(2, nodeWidth * minimap.mapScale)}
+                  height={Math.max(2, nodeHeight * minimap.mapScale)}
+                  rx="1"
+                  fill="var(--color-accent)"
+                />
+              ))}
+              <rect
+                x={minimap.bounds.left}
+                y={minimap.bounds.top}
+                width={Math.max(3, minimap.bounds.right - minimap.bounds.left)}
+                height={Math.max(
+                  3,
+                  minimap.bounds.bottom - minimap.bounds.top
+                )}
+                fill="var(--color-accent-soft)"
+                fillOpacity="0.35"
+                stroke="var(--color-accent)"
+                strokeWidth="1.5"
+              />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

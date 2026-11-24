@@ -17,6 +17,7 @@ import {
   isLessonImageTitleRelevant,
   replaceLessonImageRequest,
 } from "./lessonImageMarkers";
+import { deduplicateCurriculumEdges } from "../utils/curriculumDag";
 import { validateMermaidDiagram } from "../utils/mermaid";
 import { searchVaultFts } from "../db/repositories/documentRepo";
 import {
@@ -31,6 +32,7 @@ import {
 } from "../engine/dagTopology";
 import { computeSugiyamaLayout } from "../engine/sugiyamaLayout";
 import type {
+  CurriculumTreeNode,
   Flashcard,
   GraphEdge,
   GraphNode,
@@ -68,6 +70,137 @@ export interface CurriculumProgress {
 export interface CurriculumSourceDocument {
   name: string;
   text: string;
+}
+
+export interface CurriculumTreeDraft {
+  title: string;
+  nodes: Array<Pick<CurriculumTreeNode, "id" | "title" | "summary_hint" | "layer_index">>;
+  edges: Array<{ source_id: string; target_id: string }>;
+}
+
+export async function generateCurriculumTreeDraft(
+  topicPrompt: string,
+  sourceDocument?: CurriculumSourceDocument
+): Promise<CurriculumTreeDraft> {
+  const prompt = topicPrompt.trim();
+  if (!prompt && !sourceDocument) {
+    throw new Error("Describe the curriculum or add a syllabus document.");
+  }
+  const vaultHits = sourceDocument ? [] : await searchVaultFts(prompt, 8);
+  const sourceText = sourceDocument
+    ? minifyContextText(sourceDocument.text).slice(0, 12_000)
+    : vaultHits
+        .map((hit, index) =>
+          `[Source ${index + 1}: ${hit.file_name}${hit.heading ? ` > ${hit.heading}` : ""}]\n${hit.content.slice(0, 1_000)}`
+        )
+        .join("\n\n---\n\n");
+  const response = await generateGeminiJson<{
+    title?: unknown;
+    subjects?: unknown;
+    prerequisites?: unknown;
+  }>({
+    tier: "synthesis",
+    temperature: 0.1,
+    maxOutputTokens: 4096,
+    systemInstruction:
+      "Create a curriculum map of 4-20 distinct subjects (courses), not lesson concepts. The title identifies the whole program or year/semester. Subject names should match the user's requested scope. Add prerequisite edges only when the curriculum or well-established course progression supports them; a single-semester curriculum may have no edges. Edges point from prerequisite subject to dependent subject. Return only JSON.",
+    userPrompt: `Curriculum request: ${prompt || sourceDocument?.name}\n${sourceDocument ? `Uploaded syllabus: ${sourceDocument.name}` : "Use the user's local vault excerpts when relevant."}\nSource material:\n${sourceText || "No matching local notes were found. Use the request's stated scope and avoid guessing unsupported prerequisite relationships."}`,
+    jsonSchema: {
+      type: "OBJECT",
+      properties: {
+        title: { type: "STRING" },
+        subjects: {
+          type: "ARRAY",
+          items: {
+            type: "OBJECT",
+            properties: {
+              id: { type: "STRING" },
+              title: { type: "STRING" },
+              summary: { type: "STRING" },
+            },
+            required: ["id", "title", "summary"],
+          },
+        },
+        prerequisites: {
+          type: "ARRAY",
+          items: {
+            type: "ARRAY",
+            items: { type: "STRING" },
+          },
+        },
+      },
+      required: ["title", "subjects", "prerequisites"],
+    },
+  });
+  if (!Array.isArray(response.subjects) || response.subjects.length === 0) {
+    throw new Error("The generated curriculum map contains no subjects.");
+  }
+  const idMap = new Map<string, string>();
+  const nodes = response.subjects.flatMap((subject) => {
+    if (!subject || typeof subject !== "object") return [];
+    const item = subject as Record<string, unknown>;
+    if (
+      typeof item.id !== "string" ||
+      typeof item.title !== "string" ||
+      !item.title.trim()
+    ) {
+      return [];
+    }
+    const id = crypto.randomUUID();
+    idMap.set(item.id, id);
+    return [{
+      id,
+      title: item.title.trim().slice(0, 120),
+      summary_hint:
+        typeof item.summary === "string" ? item.summary.trim().slice(0, 500) : "",
+      layer_index: 0,
+    }];
+  });
+  if (nodes.length !== response.subjects.length) {
+    throw new Error("The generated curriculum map contains an invalid subject.");
+  }
+  const rawEdges = Array.isArray(response.prerequisites)
+    ? response.prerequisites
+    : [];
+  const parsedEdges = rawEdges.flatMap((rawEdge) => {
+    if (!Array.isArray(rawEdge) || rawEdge.length !== 2) return [];
+    const source_id = idMap.get(String(rawEdge[0]));
+    const target_id = idMap.get(String(rawEdge[1]));
+    return source_id && target_id ? [{ source_id, target_id }] : [];
+  });
+  if (parsedEdges.length !== rawEdges.length) {
+    throw new Error("The generated curriculum map contains an invalid prerequisite.");
+  }
+  if (parsedEdges.some((edge) => edge.source_id === edge.target_id)) {
+    throw new Error("A subject cannot be its own prerequisite.");
+  }
+  const edges = deduplicateCurriculumEdges(parsedEdges);
+  const validation = validateAndLayerDag(
+    "curriculum-tree",
+    nodes.map(({ id, title, summary_hint }) => ({
+      id,
+      title,
+      summary_hint,
+    })),
+    edges
+  );
+  if (
+    validation.removedCycleEdges.length > 0 ||
+    validation.validEdges.length !== edges.length
+  ) {
+    throw new Error("The generated prerequisites form a cycle. Please try again.");
+  }
+  return {
+    title:
+      typeof response.title === "string" && response.title.trim()
+        ? response.title.trim().slice(0, 120)
+        : prompt.slice(0, 120),
+    nodes: nodes.map((node) => ({
+      ...node,
+      layer_index: validation.layerByNode.get(node.id) ?? 0,
+    })),
+    edges,
+  };
 }
 
 interface CommonsImage {
@@ -780,7 +913,9 @@ export async function hydrateNodeContent(
 
 export async function generateLessonFlashcards(
   node: GraphNode,
-  lessonMarkdown: string
+  lessonMarkdown: string,
+  focusTopic = "",
+  vaultContext = ""
 ): Promise<Flashcard[]> {
   if (!lessonMarkdown.trim()) {
     throw new Error("Generate the lesson before creating its flashcards.");
@@ -802,8 +937,8 @@ export async function generateLessonFlashcards(
     temperature: 0,
     maxOutputTokens: 700,
     systemInstruction:
-      "Generate four concise, high-yield recall flashcards from the lesson. Return a flat JSON array of objects with string front and back fields only.",
-    userPrompt: `Concept: ${node.title}\nScope: ${node.summary_hint}\nLesson:\n${lessonMarkdown.slice(0, 9000)}`,
+      "Generate four concise, high-yield recall flashcards grounded in the lesson and relevant local notes. Do not invent details beyond those sources. If a focus topic is provided, prioritize it. Return a flat JSON array of objects with string front and back fields only.",
+    userPrompt: `Concept: ${node.title}\nScope: ${node.summary_hint}\nFocus topic: ${focusTopic.trim() || "Choose high-yield material from the lesson"}\nLesson:\n${lessonMarkdown.slice(0, 9000)}\nRelevant local notes:\n${vaultContext || "No matching vault excerpts; rely on the lesson only."}`,
     jsonSchema: flashcardSchema,
   });
   if (!Array.isArray(response) || response.length === 0) {

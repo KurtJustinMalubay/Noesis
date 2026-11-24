@@ -787,9 +787,9 @@ async function run(): Promise<void> {
     });
     const migratedSettings = loadAiSettings();
     assert(
-      migratedSettings.fastModel === "gemini-4-hydrogen" &&
+      migratedSettings.fastModel === "gemini-3.5-flash-lite" &&
         migratedSettings.synthesisModel === "gemini-3.5-flash-lite",
-      "deprecated saved model preferences should migrate to active fast defaults"
+      "deprecated saved model preferences should migrate to the Flash-Lite default"
     );
     console.log("✓ Gemini SSE chunking and recovery tests passed!");
   } finally {

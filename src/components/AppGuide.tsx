@@ -4,16 +4,41 @@ import { useDelayedUnmount } from "./AnimatedPresence";
 
 const STEPS = [
   {
-    target: "settings",
+    target: "workspace-tab",
+    view: "graph",
     title: "Welcome",
-    description: "Set up Noesis to look and work the way you like.",
+    description: "Take a quick tour of the main areas in Noesis.",
     points: [
-      "Choose an AI service in Settings → AI. Follow the on-screen steps to connect it.",
-      "Choose a theme and font in Appearance & Themes. Set lesson length in AI & Speed.",
+      "Use Next to move through the guide, or click a highlighted control to try it.",
+      "The tour will take you to the relevant page as you go.",
+    ],
+  },
+  {
+    target: "settings-appearance",
+    view: "graph",
+    settingsSection: "canvas",
+    title: "Personalize Noesis",
+    description:
+      "Choose your theme, font, and reading scale in Appearance & Themes.",
+    points: [
+      "Try a setting, then choose Save preferences to keep it. Cancel leaves your saved settings unchanged.",
+    ],
+  },
+  {
+    target: "settings-ai",
+    view: "graph",
+    settingsSection: "ai",
+    title: "Set up AI",
+    description:
+      "Choose your provider and add a key or local endpoint in AI & Speed.",
+    points: [
+      "Gemini 3.5 Flash Lite is a good default for free accounts.",
+      "Your API key is stored locally. Use Test to check the connection before saving.",
     ],
   },
   {
     target: "new-dag",
+    view: "graph",
     title: "Create a workspace",
     description:
       "A workspace is where you organize and study a subject.",
@@ -24,6 +49,7 @@ const STEPS = [
   },
   {
     target: "canvas",
+    view: "graph",
     title: "Organize your topics",
     description:
       "Arrange topics and show how they connect.",
@@ -35,6 +61,7 @@ const STEPS = [
   },
   {
     target: "canvas",
+    view: "graph",
     title: "Open a lesson",
     description:
       "Each topic has a lesson to help you learn about it.",
@@ -44,10 +71,34 @@ const STEPS = [
     ],
   },
   {
-    target: "tutor",
-    title: "Practice and get help",
+    target: "curriculum-tab",
+    view: "graph",
+    advanceOnView: "curriculum",
+    title: "Switch between work modes",
     description:
-      "Check what you’ve learned and ask questions when you need help.",
+      "Use the header tabs to move between Workspaces and Curriculum. The sidebar updates to match the selected mode.",
+    points: [
+      "Click Curriculum in the header to explore it. The guide will continue there automatically.",
+      "Click Workspaces to return to your learning graphs.",
+    ],
+  },
+  {
+    target: "new-map",
+    view: "curriculum",
+    title: "Explore curriculum maps",
+    description:
+      "Curriculum maps connect subjects and prerequisites across semesters or years.",
+    points: [
+      "Create a map from the sidebar for a semester, year, or full program.",
+      "Add existing workspaces to subjects so each course keeps its own lessons and study data.",
+      "Use Archive at the bottom of the sidebar to restore maps later.",
+    ],
+  },
+  {
+    target: "tutor",
+    view: "graph",
+    title: "Practice and get help",
+    description: "Check what you’ve learned and ask questions when you need help.",
     points: [
       "Take a quiz to check your understanding. Passing a quiz opens the next topics.",
       "Open Tutor to ask a question. Choose Socratic Tutor for hints or AI Assistant for direct answers.",
@@ -56,6 +107,7 @@ const STEPS = [
   },
   {
     target: "guide",
+    view: "graph",
     title: "Quick shortcuts",
     description: "Use these keys to move around faster.",
     shortcuts: [
@@ -69,14 +121,24 @@ const STEPS = [
 
 interface AppGuideProps {
   isOpen: boolean;
+  currentView: "graph" | "curriculum" | "excalidraw";
+  onNavigate: (view: "graph" | "curriculum") => void;
+  onOpenSettingsSection: (section: SettingsTourSection) => void;
+  onCloseSettings: () => void;
   flashcardsEnabled: boolean;
   onClose: () => void;
   showOnStartup: boolean;
   onShowOnStartupChange: (show: boolean) => void;
 }
 
+export type SettingsTourSection = "canvas" | "ai";
+
 export function AppGuide({
   isOpen,
+  currentView,
+  onNavigate,
+  onOpenSettingsSection,
+  onCloseSettings,
   flashcardsEnabled,
   onClose,
   showOnStartup,
@@ -92,6 +154,8 @@ export function AppGuide({
   const onCloseRef = useRef(onClose);
   const { mounted, visible } = useDelayedUnmount(isOpen, 170);
   const step = STEPS[stepIndex];
+  const stepAdvanceOnView =
+    "advanceOnView" in step ? step.advanceOnView : undefined;
   const visiblePoints =
     "points" in step
       ? step.points.filter(
@@ -104,9 +168,34 @@ export function AppGuide({
 
   onCloseRef.current = onClose;
 
+  const navigateToStep = (nextIndex: number) => {
+    const boundedIndex = Math.max(0, Math.min(STEPS.length - 1, nextIndex));
+    const previousStep = STEPS[stepIndex];
+    const nextStep = STEPS[boundedIndex];
+    setStepIndex(boundedIndex);
+    onNavigate(nextStep.view);
+    if ("settingsSection" in nextStep) {
+      onOpenSettingsSection(nextStep.settingsSection);
+    } else if ("settingsSection" in previousStep) {
+      onCloseSettings();
+    }
+  };
+
   useEffect(() => {
-    if (isOpen) setStepIndex(0);
-  }, [isOpen]);
+    if (!isOpen) return;
+    setStepIndex(0);
+    onNavigate(STEPS[0].view);
+  }, [isOpen, onNavigate]);
+
+  useEffect(() => {
+    if (isOpen && stepAdvanceOnView === currentView) {
+      setStepIndex((current) =>
+        current === stepIndex
+          ? Math.min(STEPS.length - 1, current + 1)
+          : current
+      );
+    }
+  }, [currentView, isOpen, stepAdvanceOnView, stepIndex]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -143,14 +232,22 @@ export function AppGuide({
     };
 
     updateTarget();
+    const observer = new MutationObserver(() => {
+      if (document.querySelector(`[data-guide="${step.target}"]`)) {
+        updateTarget();
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("resize", updateTarget);
     window.addEventListener("scroll", updateTarget, true);
     return () => {
       window.removeEventListener("resize", updateTarget);
       window.removeEventListener("scroll", updateTarget, true);
+      observer.disconnect();
       animationFrames.current.forEach((frame) => cancelAnimationFrame(frame));
     };
-  }, [isOpen, step.target]);
+  }, [currentView, isOpen, step.target]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -168,15 +265,15 @@ export function AppGuide({
         return;
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
-        setStepIndex((current) => Math.max(0, current - 1));
+        navigateToStep(stepIndex - 1);
       } else if (event.key === "ArrowRight") {
         event.preventDefault();
-        setStepIndex((current) => Math.min(STEPS.length - 1, current + 1));
+        navigateToStep(stepIndex + 1);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen]);
+  }, [isOpen, onNavigate, stepIndex]);
 
   if (!mounted) return null;
 
@@ -234,7 +331,7 @@ export function AppGuide({
             <button
               key={item.title}
               type="button"
-              onClick={() => setStepIndex(index)}
+              onClick={() => navigateToStep(index)}
               aria-label={`Go to step ${index + 1}: ${item.title}`}
               aria-current={index === stepIndex ? "step" : undefined}
               className={`h-1.5 min-w-0 flex-1 rounded-full transition-colors ${
@@ -311,7 +408,7 @@ export function AppGuide({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setStepIndex((current) => Math.max(0, current - 1))}
+              onClick={() => navigateToStep(stepIndex - 1)}
               disabled={stepIndex === 0}
               className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2 text-[var(--text-primary)] transition hover:bg-[var(--accent-soft)] disabled:cursor-not-allowed disabled:opacity-40"
               aria-label="Previous guide step"
@@ -323,7 +420,7 @@ export function AppGuide({
               onClick={() =>
                 stepIndex === STEPS.length - 1
                   ? onClose()
-                  : setStepIndex((current) => current + 1)
+                  : navigateToStep(stepIndex + 1)
               }
               className="flex items-center gap-1.5 rounded-lg bg-[var(--accent-primary)] px-3 py-2 text-[11px] font-semibold text-[var(--bg-surface)] transition hover:brightness-95"
             >

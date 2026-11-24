@@ -21,6 +21,15 @@ assert(
   loadUserPreferences().showAppTutorial === false,
   "new users should not be forced into the startup guide"
 );
+assert(
+  loadUserPreferences().reduceMotion === DEFAULT_PREFERENCES.reduceMotion,
+  "new users should use the default motion preference"
+);
+storedPreferences = JSON.stringify({ reduceMotion: true });
+assert(
+  loadUserPreferences().reduceMotion,
+  "an explicit reduced-motion preference should be preserved"
+);
 storedPreferences = JSON.stringify({ showAppTutorial: true });
 assert(
   loadUserPreferences().showAppTutorial === true,

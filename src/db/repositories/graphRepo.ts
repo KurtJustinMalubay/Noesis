@@ -314,7 +314,7 @@ export async function insertGraphEdge(edge: GraphEdge): Promise<void> {
   const db = await getDb();
   await serializeDbWrite(() =>
     db.execute(
-      "INSERT INTO edges (workspace_id, source_id, target_id) VALUES ($1, $2, $3)",
+      "INSERT OR IGNORE INTO edges (workspace_id, source_id, target_id) VALUES ($1, $2, $3)",
       [edge.workspace_id, edge.source_id, edge.target_id]
     )
   );
@@ -332,6 +332,115 @@ export async function deleteGraphEdge(
       [workspaceId, sourceId, targetId]
     )
   );
+}
+
+export async function restoreWorkspaceGraphSnapshot(
+  workspaceId: string,
+  targetNodes: GraphNode[],
+  targetEdges: GraphEdge[],
+  currentNodes: GraphNode[],
+  currentEdges: GraphEdge[]
+): Promise<void> {
+  const db = await getDb();
+  await serializeDbWrite(async () => {
+    await db.execute("BEGIN");
+    try {
+      const targetIds = new Set(targetNodes.map((node) => node.id));
+      const currentIds = new Set(currentNodes.map((node) => node.id));
+      const now = Date.now();
+
+      for (const node of targetNodes) {
+        if (!currentIds.has(node.id)) {
+          const existing = await db.select<
+            Array<{ id: string; archived_at: number | null }>
+          >("SELECT id, archived_at FROM nodes WHERE id = $1", [node.id]);
+          if (existing[0]) {
+            await db.execute(
+              "UPDATE nodes SET archived_at = NULL WHERE id = $1 AND workspace_id = $2",
+              [node.id, workspaceId]
+            );
+          } else {
+            await db.execute(
+              `INSERT INTO nodes
+                (id, workspace_id, title, summary_hint, status, mastery_score,
+                 in_degree_unmastered, layer_index, pos_x, pos_y, is_hydrated,
+                 lesson_markdown, mermaid_diagram, source_citations, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+              [
+                node.id,
+                workspaceId,
+                node.title,
+                node.summary_hint,
+                node.status,
+                node.mastery_score,
+                node.in_degree_unmastered,
+                node.layer_index,
+                node.pos_x,
+                node.pos_y,
+                node.is_hydrated,
+                node.lesson_markdown,
+                node.mermaid_diagram,
+                node.source_citations,
+                node.updated_at,
+              ]
+            );
+          }
+        }
+        await db.execute(
+          `UPDATE nodes
+           SET title = $1, summary_hint = $2, status = $3,
+               mastery_score = $4, in_degree_unmastered = $5,
+               layer_index = $6, pos_x = $7, pos_y = $8,
+               updated_at = $9
+           WHERE id = $10 AND workspace_id = $11`,
+          [
+            node.title,
+            node.summary_hint,
+            node.status,
+            node.mastery_score,
+            node.in_degree_unmastered,
+            node.layer_index,
+            node.pos_x,
+            node.pos_y,
+            now,
+            node.id,
+            workspaceId,
+          ]
+        );
+      }
+
+      for (const node of currentNodes) {
+        if (!targetIds.has(node.id)) {
+          await db.execute(
+            "UPDATE nodes SET archived_at = $1, updated_at = $1 WHERE id = $2 AND workspace_id = $3",
+            [now, node.id, workspaceId]
+          );
+        }
+      }
+
+      const targetEdgeKeys = new Set(
+        targetEdges.map((edge) => `${edge.source_id}\u0000${edge.target_id}`)
+      );
+      for (const edge of currentEdges) {
+        if (!targetEdgeKeys.has(`${edge.source_id}\u0000${edge.target_id}`)) {
+          await db.execute(
+            "DELETE FROM edges WHERE workspace_id = $1 AND source_id = $2 AND target_id = $3",
+            [workspaceId, edge.source_id, edge.target_id]
+          );
+        }
+      }
+      for (const edge of targetEdges) {
+        await db.execute(
+          "INSERT OR IGNORE INTO edges (workspace_id, source_id, target_id) VALUES ($1, $2, $3)",
+          [workspaceId, edge.source_id, edge.target_id]
+        );
+      }
+      await db.execute("COMMIT");
+    } catch (error) {
+      await db.execute("ROLLBACK");
+      throw error;
+    }
+  });
 }
 
 export async function updateGraphNodeState(nodes: GraphNode[]): Promise<void> {

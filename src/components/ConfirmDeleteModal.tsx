@@ -14,6 +14,8 @@ interface ConfirmDeleteModalProps {
   impactItems?: DeleteImpactItem[];
   mode?: "archive" | "delete";
   deleteLabel?: string;
+  confirmationPhrase?: string;
+  children?: ReactNode;
   onCancel: () => void;
   onConfirm: () => Promise<void>;
   onError: (error: unknown) => void;
@@ -26,11 +28,14 @@ export function ConfirmDeleteModal({
   impactItems = [],
   mode = "delete",
   deleteLabel = "Delete",
+  confirmationPhrase,
+  children,
   onCancel,
   onConfirm,
   onError,
 }: ConfirmDeleteModalProps) {
   const [isDeleting, setIsDeleting] = useState(false);
+  const [enteredPhrase, setEnteredPhrase] = useState("");
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const isDeletingRef = useRef(false);
@@ -77,7 +82,12 @@ export function ConfirmDeleteModal({
   }, []);
 
   const handleConfirm = async () => {
-    if (isDeletingRef.current) return;
+    if (
+      isDeletingRef.current ||
+      (confirmationPhrase !== undefined && enteredPhrase !== confirmationPhrase)
+    ) {
+      return;
+    }
     isDeletingRef.current = true;
     setIsDeleting(true);
     try {
@@ -102,6 +112,7 @@ export function ConfirmDeleteModal({
       <div
         ref={dialogRef}
         role="alertdialog"
+        data-confirm-delete
         aria-modal="true"
         aria-labelledby="confirm-delete-title"
         aria-describedby="confirm-delete-description"
@@ -161,6 +172,21 @@ export function ConfirmDeleteModal({
           </dl>
         )}
 
+        {children}
+
+        {confirmationPhrase !== undefined && (
+          <label className="mt-4 block text-xs text-[var(--text-secondary)]">
+            Type <strong className="text-[var(--text-primary)]">{confirmationPhrase}</strong> to confirm.
+            <input
+              autoComplete="off"
+              value={enteredPhrase}
+              onChange={(event) => setEnteredPhrase(event.target.value)}
+              aria-label={`Type ${confirmationPhrase} to confirm`}
+              className="mt-2 w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-3 py-2 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent-primary)]"
+            />
+          </label>
+        )}
+
         <div className="mt-5 flex items-center justify-end gap-2">
           <button
             ref={cancelButtonRef}
@@ -176,7 +202,11 @@ export function ConfirmDeleteModal({
           <button
             type="button"
             onClick={() => void handleConfirm()}
-            disabled={isDeleting}
+            disabled={
+              isDeleting ||
+              (confirmationPhrase !== undefined &&
+                enteredPhrase !== confirmationPhrase)
+            }
             className={`inline-flex min-w-[92px] items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold text-white transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70 ${
               mode === "archive"
                 ? "bg-[var(--color-accent-button)] hover:brightness-95 focus-visible:ring-[var(--color-accent)]"

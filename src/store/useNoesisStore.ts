@@ -31,6 +31,7 @@ import {
   insertConceptNode,
   insertGraphEdge,
   permanentlyDeleteArchivedConceptNode as permanentlyDeleteArchivedConceptNodeRecord,
+  restoreWorkspaceGraphSnapshot,
   restoreArchivedConceptNode as restoreArchivedConceptNodeRecord,
   updateConceptNode,
   updateGraphNodeState,
@@ -53,6 +54,7 @@ import {
 import {
   deleteDocument,
   listDocuments,
+  searchVaultFts,
   type StoredDocument,
 } from "../db/repositories/documentRepo";
 import {
@@ -107,6 +109,34 @@ export type ActiveModal =
   | "completion"
   | "new_workspace";
 
+interface GraphSnapshot {
+  workspaceId: string;
+  layoutMode: CanvasLayoutMode;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+function createGraphSnapshot(
+  workspaceId: string,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+  layoutMode: CanvasLayoutMode
+): GraphSnapshot {
+  return {
+    workspaceId,
+    layoutMode,
+    nodes: nodes.map((node) => ({ ...node })),
+    edges: edges.map((edge) => ({ ...edge })),
+  };
+}
+
+function appendGraphSnapshot(
+  history: GraphSnapshot[],
+  snapshot: GraphSnapshot
+): GraphSnapshot[] {
+  return [...history, snapshot].slice(-10);
+}
+
 let workspaceSelectionGeneration = 0;
 
 function areFlashcardsEnabled(): boolean {
@@ -119,12 +149,15 @@ interface NoesisState {
   // Core entities
   workspaces: Workspace[];
   archivedWorkspaces: Workspace[];
+  workspaceDeletionRevision: number;
   workspaceProgress: Record<string, WorkspaceProgressSummary>;
   activeWorkspaceId: string | null;
   nodes: GraphNode[];
   nodeIndex: Map<string, number>;
   edges: GraphEdge[];
   selectedNodeId: string | null;
+  undoStack: GraphSnapshot[];
+  redoStack: GraphSnapshot[];
   dueCards: DueFlashcard[];
   documents: StoredDocument[];
 
@@ -161,11 +194,12 @@ interface NoesisState {
   generateNewCurriculum: (
     topicPrompt: string,
     sourceDocument?: CurriculumSourceDocument
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   cancelCurriculumGeneration: () => void;
   archiveWorkspace: (workspaceId: string) => Promise<void>;
   restoreWorkspace: (workspaceId: string) => Promise<void>;
   permanentlyDeleteWorkspace: (workspaceId: string) => Promise<void>;
+  reconcileDeletedWorkspaces: (workspaceIds: string[]) => Promise<void>;
   setCanvasLayoutMode: (mode: CanvasLayoutMode) => Promise<void>;
   moveGraphNode: (nodeId: string, x: number, y: number) => Promise<void>;
   realignGraphGrid: () => Promise<void>;
@@ -191,9 +225,15 @@ interface NoesisState {
   ) => Promise<void>;
   connectConceptNodes: (sourceId: string, targetId: string) => Promise<void>;
   disconnectConceptNodes: (sourceId: string, targetId: string) => Promise<void>;
+  undoGraph: () => Promise<void>;
+  redoGraph: () => Promise<void>;
   selectNode: (nodeId: string | null) => Promise<void>;
   regenerateNodeLesson: (nodeId: string) => Promise<void>;
   generateNodeFlashcards: (nodeId: string) => Promise<void>;
+  generateFlashcardsForTopic: (
+    nodeId: string,
+    topic: string
+  ) => Promise<WorkspaceFlashcard[]>;
   markNodeMastered: (nodeId: string, score?: number) => Promise<void>;
   openDiagnosticForNode: (nodeId: string) => Promise<void>;
   configureDiagnosticForNode: (nodeId: string) => void;
@@ -238,12 +278,15 @@ interface NoesisState {
 export const useNoesisStore = create<NoesisState>((set, get) => ({
   workspaces: [],
   archivedWorkspaces: [],
+  workspaceDeletionRevision: 0,
   workspaceProgress: {},
   activeWorkspaceId: null,
   nodes: [],
   nodeIndex: new Map(),
   edges: [],
   selectedNodeId: null,
+  undoStack: [],
+  redoStack: [],
   dueCards: [],
   documents: [],
 
@@ -292,7 +335,12 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
 
   selectWorkspace: async (workspaceId: string) => {
     const requestGeneration = ++workspaceSelectionGeneration;
-    const [{ nodes, edges }, dueCards, documents, workspaceProgress] =
+    const [
+      { nodes, edges },
+      dueCards,
+      documents,
+      workspaceProgress,
+    ] =
       await Promise.all([
         getWorkspaceGraph(workspaceId),
         getDueFlashcards(workspaceId),
@@ -318,6 +366,8 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       dueCards: dueCards.slice(0, remainingReviews),
       documents,
       selectedNodeId: null,
+      undoStack: [],
+      redoStack: [],
       quizNodeIds: new Set(),
       checkedQuizNodeIds: new Set(),
     });
@@ -349,7 +399,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   },
 
   generateNewCurriculum: async (topicPrompt, sourceDocument) => {
-    if (get().isGeneratingCurriculum) return;
+    if (get().isGeneratingCurriculum) return false;
     const controller = new AbortController();
     set({
       isGeneratingCurriculum: true,
@@ -376,6 +426,8 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         nodeIndex: new Map(nodes.map((node, index) => [node.id, index])),
         edges,
         selectedNodeId: null,
+        undoStack: [],
+        redoStack: [],
         dueCards: [],
         activeModal: "none",
         curriculumProgress: null,
@@ -383,6 +435,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       get().showToast(
         `Generated workspace with ${nodes.length} concepts: "${workspace.title}"`
       );
+      return true;
     } catch (error) {
       if (
         controller.signal.aborted &&
@@ -390,7 +443,7 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         error.name === "AbortError"
       ) {
         get().showToast("Curriculum generation stopped.");
-        return;
+        return false;
       }
       throw error;
     } finally {
@@ -478,7 +531,52 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       archivedWorkspaces: get().archivedWorkspaces.filter(
         (item) => item.id !== workspaceId
       ),
+      workspaceDeletionRevision: get().workspaceDeletionRevision + 1,
     });
+  },
+
+  reconcileDeletedWorkspaces: async (workspaceIds) => {
+    const deletedIds = new Set(workspaceIds);
+    const current = get();
+    const remaining = current.workspaces.filter(
+      (workspace) => !deletedIds.has(workspace.id)
+    );
+    const activeWasDeleted =
+      current.activeWorkspaceId !== null &&
+      deletedIds.has(current.activeWorkspaceId);
+    if (activeWasDeleted) workspaceSelectionGeneration += 1;
+    set({
+      workspaces: remaining,
+      archivedWorkspaces: current.archivedWorkspaces.filter(
+        (workspace) => !deletedIds.has(workspace.id)
+      ),
+      workspaceDeletionRevision:
+        current.workspaceDeletionRevision + (workspaceIds.length > 0 ? 1 : 0),
+      workspaceProgress: Object.fromEntries(
+        Object.entries(current.workspaceProgress).filter(
+          ([workspaceId]) => !deletedIds.has(workspaceId)
+        )
+      ),
+      ...(activeWasDeleted
+        ? {
+            activeWorkspaceId: null,
+            nodes: [],
+            nodeIndex: new Map(),
+            edges: [],
+            selectedNodeId: null,
+            dueCards: [],
+            documents: [],
+          }
+        : {}),
+    });
+
+    if (!activeWasDeleted) return;
+    if (remaining.length > 0) {
+      await get().selectWorkspace(remaining[0].id);
+      return;
+    }
+    const documents = await listDocuments();
+    set({ documents });
   },
 
   setCanvasLayoutMode: async (mode) => {
@@ -487,6 +585,12 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     if (!workspaceId || !workspace || workspace.layout_mode === mode) return;
 
     const { nodes, edges } = get();
+    const previousSnapshot = createGraphSnapshot(
+      workspaceId,
+      nodes,
+      edges,
+      workspace.layout_mode
+    );
     const graphState = recomputeGraphState(nodes, edges).updatedNodes;
     const positionedNodes = computeSugiyamaLayout(graphState, edges);
     await updateGraphNodeState(positionedNodes);
@@ -494,6 +598,8 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     set({
       nodes: positionedNodes,
       nodeIndex: new Map(positionedNodes.map((node, index) => [node.id, index])),
+      undoStack: appendGraphSnapshot(get().undoStack, previousSnapshot),
+      redoStack: [],
       workspaces: get().workspaces.map((item) =>
         item.id === workspaceId ? { ...item, layout_mode: mode } : item
       ),
@@ -504,21 +610,55 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     const workspaceId = get().activeWorkspaceId;
     const node = get().nodes.find((item) => item.id === nodeId);
     if (!workspaceId || !node || node.workspace_id !== workspaceId) return;
+    if (node.pos_x === x && node.pos_y === y) return;
+    const previousSnapshot = createGraphSnapshot(
+      workspaceId,
+      get().nodes,
+      get().edges,
+      get().workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
+        "free"
+    );
     await updateNodePosition(workspaceId, nodeId, x, y);
     const nodes = get().nodes.map((item) =>
       item.id === nodeId ? { ...item, pos_x: x, pos_y: y } : item
     );
-    set({ nodes });
+    set({
+      nodes,
+      undoStack: appendGraphSnapshot(get().undoStack, previousSnapshot),
+      redoStack: [],
+    });
   },
 
   realignGraphGrid: async () => {
+    const workspaceId = get().activeWorkspaceId;
+    if (!workspaceId) return;
     const nodes = get().nodes.map((node) => ({
       ...node,
       pos_x: Math.round(node.pos_x / 16) * 16,
       pos_y: Math.round(node.pos_y / 16) * 16,
     }));
+    if (
+      nodes.every(
+        (node, index) =>
+          node.pos_x === get().nodes[index]?.pos_x &&
+          node.pos_y === get().nodes[index]?.pos_y
+      )
+    ) {
+      return;
+    }
+    const previousSnapshot = createGraphSnapshot(
+      workspaceId,
+      get().nodes,
+      get().edges,
+      get().workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
+        "free"
+    );
     await updateGraphNodeState(nodes);
-    set({ nodes });
+    set({
+      nodes,
+      undoStack: appendGraphSnapshot(get().undoStack, previousSnapshot),
+      redoStack: [],
+    });
   },
 
   addConceptNode: async ({ title, summary, x, y }) => {
@@ -527,6 +667,12 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     if (!workspaceId || !workspace) {
       throw new Error("Select a workspace before adding a concept.");
     }
+    const previousSnapshot = createGraphSnapshot(
+      workspaceId,
+      get().nodes,
+      get().edges,
+      workspace.layout_mode
+    );
     const cleanTitle = title.trim();
     if (!cleanTitle) throw new Error("Concept title is required.");
 
@@ -559,6 +705,8 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     set({
       nodes: nextNodes,
       nodeIndex: new Map(nextNodes.map((item, index) => [item.id, index])),
+      undoStack: appendGraphSnapshot(get().undoStack, previousSnapshot),
+      redoStack: [],
     });
     return node.id;
   },
@@ -566,6 +714,15 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   editConceptNode: async (nodeId, title, summary) => {
     const cleanTitle = title.trim();
     if (!cleanTitle) throw new Error("Concept title is required.");
+    const workspaceId = get().activeWorkspaceId;
+    if (!workspaceId) throw new Error("Select a workspace first.");
+    const previousSnapshot = createGraphSnapshot(
+      workspaceId,
+      get().nodes,
+      get().edges,
+      get().workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
+        "free"
+    );
     await updateConceptNode(nodeId, cleanTitle, summary.trim());
     set({
       nodes: get().nodes.map((node) =>
@@ -573,6 +730,8 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
           ? { ...node, title: cleanTitle, summary_hint: summary.trim() }
           : node
       ),
+      undoStack: appendGraphSnapshot(get().undoStack, previousSnapshot),
+      redoStack: [],
     });
   },
 
@@ -580,6 +739,13 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     const workspaceId = get().activeWorkspaceId;
     const node = get().nodes.find((item) => item.id === nodeId);
     if (!workspaceId || !node || node.workspace_id !== workspaceId) return;
+    const previousSnapshot = createGraphSnapshot(
+      workspaceId,
+      get().nodes,
+      get().edges,
+      get().workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
+        "free"
+    );
     const nextNodes = get().nodes.filter((item) => item.id !== nodeId);
     const nextEdges = get().edges.filter(
       (edge) => edge.source_id !== nodeId && edge.target_id !== nodeId
@@ -602,6 +768,8 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
         positionedNodes.map((item, index) => [item.id, index])
       ),
       edges: nextEdges,
+      undoStack: appendGraphSnapshot(get().undoStack, previousSnapshot),
+      redoStack: [],
       dueCards: get().dueCards.filter((card) => card.node_id !== nodeId),
       selectedNodeId:
         get().selectedNodeId === nodeId ? null : get().selectedNodeId,
@@ -648,12 +816,20 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
 
   permanentlyDeleteArchivedConceptNode: async (workspaceId, nodeId) => {
     await permanentlyDeleteArchivedConceptNodeRecord(workspaceId, nodeId);
+    set({ undoStack: [], redoStack: [] });
   },
 
   connectConceptNodes: async (sourceId, targetId) => {
     const workspaceId = get().activeWorkspaceId;
     if (!workspaceId) throw new Error("Select a workspace first.");
     const { nodes, edges } = get();
+    const previousSnapshot = createGraphSnapshot(
+      workspaceId,
+      nodes,
+      edges,
+      get().workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
+        "free"
+    );
     if (sourceId === targetId) {
       throw new Error("Cannot connect a concept to itself.");
     }
@@ -692,12 +868,21 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       edges: nextEdges,
       nodes: nextNodes,
       nodeIndex: new Map(nextNodes.map((node, index) => [node.id, index])),
+      undoStack: appendGraphSnapshot(get().undoStack, previousSnapshot),
+      redoStack: [],
     });
   },
 
   disconnectConceptNodes: async (sourceId, targetId) => {
     const workspaceId = get().activeWorkspaceId;
     if (!workspaceId) return;
+    const previousSnapshot = createGraphSnapshot(
+      workspaceId,
+      get().nodes,
+      get().edges,
+      get().workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
+        "free"
+    );
     const nextEdges = get().edges.filter(
       (edge) =>
         !(edge.source_id === sourceId && edge.target_id === targetId)
@@ -715,6 +900,118 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       edges: nextEdges,
       nodes: nextNodes,
       nodeIndex: new Map(nextNodes.map((node, index) => [node.id, index])),
+      undoStack: appendGraphSnapshot(get().undoStack, previousSnapshot),
+      redoStack: [],
+    });
+  },
+
+  undoGraph: async () => {
+    const state = get();
+    const workspaceId = state.activeWorkspaceId;
+    const target = state.undoStack[state.undoStack.length - 1];
+    if (!workspaceId || !target || target.workspaceId !== workspaceId) return;
+    const currentSnapshot = createGraphSnapshot(
+      workspaceId,
+      state.nodes,
+      state.edges,
+      state.workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
+        "free"
+    );
+    if (
+      state.workspaces.find((item) => item.id === workspaceId)?.layout_mode !==
+      target.layoutMode
+    ) {
+      await updateWorkspaceLayoutMode(workspaceId, target.layoutMode);
+    }
+    await restoreWorkspaceGraphSnapshot(
+      workspaceId,
+      target.nodes,
+      target.edges,
+      state.nodes,
+      state.edges
+    );
+    const dueCards = await getDueFlashcards(workspaceId);
+    const remainingReviews =
+      state.preferences.dailyReviewLimit === 0
+        ? dueCards.length
+        : Math.max(
+            0,
+            state.preferences.dailyReviewLimit - getReviewsCompletedToday()
+          );
+    set({
+      nodes: target.nodes,
+      nodeIndex: new Map(target.nodes.map((node, index) => [node.id, index])),
+      edges: target.edges,
+      selectedNodeId:
+        state.selectedNodeId &&
+        target.nodes.some((node) => node.id === state.selectedNodeId)
+          ? state.selectedNodeId
+          : null,
+      dueCards: dueCards.slice(0, remainingReviews),
+      undoStack: state.undoStack.slice(0, -1),
+      redoStack: appendGraphSnapshot(state.redoStack, currentSnapshot),
+      workspaces: state.workspaces.map((workspace) =>
+        workspace.id === workspaceId
+          ? { ...workspace, layout_mode: target.layoutMode }
+          : workspace
+      ),
+      quizNodeIds: new Set(),
+      checkedQuizNodeIds: new Set(),
+    });
+  },
+
+  redoGraph: async () => {
+    const state = get();
+    const workspaceId = state.activeWorkspaceId;
+    const target = state.redoStack[state.redoStack.length - 1];
+    if (!workspaceId || !target || target.workspaceId !== workspaceId) return;
+    const currentSnapshot = createGraphSnapshot(
+      workspaceId,
+      state.nodes,
+      state.edges,
+      state.workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
+        "free"
+    );
+    if (
+      state.workspaces.find((item) => item.id === workspaceId)?.layout_mode !==
+      target.layoutMode
+    ) {
+      await updateWorkspaceLayoutMode(workspaceId, target.layoutMode);
+    }
+    await restoreWorkspaceGraphSnapshot(
+      workspaceId,
+      target.nodes,
+      target.edges,
+      state.nodes,
+      state.edges
+    );
+    const dueCards = await getDueFlashcards(workspaceId);
+    const remainingReviews =
+      state.preferences.dailyReviewLimit === 0
+        ? dueCards.length
+        : Math.max(
+            0,
+            state.preferences.dailyReviewLimit - getReviewsCompletedToday()
+          );
+    set({
+      nodes: target.nodes,
+      nodeIndex: new Map(target.nodes.map((node, index) => [node.id, index])),
+      edges: target.edges,
+      selectedNodeId:
+        state.selectedNodeId &&
+        target.nodes.some((node) => node.id === state.selectedNodeId)
+          ? state.selectedNodeId
+          : null,
+      dueCards: dueCards.slice(0, remainingReviews),
+      redoStack: state.redoStack.slice(0, -1),
+      undoStack: appendGraphSnapshot(state.undoStack, currentSnapshot),
+      workspaces: state.workspaces.map((workspace) =>
+        workspace.id === workspaceId
+          ? { ...workspace, layout_mode: target.layoutMode }
+          : workspace
+      ),
+      quizNodeIds: new Set(),
+      checkedQuizNodeIds: new Set(),
     });
   },
 
@@ -956,6 +1253,66 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     }
   },
 
+  generateFlashcardsForTopic: async (nodeId, topic) => {
+    if (!areFlashcardsEnabled()) {
+      throw new Error("Enable the Flashcards plugin to generate cards.");
+    }
+    if (get().generatingFlashcardNodeIds.has(nodeId)) {
+      throw new Error("Flashcards are already being generated for this lesson.");
+    }
+    const node = get().nodes.find(
+      (item) =>
+        item.id === nodeId && item.workspace_id === get().activeWorkspaceId
+    );
+    if (!node || node.is_hydrated !== 1 || !node.lesson_markdown?.trim()) {
+      throw new Error("Generate this lesson before creating its flashcards.");
+    }
+    const generating = new Set(get().generatingFlashcardNodeIds);
+    generating.add(nodeId);
+    set({ generatingFlashcardNodeIds: generating });
+    try {
+      const query = [topic.trim(), node.title, node.summary_hint]
+        .filter(Boolean)
+        .join(" ");
+      const retrieved = await searchVaultFts(query, 6, node.workspace_id);
+      const vaultContext = retrieved
+        .map(
+          (chunk, index) =>
+            `[Source ${index + 1}: ${chunk.file_name}${chunk.heading ? ` > ${chunk.heading}` : ""}]\n${chunk.content.slice(0, 900)}`
+        )
+        .join("\n\n---\n\n");
+      const cards = await serializeLessonGeneration(() =>
+        generateLessonFlashcards(
+          node,
+          node.lesson_markdown ?? "",
+          topic,
+          vaultContext
+        )
+      );
+      if (!areFlashcardsEnabled()) {
+        throw new Error("Flashcards were disabled before generation finished.");
+      }
+      await updateFlashcardSchedules(cards);
+      const flashcardCounts = new Map(get().flashcardCounts);
+      const previousCount =
+        flashcardCounts.get(nodeId) ?? (await getNodeFlashcards(nodeId)).length;
+      flashcardCounts.set(nodeId, previousCount + cards.length);
+      set({ flashcardCounts });
+      const dueCards = await getDueFlashcards(node.workspace_id);
+      const dailyLimit = get().preferences.dailyReviewLimit;
+      const remainingReviews =
+        dailyLimit === 0
+          ? dueCards.length
+          : Math.max(0, dailyLimit - getReviewsCompletedToday());
+      set({ dueCards: dueCards.slice(0, remainingReviews) });
+      return cards.map((card) => ({ ...card, node_title: node.title }));
+    } finally {
+      const remaining = new Set(get().generatingFlashcardNodeIds);
+      remaining.delete(nodeId);
+      set({ generatingFlashcardNodeIds: remaining });
+    }
+  },
+
   markNodeMastered: async (nodeId: string, score = 1.0) => {
     const { nodes, nodeIndex, edges } = get();
     const { updatedNodes, patches, newlyUnlockedIds } = computeMasteryCascade(
@@ -969,6 +1326,17 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     if (patches.length > 0) {
       await updateNodesStatusBatch(patches);
       set({ nodes: updatedNodes });
+      const workspaceId = get().activeWorkspaceId;
+      if (workspaceId) {
+        const workspaceProgress = { ...get().workspaceProgress };
+        workspaceProgress[workspaceId] = {
+          nodeCount: updatedNodes.length,
+          masteredCount: updatedNodes.filter(
+            (node) => node.status === "mastered"
+          ).length,
+        };
+        set({ workspaceProgress });
+      }
     }
 
     if (newlyUnlockedIds.length > 0) {

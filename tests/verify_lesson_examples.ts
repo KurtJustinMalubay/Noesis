@@ -43,7 +43,64 @@ async function run(): Promise<void> {
   const version = sqlite.prepare("PRAGMA user_version").get() as {
     user_version: number;
   };
-  assert(version.user_version === 10, "migrations should advance the schema to v10");
+  assert(version.user_version === 13, "migrations should advance the schema to v13");
+  const curriculumTables = sqlite
+    .prepare(
+      `SELECT COUNT(*) AS count FROM sqlite_master
+       WHERE type = 'table' AND name IN (
+         'curriculum_trees',
+         'curriculum_tree_nodes',
+         'curriculum_tree_edges'
+       )`
+    )
+    .get() as { count: number };
+  assert(
+    curriculumTables.count === 3,
+    "curriculum maps should create their tree, subject, and prerequisite tables"
+  );
+  const treeColumns = sqlite
+    .prepare("PRAGMA table_info(curriculum_trees)")
+    .all() as Array<{ name: string; dflt_value: string | null }>;
+  const treeNodeColumns = sqlite
+    .prepare("PRAGMA table_info(curriculum_tree_nodes)")
+    .all() as Array<{ name: string; dflt_value: string | null }>;
+  assert(
+    treeColumns.some(
+      (column) =>
+        column.name === "layout_mode" && column.dflt_value === "'auto'"
+    ) &&
+      treeColumns.some((column) => column.name === "archived_at") &&
+      treeNodeColumns.some((column) => column.name === "pos_x") &&
+      treeNodeColumns.some((column) => column.name === "pos_y"),
+    "curriculum maps should persist archive state, layout mode, and free-placement coordinates"
+  );
+  sqlite
+    .prepare(
+      "INSERT INTO curriculum_trees (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)"
+    )
+    .run("curriculum-map", "Curriculum", 1, 1);
+  sqlite
+    .prepare("UPDATE curriculum_trees SET archived_at = ? WHERE id = ?")
+    .run(2000, "curriculum-map");
+  assert(
+    (sqlite
+      .prepare(
+        "SELECT COUNT(*) AS count FROM curriculum_trees WHERE archived_at IS NOT NULL"
+      )
+      .get() as { count: number }).count === 1,
+    "archiving a curriculum map should retain it for recovery"
+  );
+  sqlite
+    .prepare("UPDATE curriculum_trees SET archived_at = NULL WHERE id = ?")
+    .run("curriculum-map");
+  assert(
+    (sqlite
+      .prepare(
+        "SELECT COUNT(*) AS count FROM curriculum_trees WHERE archived_at IS NULL"
+      )
+      .get() as { count: number }).count === 1,
+    "restoring a curriculum map should make it active again"
+  );
   const legacyDocumentLink = sqlite
     .prepare(
       "SELECT COUNT(*) AS count FROM document_workspaces WHERE doc_id = ? AND workspace_id = ?"
@@ -379,7 +436,7 @@ async function run(): Promise<void> {
   );
 
   sqlite.close();
-  console.log("✓ SQLite v10 document sharing and workspace tests passed!");
+  console.log("✓ SQLite v13 curriculum map, document sharing, and workspace tests passed!");
 }
 
 run().catch((error) => {

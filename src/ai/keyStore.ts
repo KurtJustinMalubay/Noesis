@@ -64,7 +64,7 @@ const REVIEW_COUNT_PREFIX = "noesis.review-count.";
 const DEFAULT_SETTINGS: AiSettings = {
   provider: "gemini",
   apiKey: "",
-  fastModel: "gemini-4-hydrogen",
+  fastModel: "gemini-3.5-flash-lite",
   synthesisModel: "gemini-3.5-flash-lite",
   creativityPreset: "balanced",
   localBaseUrl: "http://localhost:11434/v1",
@@ -91,6 +91,7 @@ export interface UserPreferences {
   dailyReviewLimit: 10 | 20 | 40 | 0;
   showAppTutorial: boolean;
   launchInFullscreen: boolean;
+  reduceMotion: boolean;
 }
 
 export const DEFAULT_PREFERENCES: UserPreferences = {
@@ -107,7 +108,8 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
   masteryPassThreshold: 80,
   dailyReviewLimit: 20,
   showAppTutorial: false,
-  launchInFullscreen: false,
+  launchInFullscreen: true,
+  reduceMotion: false,
 };
 
 const DARK_THEMES = APP_THEME_OPTIONS.filter(({ mode }) => mode === "dark").map(
@@ -333,6 +335,10 @@ export function loadUserPreferences(): UserPreferences {
         typeof parsed.launchInFullscreen === "boolean"
           ? parsed.launchInFullscreen
           : DEFAULT_PREFERENCES.launchInFullscreen,
+      reduceMotion:
+        typeof parsed.reduceMotion === "boolean"
+          ? parsed.reduceMotion
+          : DEFAULT_PREFERENCES.reduceMotion,
     };
   } catch {
     return { ...DEFAULT_PREFERENCES };

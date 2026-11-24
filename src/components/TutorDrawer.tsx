@@ -12,6 +12,7 @@ import {
   BookOpen,
   Bot,
   Check,
+  ChevronLeft,
   History,
   LoaderCircle,
   MoreHorizontal,
@@ -244,6 +245,7 @@ export function TutorDrawer({
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const controllerRef = useRef<AbortController | null>(null);
+  const popoverContainerRef = useRef<HTMLDivElement>(null);
   const activeThreadIdRef = useRef<string | null>(null);
   const skipLoadThreadRef = useRef<string | null>(null);
   const threadLoadGenerationRef = useRef(0);
@@ -305,6 +307,48 @@ export function TutorDrawer({
       setIsSettingsOpen(false);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || (!isActionsMenuOpen && !isSettingsOpen && !isHistoryOpen)) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (isSettingsOpen) {
+        setIsSettingsOpen(false);
+        setIsActionsMenuOpen(true);
+      } else if (isHistoryOpen) {
+        setIsHistoryOpen(false);
+        setIsActionsMenuOpen(true);
+      } else {
+        setIsActionsMenuOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [isActionsMenuOpen, isHistoryOpen, isOpen, isSettingsOpen]);
+
+  useEffect(() => {
+    if (!isOpen || (!isActionsMenuOpen && !isSettingsOpen && !isHistoryOpen)) {
+      return;
+    }
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        !popoverContainerRef.current?.contains(event.target)
+      ) {
+        setIsActionsMenuOpen(false);
+        setIsSettingsOpen(false);
+        setIsHistoryOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handleOutsidePointerDown);
+    return () =>
+      document.removeEventListener("pointerdown", handleOutsidePointerDown);
+  }, [isActionsMenuOpen, isHistoryOpen, isOpen, isSettingsOpen]);
 
   useEffect(() => {
     enterFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
@@ -934,6 +978,8 @@ export function TutorDrawer({
   const activeThread = threads.find(
     (thread) => thread.id === activeThreadId
   );
+  const isTutorPopoverOpen =
+    isActionsMenuOpen || isSettingsOpen || isHistoryOpen;
   const availableLesson = activeLesson
     ? toLessonContext(activeLesson)
     : null;
@@ -947,7 +993,10 @@ export function TutorDrawer({
         isVisible ? "tutor-drawer-panel-visible" : ""
       }`}
     >
-      <div className="relative flex min-w-0 items-center gap-3 border-b border-[var(--color-border)] px-3 py-3">
+      <div
+        ref={popoverContainerRef}
+        className="relative flex min-w-0 items-center gap-3 border-b border-[var(--color-border)] px-3 py-3"
+      >
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--color-accent-soft)] text-[var(--color-accent)]">
             <Bot className="h-4 w-4" />
@@ -984,12 +1033,12 @@ export function TutorDrawer({
               setIsActionsMenuOpen((open) => !open);
             }}
             className={`grid h-9 w-9 place-items-center rounded-lg transition hover:bg-[var(--color-hover)] ${
-              isActionsMenuOpen
+              isTutorPopoverOpen
                 ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
                 : "text-[var(--color-muted)]"
             }`}
             aria-label="More tutor actions"
-            aria-expanded={isActionsMenuOpen}
+            aria-expanded={isTutorPopoverOpen}
             title="More tutor actions"
           >
             <MoreHorizontal className="h-4 w-4" />
@@ -1068,6 +1117,17 @@ export function TutorDrawer({
           exitDuration={170}
         >
           <div className="motion-popover space-y-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-3 shadow-[0_16px_44px_rgba(31,43,51,0.18)]">
+            <button
+              type="button"
+              onClick={() => {
+                setIsSettingsOpen(false);
+                setIsActionsMenuOpen(true);
+              }}
+              className="inline-flex items-center gap-1 rounded-md px-1 py-1 text-[10px] font-semibold text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              Back to tutor actions
+            </button>
             <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
               Chat behavior
             </p>
@@ -1152,6 +1212,17 @@ export function TutorDrawer({
           exitDuration={170}
         >
           <div className="motion-popover origin-top-right max-h-[min(60vh,480px)] overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-2 shadow-[0_16px_44px_rgba(31,43,51,0.18)]">
+            <button
+              type="button"
+              onClick={() => {
+                setIsHistoryOpen(false);
+                setIsActionsMenuOpen(true);
+              }}
+              className="mb-1 inline-flex items-center gap-1 rounded-md px-1 py-1 text-[10px] font-semibold text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              Back to tutor actions
+            </button>
             {groupedThreads.length === 0 ? (
               <p className="px-3 py-5 text-center text-xs text-[var(--color-muted)]">
                 No tutor chats yet.

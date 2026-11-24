@@ -6,15 +6,17 @@ import {
   CircleHelp,
   Database,
   FolderKanban,
+  GitBranch,
   Layers,
   LoaderCircle,
+  LogOut,
   Plus,
   RotateCcw,
   Search,
   Settings,
   Trash2,
 } from "lucide-react";
-import type { GraphNode, Workspace } from "../types/domain";
+import type { CurriculumTree, GraphNode, Workspace } from "../types/domain";
 import noesisLogo from "../assets/noesis-plain.png";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
@@ -40,10 +42,19 @@ interface WorkspaceSidebarProps {
   onPermanentlyDelete: (id: string) => Promise<void>;
   onGetDeleteSummary: (id: string) => Promise<WorkspaceDeletionSummary>;
   onNewWorkspace: () => void;
+  isCurriculumActive: boolean;
+  curriculumTrees: CurriculumTree[];
+  archivedCurriculumTrees: CurriculumTree[];
+  selectedCurriculumTreeId: string | null;
+  onSelectCurriculumTree: (id: string) => void;
+  onRestoreCurriculumTree: (id: string) => Promise<void>;
+  onDeleteArchivedCurriculumTree: (id: string) => Promise<void>;
+  onNewCurriculumMap: () => void;
   onVault: () => void;
   onReview: () => void;
   onGuide: () => void;
   onSettings: () => void;
+  onRequestExit: () => void;
   onToast: (message: string) => void;
 }
 
@@ -64,17 +75,33 @@ export function WorkspaceSidebar({
   onPermanentlyDelete,
   onGetDeleteSummary,
   onNewWorkspace,
+  isCurriculumActive,
+  curriculumTrees,
+  archivedCurriculumTrees,
+  selectedCurriculumTreeId,
+  onSelectCurriculumTree,
+  onRestoreCurriculumTree,
+  onDeleteArchivedCurriculumTree,
+  onNewCurriculumMap,
   onVault,
   onReview,
   onGuide,
   onSettings,
+  onRequestExit,
   onToast,
 }: WorkspaceSidebarProps) {
   const [isCompactViewport, setIsCompactViewport] = useState(() =>
     window.matchMedia("(max-width: 760px)").matches
   );
   const [query, setQuery] = useState("");
+  const [curriculumQuery, setCurriculumQuery] = useState("");
   const [showArchivedWorkspaces, setShowArchivedWorkspaces] = useState(false);
+  const [showArchivedCurriculumTrees, setShowArchivedCurriculumTrees] =
+    useState(false);
+  const [curriculumTreeToDelete, setCurriculumTreeToDelete] =
+    useState<CurriculumTree | null>(null);
+  const [isDeletingCurriculumTree, setIsDeletingCurriculumTree] =
+    useState(false);
   const [confirmationTarget, setConfirmationTarget] = useState<{
     workspace: Workspace;
     summary: WorkspaceDeletionSummary;
@@ -92,6 +119,7 @@ export function WorkspaceSidebar({
   const workspaceProgressTimerRef = useRef<number | null>(null);
   const workspaceProgressVisibleAtRef = useRef<number | null>(null);
   const debouncedQuery = useDebouncedValue(query);
+  const debouncedCurriculumQuery = useDebouncedValue(curriculumQuery);
   const filteredWorkspaces = useMemo(() => {
     const normalizedQuery = debouncedQuery.trim().toLowerCase();
     if (!normalizedQuery) return workspaces;
@@ -110,6 +138,20 @@ export function WorkspaceSidebar({
         workspace.root_domain.toLowerCase().includes(normalizedQuery)
     );
   }, [archivedWorkspaces, debouncedQuery]);
+  const filteredCurriculumTrees = useMemo(() => {
+    const normalizedQuery = debouncedCurriculumQuery.trim().toLowerCase();
+    if (!normalizedQuery) return curriculumTrees;
+    return curriculumTrees.filter((tree) =>
+      tree.title.toLowerCase().includes(normalizedQuery)
+    );
+  }, [curriculumTrees, debouncedCurriculumQuery]);
+  const filteredArchivedCurriculumTrees = useMemo(() => {
+    const normalizedQuery = debouncedCurriculumQuery.trim().toLowerCase();
+    if (!normalizedQuery) return archivedCurriculumTrees;
+    return archivedCurriculumTrees.filter((tree) =>
+      tree.title.toLowerCase().includes(normalizedQuery)
+    );
+  }, [archivedCurriculumTrees, debouncedCurriculumQuery]);
 
   useEffect(
     () => () => {
@@ -208,6 +250,29 @@ export function WorkspaceSidebar({
     }
   };
 
+  const restoreArchivedCurriculumTree = async (tree: CurriculumTree) => {
+    try {
+      await onRestoreCurriculumTree(tree.id);
+      onToast(`Restored "${tree.title}".`);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const permanentlyDeleteCurriculumTree = async () => {
+    if (!curriculumTreeToDelete || isDeletingCurriculumTree) return;
+    setIsDeletingCurriculumTree(true);
+    try {
+      await onDeleteArchivedCurriculumTree(curriculumTreeToDelete.id);
+      onToast(`Permanently deleted "${curriculumTreeToDelete.title}".`);
+      setCurriculumTreeToDelete(null);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsDeletingCurriculumTree(false);
+    }
+  };
+
   const masteredCount = nodes.filter((node) => node.status === "mastered").length;
 
   return (
@@ -268,18 +333,36 @@ export function WorkspaceSidebar({
         </button>
       </header>
 
+      <div
+        className={`flex h-9 items-center gap-2 text-[var(--color-muted)] ${
+          collapsed ? "justify-center px-2 pt-2" : "px-5 pt-2"
+        }`}
+        title={isCurriculumActive ? "Curriculum maps" : "Workspaces"}
+      >
+        {isCurriculumActive ? (
+          <GitBranch className="h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <FolderKanban className="h-3.5 w-3.5 shrink-0" />
+        )}
+        {!collapsed && (
+          <span className="truncate font-mono text-[9px] font-semibold uppercase tracking-[0.12em]">
+            {isCurriculumActive ? "Curriculum maps" : "Workspaces"}
+          </span>
+        )}
+      </div>
+
       <div className={collapsed ? "px-2" : "px-3"}>
         <button
           type="button"
-          data-guide="new-dag"
+          data-guide={isCurriculumActive ? "new-map" : "new-dag"}
           data-sidebar-new
           data-collapsed={collapsed}
-          onClick={onNewWorkspace}
+          onClick={isCurriculumActive ? onNewCurriculumMap : onNewWorkspace}
           className={`relative flex h-11 w-full items-center overflow-hidden rounded-xl bg-[var(--color-accent-button)] text-xs font-semibold text-white shadow-sm transition hover:brightness-95 active:scale-[0.99] ${
             collapsed ? "justify-center" : "gap-2.5 px-3"
           }`}
-          title="New workspace"
-          aria-label="New workspace"
+          title={isCurriculumActive ? "New curriculum map" : "New workspace"}
+          aria-label={isCurriculumActive ? "New curriculum map" : "New workspace"}
         >
           <Plus className="sidebar-new-icon h-4 w-4 shrink-0" />
           <span
@@ -290,7 +373,7 @@ export function WorkspaceSidebar({
             }`}
             aria-hidden={collapsed}
           >
-            New Workspace
+            {isCurriculumActive ? "New Curriculum Map" : "New Workspace"}
           </span>
         </button>
       </div>
@@ -307,12 +390,30 @@ export function WorkspaceSidebar({
           <label className="flex h-10 items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-3 text-[var(--color-muted)] transition focus-within:border-[var(--color-accent)] focus-within:ring-2 focus-within:ring-[var(--color-accent-soft)]">
             <Search className="h-3.5 w-3.5 shrink-0" />
             <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              aria-label={showArchivedWorkspaces ? "Search archived workspaces" : "Search workspaces"}
+              value={isCurriculumActive ? curriculumQuery : query}
+              onChange={(event) =>
+                isCurriculumActive
+                  ? setCurriculumQuery(event.target.value)
+                  : setQuery(event.target.value)
+              }
+              aria-label={
+                isCurriculumActive
+                  ? showArchivedCurriculumTrees
+                    ? "Search archived curriculum maps"
+                    : "Search curriculum maps"
+                  : showArchivedWorkspaces
+                    ? "Search archived workspaces"
+                    : "Search workspaces"
+              }
               tabIndex={collapsed ? -1 : 0}
               placeholder={
-                showArchivedWorkspaces ? "Search archive" : "Search workspaces"
+                isCurriculumActive
+                  ? showArchivedCurriculumTrees
+                    ? "Search archived maps"
+                    : "Search curriculum maps"
+                  : showArchivedWorkspaces
+                    ? "Search archive"
+                    : "Search workspaces"
               }
               className="min-w-0 flex-1 select-text bg-transparent text-xs text-[var(--color-ink)] outline-none placeholder:text-[var(--color-muted)]"
             />
@@ -321,7 +422,94 @@ export function WorkspaceSidebar({
       </div>
 
       <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-y-auto px-2">
-        {showArchivedWorkspaces ? (
+        {isCurriculumActive ? (
+          <>
+            {!collapsed && (
+              <div className="mb-2 px-2">
+                <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted)]">
+                  {showArchivedCurriculumTrees ? "Archive" : "Curriculum maps"}
+                </p>
+              </div>
+            )}
+            {!showArchivedCurriculumTrees && filteredCurriculumTrees.map((tree) => (
+              <button
+                key={tree.id}
+                type="button"
+                title={collapsed ? tree.title : undefined}
+                aria-label={tree.title}
+                aria-current={
+                  selectedCurriculumTreeId === tree.id ? "page" : undefined
+                }
+                onClick={() => onSelectCurriculumTree(tree.id)}
+                className={`mb-0.5 flex min-h-10 w-full items-center gap-2.5 overflow-hidden rounded-lg px-2.5 text-left text-[11px] transition ${
+                  selectedCurriculumTreeId === tree.id
+                    ? "bg-[var(--color-selected)] text-[var(--color-ink)]"
+                    : "text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                } ${collapsed ? "justify-center px-0" : ""}`}
+              >
+                <GitBranch className="h-4 w-4 shrink-0" />
+                {!collapsed && (
+                  <span className="truncate">{tree.title}</span>
+                )}
+              </button>
+            ))}
+            {showArchivedCurriculumTrees &&
+              filteredArchivedCurriculumTrees.map((tree) => (
+                <div
+                  key={tree.id}
+                  className={`group relative flex min-h-10 items-center rounded-lg px-2.5 text-[var(--color-muted)] hover:bg-[var(--color-hover)] ${
+                    collapsed ? "mb-1 justify-center px-0" : "mb-0.5"
+                  }`}
+                >
+                  <Archive className="h-4 w-4 shrink-0" />
+                  {!collapsed && (
+                    <span
+                      title={tree.title}
+                      className="min-w-0 flex-1 truncate pl-2.5 text-[11px]"
+                    >
+                      {tree.title}
+                    </span>
+                  )}
+                  {!collapsed && (
+                    <span className="ml-auto flex shrink-0 items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => void restoreArchivedCurriculumTree(tree)}
+                        title="Restore curriculum map"
+                        aria-label={`Restore ${tree.title}`}
+                        className="rounded p-1 hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCurriculumTreeToDelete(tree)}
+                        title="Delete map permanently"
+                        aria-label={`Delete ${tree.title} permanently`}
+                        className="rounded p-1 hover:bg-red-100 hover:text-red-700"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </span>
+                  )}
+                </div>
+              ))}
+            {!collapsed &&
+              (showArchivedCurriculumTrees
+                ? filteredArchivedCurriculumTrees.length === 0
+                : filteredCurriculumTrees.length === 0) && (
+              <p className="px-2 py-4 text-[11px] leading-5 text-[var(--color-muted)]">
+                {showArchivedCurriculumTrees
+                  ? archivedCurriculumTrees.length
+                    ? "No archived maps match"
+                    : "Archive is empty"
+                  : curriculumTrees.length
+                    ? "No curriculum maps match"
+                    : "Create a map to organize subjects and prerequisites."}
+              </p>
+            )}
+          </>
+        ) : showArchivedWorkspaces ? (
           <>
             {!collapsed && (
               <button
@@ -580,9 +768,21 @@ export function WorkspaceSidebar({
           collapsed={collapsed}
           icon={Archive}
           label="Archive"
-          badge={archivedWorkspaces.length || undefined}
-          active={showArchivedWorkspaces}
-          onClick={() => setShowArchivedWorkspaces((open) => !open)}
+          badge={
+            (isCurriculumActive
+              ? archivedCurriculumTrees.length
+              : archivedWorkspaces.length) || undefined
+          }
+          active={
+            isCurriculumActive
+              ? showArchivedCurriculumTrees
+              : showArchivedWorkspaces
+          }
+          onClick={() =>
+            isCurriculumActive
+              ? setShowArchivedCurriculumTrees((open) => !open)
+              : setShowArchivedWorkspaces((open) => !open)
+          }
         />
         <SidebarAction
           collapsed={collapsed}
@@ -592,7 +792,7 @@ export function WorkspaceSidebar({
           guide="vault"
           onClick={onVault}
         />
-        {flashcardsEnabled && (
+        {!isCurriculumActive && flashcardsEnabled && (
           <SidebarAction
             collapsed={collapsed}
             icon={Layers}
@@ -614,6 +814,13 @@ export function WorkspaceSidebar({
           label="Settings"
           guide="settings"
           onClick={onSettings}
+        />
+        <SidebarAction
+          collapsed={collapsed}
+          icon={LogOut}
+          label="Exit Noesis"
+          onClick={onRequestExit}
+          danger
         />
       </nav>
 
@@ -676,6 +883,21 @@ export function WorkspaceSidebar({
         }
       />
     )}
+    {curriculumTreeToDelete && (
+      <ConfirmDeleteModal
+        title="Permanently delete archived map?"
+        itemName={curriculumTreeToDelete.title}
+        description="This removes the archived map and its subjects. Linked workspaces and all their study data are kept."
+        mode="delete"
+        deleteLabel="Permanently delete"
+        confirmationPhrase={curriculumTreeToDelete.title}
+        onCancel={() => setCurriculumTreeToDelete(null)}
+        onConfirm={permanentlyDeleteCurriculumTree}
+        onError={(error) =>
+          onToast(error instanceof Error ? error.message : String(error))
+        }
+      />
+    )}
     </>
   );
 }
@@ -687,6 +909,7 @@ function SidebarAction({
   badge,
   guide,
   active = false,
+  danger = false,
   onClick,
 }: {
   collapsed: boolean;
@@ -695,6 +918,7 @@ function SidebarAction({
   badge?: number;
   guide?: string;
   active?: boolean;
+  danger?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -707,9 +931,11 @@ function SidebarAction({
       title={collapsed ? label : undefined}
       aria-label={collapsed ? label : undefined}
       className={`relative flex h-11 w-full items-center overflow-hidden rounded-xl text-xs font-medium transition ${
-        active
-          ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-          : "text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+        danger
+          ? "text-rose-700 hover:bg-rose-50"
+          : active
+            ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+            : "text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
       } ${collapsed ? "justify-center" : "gap-2.5 px-2.5"}`}
     >
       <Icon className="sidebar-action-icon h-4 w-4 shrink-0" />

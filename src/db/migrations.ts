@@ -1,6 +1,6 @@
 import type Database from "@tauri-apps/plugin-sql";
 
-const CURRENT_SCHEMA_VERSION = 10;
+const CURRENT_SCHEMA_VERSION = 13;
 
 export async function runMigrations(db: Database): Promise<void> {
   await db.execute("PRAGMA journal_mode = WAL;");
@@ -287,6 +287,67 @@ export async function runMigrations(db: Database): Promise<void> {
     await db.execute(
       "CREATE INDEX IF NOT EXISTS idx_plugin_boards_scope ON plugin_boards(workspace_id, plugin_id, node_id);"
     );
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS curriculum_trees (
+        id TEXT PRIMARY KEY NOT NULL,
+        title TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        archived_at INTEGER
+      );
+    `);
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS curriculum_tree_nodes (
+        id TEXT PRIMARY KEY NOT NULL,
+        tree_id TEXT NOT NULL REFERENCES curriculum_trees(id) ON DELETE CASCADE,
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+        title TEXT NOT NULL,
+        summary_hint TEXT NOT NULL DEFAULT '',
+        layer_index INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    await db.execute(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_curriculum_tree_workspace ON curriculum_tree_nodes(tree_id, workspace_id) WHERE workspace_id IS NOT NULL;"
+    );
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS curriculum_tree_edges (
+        tree_id TEXT NOT NULL REFERENCES curriculum_trees(id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL REFERENCES curriculum_tree_nodes(id) ON DELETE CASCADE,
+        target_id TEXT NOT NULL REFERENCES curriculum_tree_nodes(id) ON DELETE CASCADE,
+        PRIMARY KEY (tree_id, source_id, target_id),
+        CHECK (source_id != target_id)
+      );
+    `);
+    await db.execute(
+      "CREATE INDEX IF NOT EXISTS idx_curriculum_tree_nodes_tree ON curriculum_tree_nodes(tree_id, layer_index);"
+    );
+    const treeColumns = await db.select<Array<{ name: string }>>(
+      "PRAGMA table_info(curriculum_trees);"
+    );
+    if (!treeColumns.some((column) => column.name === "layout_mode")) {
+      await db.execute(
+        "ALTER TABLE curriculum_trees ADD COLUMN layout_mode TEXT NOT NULL DEFAULT 'auto' CHECK(layout_mode IN ('auto', 'free'));"
+      );
+    }
+    if (!treeColumns.some((column) => column.name === "archived_at")) {
+      await db.execute(
+        "ALTER TABLE curriculum_trees ADD COLUMN archived_at INTEGER;"
+      );
+    }
+    const treeNodeColumns = await db.select<Array<{ name: string }>>(
+      "PRAGMA table_info(curriculum_tree_nodes);"
+    );
+    if (!treeNodeColumns.some((column) => column.name === "pos_x")) {
+      await db.execute(
+        "ALTER TABLE curriculum_tree_nodes ADD COLUMN pos_x REAL NOT NULL DEFAULT 0;"
+      );
+    }
+    if (!treeNodeColumns.some((column) => column.name === "pos_y")) {
+      await db.execute(
+        "ALTER TABLE curriculum_tree_nodes ADD COLUMN pos_y REAL NOT NULL DEFAULT 0;"
+      );
+    }
 
     await db.execute(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION};`);
   } catch (err) {
