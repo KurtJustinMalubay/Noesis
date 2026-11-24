@@ -16,6 +16,7 @@ jobs:
   build:
     name: Build ${{ matrix.arch }} installers
     runs-on: windows-2022
+    if: ${{ !endsWith(github.ref_name, '-msix') }}
     strategy:
       fail-fast: false
       matrix:
@@ -74,7 +75,6 @@ jobs:
   build-store:
     name: Build Microsoft Store MSIX (${{ matrix.store_arch }})
     runs-on: windows-2022
-    needs: build
     strategy:
       fail-fast: false
       matrix:
@@ -135,18 +135,25 @@ jobs:
     name: Publish release and updater manifest
     runs-on: windows-latest
     needs: [build, build-store]
-    if: ${{ needs.build.result == 'success' && needs.build-store.result == 'success' }}
+    if: >-
+      ${{
+        always() &&
+        needs.build-store.result == 'success' &&
+        (needs.build.result == 'success' || endsWith(github.ref_name, '-msix'))
+      }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
+        if: ${{ !endsWith(github.ref_name, '-msix') }}
         with:
           name: windows-x86_64
           path: updater-assets/x86_64
 
       - uses: actions/download-artifact@v4
+        if: ${{ !endsWith(github.ref_name, '-msix') }}
         with:
           name: windows-aarch64
           path: updater-assets/aarch64
@@ -166,8 +173,8 @@ jobs:
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
         run: |
-          if ($env:RELEASE_VERSION -notmatch '^v?(?<major>[1-9]\d*)\.(?<minor>\d+)\.(?<patch>\d+)$') {
-            throw "Release tag '$env:RELEASE_VERSION' must be a stable three-part version."
+          if ($env:RELEASE_VERSION -notmatch '^v?(?<major>[1-9]\d*)\.(?<minor>\d+)\.(?<patch>\d+)(?:-msix)?$') {
+            throw "Release tag '$env:RELEASE_VERSION' must be a stable version or an MSIX-only tag."
           }
           $packageVersion = "$($Matches.major).$($Matches.minor).$($Matches.patch).0"
           $bundleInput = "store-msix-bundle"
@@ -185,41 +192,78 @@ jobs:
           }
 
           New-Item -ItemType Directory -Path "store-assets" | Out-Null
-          $bundlePath = "store-assets/Noesis-$packageVersion.msixbundle"
+          $bundlePath = "store-assets/Noesis_$packageVersion.msixbundle"
           & $makeAppx.FullName bundle /d $bundleInput /p $bundlePath /bv $packageVersion /o
           if ($LASTEXITCODE -ne 0) {
             throw "MakeAppx failed to bundle the Store packages (exit code $LASTEXITCODE)."
           }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $bundle = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $bundlePath))
+          try {
+            $manifestEntry = $bundle.GetEntry("AppxMetadata/AppxBundleManifest.xml")
+            if (-not $manifestEntry) {
+              throw "The generated MSIX bundle has no AppxBundleManifest.xml."
+            }
+            $reader = [System.IO.StreamReader]::new($manifestEntry.Open())
+            try {
+              [xml]$bundleManifest = $reader.ReadToEnd()
+            }
+            finally {
+              $reader.Dispose()
+            }
+          }
+          finally {
+            $bundle.Dispose()
+          }
+          $architectures = @(
+            $bundleManifest.SelectNodes("//*[local-name()='Package' and @Type='application']") |
+              ForEach-Object { $_.GetAttribute("Architecture") } |
+              Sort-Object -Unique
+          )
+          if (
+            $architectures.Count -ne 2 -or
+            $architectures[0] -ne "arm64" -or
+            $architectures[1] -ne "x64"
+          ) {
+            throw "The MSIX bundle must contain exactly arm64 and x64 application packages; found: $($architectures -join ', ')."
+          }
+
           $uploadZipPath = "$bundlePath.zip"
-          $uploadPath = "store-assets/Noesis-$packageVersion.msixupload"
+          $uploadPath = "store-assets/Noesis_${packageVersion}_x64_arm64_bundle.msixupload"
           Compress-Archive -LiteralPath $bundlePath -DestinationPath $uploadZipPath
           Move-Item -LiteralPath $uploadZipPath -Destination $uploadPath
 
       - name: Create updater manifest
+        if: ${{ !endsWith(github.ref_name, '-msix') }}
         run: node scripts/create-updater-manifest.mjs latest.json updater-assets
 
       - name: Stage public release assets without signature sidecars
         shell: pwsh
+        env:
+          MSIX_ONLY: ${{ endsWith(github.ref_name, '-msix') }}
         run: |
           $releaseAssets = "release-assets"
           New-Item -ItemType Directory -Path $releaseAssets | Out-Null
-          $installers = @(Get-ChildItem updater-assets -Recurse -File | Where-Object {
-            $_.Extension -in @(".msi", ".exe")
-          })
-          if ($installers.Count -eq 0) {
-            throw "No MSI or NSIS installer files were found."
-          }
-          $assetNames = @{}
-          foreach ($installer in $installers) {
-            if ($assetNames.ContainsKey($installer.Name)) {
-              throw "Duplicate release asset name: $($installer.Name)"
+          if ($env:MSIX_ONLY -ne "true") {
+            $installers = @(Get-ChildItem updater-assets -Recurse -File | Where-Object {
+              $_.Extension -in @(".msi", ".exe")
+            })
+            if ($installers.Count -eq 0) {
+              throw "No MSI or NSIS installer files were found."
             }
-            $assetNames[$installer.Name] = $true
-            Copy-Item -LiteralPath $installer.FullName -Destination $releaseAssets
+            $assetNames = @{}
+            foreach ($installer in $installers) {
+              if ($assetNames.ContainsKey($installer.Name)) {
+                throw "Duplicate release asset name: $($installer.Name)"
+              }
+              $assetNames[$installer.Name] = $true
+              Copy-Item -LiteralPath $installer.FullName -Destination $releaseAssets
+            }
+            Copy-Item -LiteralPath latest.json -Destination $releaseAssets
           }
-          Copy-Item -LiteralPath latest.json -Destination $releaseAssets
-          Copy-Item -Path "store-assets/Noesis-*.msixbundle" -Destination $releaseAssets
-          Copy-Item -Path "store-assets/Noesis-*.msixupload" -Destination $releaseAssets
+          Copy-Item -Path "store-assets/Noesis_*.msixbundle" -Destination $releaseAssets
+          Copy-Item -Path "store-assets/Noesis_*.msixupload" -Destination $releaseAssets
 
       - uses: softprops/action-gh-release@v2
         with:

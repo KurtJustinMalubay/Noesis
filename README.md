@@ -79,11 +79,18 @@ remain embedded in the manifest rather than appearing as separate downloads.
 ## Microsoft Store (MSIX)
 
 The same `v*.*.*` release workflow also builds a multi-architecture
-`Noesis-<version>.msixbundle` for x64 and ARM64, along with a
-`Noesis-<version>.msixupload` containing that bundle for Partner Center
-submission. Both are published as separate GitHub release assets and are not
-included in `latest.json`. The upload file does not include symbol files, so
-Partner Center crash analytics will not have the app's symbols.
+`Noesis_<version>.msixbundle` for x64 and ARM64, along with a
+`Noesis_<version>_x64_arm64_bundle.msixupload` containing that bundle for
+Partner Center submission. The workflow verifies the executable PE architecture
+and both package architectures in the bundle before publishing. Both files are
+published as separate GitHub release assets and are not included in
+`latest.json`. The upload file does not include symbol files, so Partner Center
+crash analytics will not have the app's symbols.
+
+An MSIX-only patch can be published with a `v<major>.<minor>.<patch>-msix` tag
+(for example, `v1.3.3-msix`). It creates a release containing only the MSIX
+bundle and upload file; it does not rebuild or publish the regular Windows
+installers or updater manifest.
 Partner Center signs Store submissions; the package identity and visual assets
 are defined in `src-tauri/windows/Package.appxmanifest.template`.
 
