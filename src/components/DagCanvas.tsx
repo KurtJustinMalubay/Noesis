@@ -536,7 +536,25 @@ export function DagCanvas({
     []
   );
 
+  const startPan = (e: React.PointerEvent) => {
+    stopCameraAnimation();
+    setIsDragging(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragOrigin.current = {
+      x: e.clientX - panRef.current.x,
+      y: e.clientY - panRef.current.y,
+    };
+  };
+
+  const handlePointerDownCapture = (e: React.PointerEvent) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    e.stopPropagation();
+    startPan(e);
+  };
+
   const handlePointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
     const target = e.target;
     if (
       target instanceof Element &&
@@ -546,13 +564,13 @@ export function DagCanvas({
     ) {
       return;
     }
-    stopCameraAnimation();
-    setIsDragging(true);
-    e.currentTarget.setPointerCapture(e.pointerId);
-    dragOrigin.current = {
-      x: e.clientX - panRef.current.x,
-      y: e.clientY - panRef.current.y,
-    };
+    startPan(e);
+  };
+
+  const handleAuxClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    e.stopPropagation();
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
@@ -1009,10 +1027,12 @@ export function DagCanvas({
     <div
       ref={containerRef}
       tabIndex={0}
+      onPointerDownCapture={handlePointerDownCapture}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
+      onAuxClick={handleAuxClick}
       onPointerLeave={() => setHoveredNodeId(null)}
       onWheel={handleWheel}
       onDoubleClick={handleDoubleClick}

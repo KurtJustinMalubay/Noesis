@@ -920,18 +920,12 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       state.workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
         "free"
     );
-    if (
-      state.workspaces.find((item) => item.id === workspaceId)?.layout_mode !==
-      target.layoutMode
-    ) {
-      await updateWorkspaceLayoutMode(workspaceId, target.layoutMode);
-    }
     await restoreWorkspaceGraphSnapshot(
       workspaceId,
       target.nodes,
       target.edges,
       state.nodes,
-      state.edges
+      target.layoutMode
     );
     const dueCards = await getDueFlashcards(workspaceId);
     const remainingReviews =
@@ -975,18 +969,12 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       state.workspaces.find((item) => item.id === workspaceId)?.layout_mode ??
         "free"
     );
-    if (
-      state.workspaces.find((item) => item.id === workspaceId)?.layout_mode !==
-      target.layoutMode
-    ) {
-      await updateWorkspaceLayoutMode(workspaceId, target.layoutMode);
-    }
     await restoreWorkspaceGraphSnapshot(
       workspaceId,
       target.nodes,
       target.edges,
       state.nodes,
-      state.edges
+      target.layoutMode
     );
     const dueCards = await getDueFlashcards(workspaceId);
     const remainingReviews =

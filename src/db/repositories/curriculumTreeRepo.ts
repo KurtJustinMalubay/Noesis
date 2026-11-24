@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getDb } from "../client";
 import { serializeDbWrite } from "../writeQueue";
 import type {
@@ -7,7 +8,6 @@ import type {
   CurriculumTreeNode,
 } from "../../types/domain";
 import { canReach } from "../../utils/curriculumDag";
-import { getUnarchivedWorkspaces } from "../../utils/workspaceArchive";
 
 export interface CurriculumTreeGraph {
   tree: CurriculumTree;
@@ -56,49 +56,10 @@ export async function createCurriculumTree(
   nodes: CurriculumTreeNode[] = [],
   edges: CurriculumTreeEdge[] = []
 ): Promise<void> {
-  const db = await getDb();
-  await serializeDbWrite(async () => {
-    await db.execute("BEGIN");
-    try {
-      await db.execute(
-        "INSERT INTO curriculum_trees (id, title, layout_mode, created_at, updated_at, archived_at) VALUES ($1, $2, $3, $4, $5, NULL)",
-        [
-          tree.id,
-          tree.title,
-          tree.layout_mode,
-          tree.created_at,
-          tree.updated_at,
-        ]
-      );
-      for (const node of nodes) {
-        await db.execute(
-          `INSERT INTO curriculum_tree_nodes
-            (id, tree_id, workspace_id, title, summary_hint, layer_index, pos_x, pos_y)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [
-            node.id,
-            tree.id,
-            node.workspace_id,
-            node.title,
-            node.summary_hint,
-            node.layer_index,
-            node.pos_x,
-            node.pos_y,
-          ]
-        );
-      }
-      for (const edge of edges) {
-        await db.execute(
-          "INSERT INTO curriculum_tree_edges (tree_id, source_id, target_id) VALUES ($1, $2, $3)",
-          [tree.id, edge.source_id, edge.target_id]
-        );
-      }
-      await db.execute("COMMIT");
-    } catch (error) {
-      await db.execute("ROLLBACK");
-      throw error;
-    }
-  });
+  await getDb();
+  await serializeDbWrite(() =>
+    invoke("create_curriculum_tree", { tree, nodes, edges })
+  );
 }
 
 export async function renameCurriculumTree(
@@ -156,54 +117,12 @@ export async function restoreCurriculumTree(treeId: string): Promise<void> {
 export async function deleteCurriculumTreeAndLinkedWorkspaces(
   treeId: string
 ): Promise<string[]> {
-  const db = await getDb();
-  return serializeDbWrite(async () => {
-    await db.execute("BEGIN");
-    try {
-      const linkedWorkspaces = await db.select<
-        Array<{ id: string; title: string; archived_at: number | null }>
-      >(
-        `SELECT DISTINCT workspaces.id, workspaces.title, workspaces.archived_at
-         FROM curriculum_tree_nodes
-         JOIN workspaces ON workspaces.id = curriculum_tree_nodes.workspace_id
-         WHERE curriculum_tree_nodes.tree_id = $1`,
-        [treeId]
-      );
-      const unarchivedWorkspaces = getUnarchivedWorkspaces(linkedWorkspaces);
-      if (unarchivedWorkspaces.length > 0) {
-        const titles = unarchivedWorkspaces
-          .map((workspace) => `"${workspace.title}"`)
-          .join(", ");
-        throw new Error(
-          `Archive linked workspace${unarchivedWorkspaces.length === 1 ? "" : "s"} ${titles} before permanently deleting them.`
-        );
-      }
-      const workspaceIds = linkedWorkspaces.map((workspace) => workspace.id);
-      const result = await db.execute(
-        "DELETE FROM curriculum_trees WHERE id = $1",
-        [treeId]
-      );
-      if (result.rowsAffected === 0) {
-        throw new Error("The curriculum map is no longer available.");
-      }
-      for (const workspaceId of workspaceIds) {
-        const deletedWorkspace = await db.execute(
-          "DELETE FROM workspaces WHERE id = $1 AND archived_at IS NOT NULL",
-          [workspaceId]
-        );
-        if (deletedWorkspace.rowsAffected === 0) {
-          throw new Error(
-            "A linked workspace could not be permanently deleted because it is no longer archived."
-          );
-        }
-      }
-      await db.execute("COMMIT");
-      return workspaceIds;
-    } catch (error) {
-      await db.execute("ROLLBACK");
-      throw error;
-    }
-  });
+  await getDb();
+  return serializeDbWrite(() =>
+    invoke<string[]>("delete_curriculum_tree_and_linked_workspaces", {
+      treeId,
+    })
+  );
 }
 
 export async function addCurriculumTreeNode(
@@ -304,51 +223,15 @@ export async function restoreCurriculumTreeGraph(
   edges: CurriculumTreeEdge[],
   layoutMode: CanvasLayoutMode
 ): Promise<void> {
-  const db = await getDb();
-  await serializeDbWrite(async () => {
-    await db.execute("BEGIN");
-    try {
-      await db.execute(
-        "DELETE FROM curriculum_tree_edges WHERE tree_id = $1",
-        [treeId]
-      );
-      await db.execute(
-        "DELETE FROM curriculum_tree_nodes WHERE tree_id = $1",
-        [treeId]
-      );
-      for (const node of nodes) {
-        await db.execute(
-          `INSERT INTO curriculum_tree_nodes
-            (id, tree_id, workspace_id, title, summary_hint, layer_index, pos_x, pos_y)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [
-            node.id,
-            treeId,
-            node.workspace_id,
-            node.title,
-            node.summary_hint,
-            node.layer_index,
-            node.pos_x,
-            node.pos_y,
-          ]
-        );
-      }
-      for (const edge of edges) {
-        await db.execute(
-          "INSERT INTO curriculum_tree_edges (tree_id, source_id, target_id) VALUES ($1, $2, $3)",
-          [treeId, edge.source_id, edge.target_id]
-        );
-      }
-      await db.execute(
-        "UPDATE curriculum_trees SET layout_mode = $1, updated_at = $2 WHERE id = $3",
-        [layoutMode, Date.now(), treeId]
-      );
-      await db.execute("COMMIT");
-    } catch (error) {
-      await db.execute("ROLLBACK");
-      throw error;
-    }
-  });
+  await getDb();
+  await serializeDbWrite(() =>
+    invoke("restore_curriculum_tree_graph", {
+      treeId,
+      nodes,
+      edges,
+      layoutMode,
+    })
+  );
 }
 
 export async function linkCurriculumTreeWorkspace(

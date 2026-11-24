@@ -70,6 +70,7 @@ interface CurriculumTreeDagViewProps {
   showDots: boolean;
   edgeRouting: UserPreferences["edgeRouting"];
   nodeDensity: UserPreferences["nodeDensity"];
+  onProgressChange: (progress: WorkspaceProgressSummary) => void;
   onSelectWorkspace: (workspaceId: string) => Promise<void>;
   onDeletedWorkspaces: (workspaceIds: string[]) => Promise<void>;
   onCreateWorkspaceForNode: (node: CurriculumTreeNode) => void;
@@ -111,6 +112,7 @@ export function CurriculumTreeDagView({
   showDots,
   edgeRouting,
   nodeDensity,
+  onProgressChange,
   onSelectWorkspace,
   onDeletedWorkspaces,
   onCreateWorkspaceForNode,
@@ -149,10 +151,6 @@ export function CurriculumTreeDagView({
     () => summarizeCurriculumProgress(linkedWorkspaceIds, workspaceProgress),
     [linkedWorkspaceIds, workspaceProgress]
   );
-  const mapProgressPercent =
-    mapProgress.nodeCount > 0
-      ? Math.round((mapProgress.masteredCount / mapProgress.nodeCount) * 100)
-      : 0;
   const linkableWorkspaces = workspaces.filter(
     (workspace) => !linkedWorkspaceIds.has(workspace.id)
   );
@@ -256,6 +254,10 @@ export function CurriculumTreeDagView({
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    onProgressChange(mapProgress);
+  }, [mapProgress, onProgressChange]);
 
   useEffect(() => {
     let active = true;
@@ -802,34 +804,6 @@ export function CurriculumTreeDagView({
                     <span className="max-w-48 truncate text-[11px] font-semibold text-[var(--color-ink)]">
                       {selectedTree.title}
                     </span>
-                    <div className="flex min-w-[100px] flex-1 items-center gap-2">
-                      <div
-                        role="progressbar"
-                        aria-label={`${selectedTree.title} mastery progress`}
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={mapProgressPercent}
-                        aria-valuetext={
-                          mapProgress.nodeCount > 0
-                            ? `${mapProgress.masteredCount} of ${mapProgress.nodeCount} linked concepts mastered`
-                            : "No linked concepts available"
-                        }
-                        title={
-                          mapProgress.nodeCount > 0
-                            ? `${mapProgress.masteredCount} of ${mapProgress.nodeCount} linked concepts mastered`
-                            : "Link workspaces with concepts to track map progress"
-                        }
-                        className="h-1.5 min-w-8 flex-1 overflow-hidden rounded-full bg-[var(--color-border)]"
-                      >
-                        <span
-                          className="block h-full rounded-full bg-[var(--color-accent)]"
-                          style={{ width: `${mapProgressPercent}%` }}
-                        />
-                      </div>
-                      <span className="shrink-0 text-[9px] tabular-nums text-[var(--color-muted)]">
-                        {mapProgressPercent}%
-                      </span>
-                    </div>
                     <button
                       type="button"
                       onClick={() => setIsRenaming(true)}

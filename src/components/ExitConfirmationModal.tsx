@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, LoaderCircle, LogOut } from "lucide-react";
+import { LoaderCircle, LogOut } from "lucide-react";
 
 interface ExitConfirmationModalProps {
   onCancel: () => void;
@@ -89,11 +89,11 @@ export function ExitConfirmationModal({
         aria-modal="true"
         aria-labelledby="exit-confirmation-title"
         aria-describedby="exit-confirmation-description"
-        className="exit-confirmation-panel w-full max-w-[420px] rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 text-[var(--text-primary)] shadow-[0_24px_80px_rgba(0,0,0,0.28)] sm:p-6"
+        className="exit-confirmation-panel w-full max-w-[360px] rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 text-[var(--text-primary)] shadow-[0_24px_80px_rgba(0,0,0,0.28)]"
       >
         <div className="flex items-start gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700">
-            <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent-soft)] text-[var(--color-accent)]">
+            <LogOut className="h-5 w-5" aria-hidden="true" />
           </span>
           <div className="min-w-0 pt-0.5">
             <h2
@@ -104,11 +104,10 @@ export function ExitConfirmationModal({
             </h2>
             <p
               id="exit-confirmation-description"
-              className="mt-2 text-xs leading-5 text-[var(--text-secondary)]"
+              className="mt-1 text-xs leading-5 text-[var(--text-secondary)]"
             >
-              Noesis will close. Changes already saved locally will remain, but
-              unsaved form or settings edits will be discarded, and any AI
-              generation or file import in progress will stop.
+              You'll lose unsaved changes. Active generation or imports will
+              stop.
             </p>
           </div>
         </div>
@@ -120,22 +119,20 @@ export function ExitConfirmationModal({
               if (!isExitingRef.current) onCancelRef.current();
             }}
             disabled={isExiting}
-            className="rounded-lg border border-[var(--border-subtle)] px-3.5 py-2 text-xs font-semibold text-[var(--text-primary)] transition hover:bg-[var(--bg-canvas)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] disabled:opacity-50"
+            className="min-h-10 rounded-lg border border-[var(--border-subtle)] px-4 text-xs font-semibold text-[var(--text-primary)] transition hover:bg-[var(--bg-canvas)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] disabled:opacity-50"
           >
-            Stay in Noesis
+            Cancel
           </button>
           <button
             type="button"
             onClick={() => void confirmExit()}
             disabled={isExiting}
-            className="inline-flex min-w-[120px] items-center justify-center gap-1.5 rounded-lg bg-rose-700 px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-rose-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 disabled:cursor-wait disabled:opacity-70"
+            className="inline-flex min-h-10 min-w-[104px] items-center justify-center gap-1.5 rounded-lg bg-rose-700 px-4 text-xs font-semibold text-white transition hover:bg-rose-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 disabled:cursor-wait disabled:opacity-70"
           >
-            {isExiting ? (
+            {isExiting && (
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
-            ) : (
-              <LogOut className="h-3.5 w-3.5" aria-hidden />
             )}
-            {isExiting ? "Exiting…" : "Exit Noesis"}
+            {isExiting ? "Exiting…" : "Exit app"}
           </button>
         </div>
       </div>

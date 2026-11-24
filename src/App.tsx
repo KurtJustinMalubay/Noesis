@@ -41,6 +41,7 @@ import type {
   GraphEdge,
   GraphNode,
 } from "./types/domain";
+import type { WorkspaceProgressSummary } from "./db/repositories/workspaceRepo";
 import type { UserPreferences } from "./ai/keyStore";
 import { getWorkspaceDeletionSummary } from "./db/repositories/workspaceRepo";
 import {
@@ -193,6 +194,11 @@ export default function App() {
   const [selectedCurriculumTreeId, setSelectedCurriculumTreeId] = useState<
     string | null
   >(null);
+  const [curriculumProgress, setCurriculumProgress] =
+    useState<WorkspaceProgressSummary>({
+      nodeCount: 0,
+      masteredCount: 0,
+    });
   const [isCreatingCurriculumTree, setIsCreatingCurriculumTree] =
     useState(false);
   const [isExitConfirmationOpen, setIsExitConfirmationOpen] = useState(false);
@@ -252,6 +258,10 @@ export default function App() {
   );
   const requestExitConfirmation = useCallback(
     () => setIsExitConfirmationOpen(true),
+    []
+  );
+  const updateCurriculumProgress = useCallback(
+    (progress: WorkspaceProgressSummary) => setCurriculumProgress(progress),
     []
   );
 
@@ -770,6 +780,15 @@ export default function App() {
                     {masteredCount} of {store.nodes.length} mastered
                   </p>
                 )}
+                {mainView === "curriculum" &&
+                  !isCreatingCurriculumTree &&
+                  selectedCurriculumTreeId && (
+                    <p className="mt-0.5 text-[11px] text-[var(--color-muted)]">
+                      {curriculumProgress.nodeCount > 0
+                        ? `${curriculumProgress.masteredCount} of ${curriculumProgress.nodeCount} linked concepts mastered`
+                        : "No linked concepts yet"}
+                    </p>
+                  )}
               </div>
               {mainView !== "curriculum" && store.nodes.length > 0 && (
                 <div className="hidden h-1.5 w-28 overflow-hidden rounded-full bg-[var(--color-border)] sm:block">
@@ -782,6 +801,44 @@ export default function App() {
                   />
                 </div>
               )}
+              {mainView === "curriculum" &&
+                !isCreatingCurriculumTree &&
+                selectedCurriculumTreeId && (
+                  <div
+                    role="progressbar"
+                    aria-label="Curriculum map mastery progress"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={
+                      curriculumProgress.nodeCount > 0
+                        ? Math.round(
+                            (curriculumProgress.masteredCount /
+                              curriculumProgress.nodeCount) *
+                              100
+                          )
+                        : 0
+                    }
+                    aria-valuetext={
+                      curriculumProgress.nodeCount > 0
+                        ? `${curriculumProgress.masteredCount} of ${curriculumProgress.nodeCount} linked concepts mastered`
+                        : "No linked concepts available"
+                    }
+                    className="hidden h-1.5 w-28 overflow-hidden rounded-full bg-[var(--color-border)] sm:block"
+                  >
+                    <div
+                      className="h-full rounded-full bg-[var(--color-success)]"
+                      style={{
+                        width: `${
+                          curriculumProgress.nodeCount > 0
+                            ? (curriculumProgress.masteredCount /
+                                curriculumProgress.nodeCount) *
+                              100
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                )}
               <nav
                 aria-label="Workspace views"
                 className="flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-1 shadow-sm"
@@ -920,6 +977,7 @@ export default function App() {
                 workspaces={store.workspaces}
                 workspaceProgress={curriculumWorkspaceProgress}
                 workspaceDeletionRevision={store.workspaceDeletionRevision}
+                onProgressChange={updateCurriculumProgress}
                 trees={curriculumTrees}
                 onTreesChange={setCurriculumTrees}
                 onArchivedTreesChange={setArchivedCurriculumTrees}
