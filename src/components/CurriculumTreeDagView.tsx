@@ -47,14 +47,17 @@ import {
   updateCurriculumTreeNodePosition,
   updateCurriculumTreeNodePositions,
 } from "../db/repositories/curriculumTreeRepo";
+import type { WorkspaceProgressSummary } from "../db/repositories/workspaceRepo";
 import { computeSugiyamaLayout } from "../engine/sugiyamaLayout";
 import { validateAndLayerDag } from "../engine/dagTopology";
 import type { UserPreferences } from "../ai/keyStore";
+import { summarizeCurriculumProgress } from "../utils/curriculumProgress";
 import { DagCanvas } from "./DagCanvas";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 
 interface CurriculumTreeDagViewProps {
   workspaces: Workspace[];
+  workspaceProgress: Record<string, WorkspaceProgressSummary>;
   workspaceDeletionRevision: number;
   trees: CurriculumTree[];
   onTreesChange: Dispatch<SetStateAction<CurriculumTree[]>>;
@@ -95,6 +98,7 @@ function copySnapshot(
 
 export function CurriculumTreeDagView({
   workspaces,
+  workspaceProgress,
   workspaceDeletionRevision,
   trees,
   onTreesChange,
@@ -141,6 +145,14 @@ export function CurriculumTreeDagView({
     () => new Set(nodes.flatMap((node) => node.workspace_id ?? [])),
     [nodes]
   );
+  const mapProgress = useMemo(
+    () => summarizeCurriculumProgress(linkedWorkspaceIds, workspaceProgress),
+    [linkedWorkspaceIds, workspaceProgress]
+  );
+  const mapProgressPercent =
+    mapProgress.nodeCount > 0
+      ? Math.round((mapProgress.masteredCount / mapProgress.nodeCount) * 100)
+      : 0;
   const linkableWorkspaces = workspaces.filter(
     (workspace) => !linkedWorkspaceIds.has(workspace.id)
   );
@@ -762,7 +774,7 @@ export function CurriculumTreeDagView({
             <div className="relative min-h-0 flex-1 overflow-hidden">
               <div
                 data-canvas-toolbar
-                className="absolute left-4 top-14 z-20 flex max-w-[calc(100%-2rem)] items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)]/95 px-3 py-2 shadow-[0_5px_18px_rgba(35,51,60,0.12)] backdrop-blur sm:top-4"
+                className="absolute left-4 top-14 z-20 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)]/95 px-3 py-2 shadow-[0_5px_18px_rgba(35,51,60,0.12)] backdrop-blur sm:top-4"
               >
                 {isRenaming ? (
                   <form
@@ -790,6 +802,34 @@ export function CurriculumTreeDagView({
                     <span className="max-w-48 truncate text-[11px] font-semibold text-[var(--color-ink)]">
                       {selectedTree.title}
                     </span>
+                    <div className="flex min-w-[100px] flex-1 items-center gap-2">
+                      <div
+                        role="progressbar"
+                        aria-label={`${selectedTree.title} mastery progress`}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={mapProgressPercent}
+                        aria-valuetext={
+                          mapProgress.nodeCount > 0
+                            ? `${mapProgress.masteredCount} of ${mapProgress.nodeCount} linked concepts mastered`
+                            : "No linked concepts available"
+                        }
+                        title={
+                          mapProgress.nodeCount > 0
+                            ? `${mapProgress.masteredCount} of ${mapProgress.nodeCount} linked concepts mastered`
+                            : "Link workspaces with concepts to track map progress"
+                        }
+                        className="h-1.5 min-w-8 flex-1 overflow-hidden rounded-full bg-[var(--color-border)]"
+                      >
+                        <span
+                          className="block h-full rounded-full bg-[var(--color-accent)]"
+                          style={{ width: `${mapProgressPercent}%` }}
+                        />
+                      </div>
+                      <span className="shrink-0 text-[9px] tabular-nums text-[var(--color-muted)]">
+                        {mapProgressPercent}%
+                      </span>
+                    </div>
                     <button
                       type="button"
                       onClick={() => setIsRenaming(true)}

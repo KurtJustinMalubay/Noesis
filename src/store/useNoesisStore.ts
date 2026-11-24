@@ -326,10 +326,13 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
 
     if (workspaces.length > 0) {
       await get().selectWorkspace(workspaces[0].id);
-    } else if (!hasConfiguredApiKey()) {
-      set({ activeModal: "settings" });
     } else {
-      set({ activeModal: "new_workspace" });
+      set({ workspaceProgress: await getWorkspaceProgressSummaries() });
+      if (!hasConfiguredApiKey()) {
+        set({ activeModal: "settings" });
+      } else {
+        set({ activeModal: "new_workspace" });
+      }
     }
   },
 

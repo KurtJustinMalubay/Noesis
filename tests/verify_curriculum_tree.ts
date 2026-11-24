@@ -2,6 +2,7 @@ import {
   canReach,
   deduplicateCurriculumEdges,
 } from "../src/utils/curriculumDag.ts";
+import { summarizeCurriculumProgress } from "../src/utils/curriculumProgress.ts";
 import { getUnarchivedWorkspaces } from "../src/utils/workspaceArchive.ts";
 
 function assert(condition: boolean, message: string): void {
@@ -41,5 +42,17 @@ assert(
     .map((workspace) => workspace.id)
     .join(",") === "active",
   "linked workspaces must be archived before permanent deletion"
+);
+const progress = summarizeCurriculumProgress(
+  ["year-1", "year-2", "year-1"],
+  {
+    "year-1": { nodeCount: 2, masteredCount: 1 },
+    "year-2": { nodeCount: 3, masteredCount: 2 },
+    unlinked: { nodeCount: 8, masteredCount: 8 },
+  }
+);
+assert(
+  progress.nodeCount === 5 && progress.masteredCount === 3,
+  "map progress should aggregate each linked workspace once and exclude unlinked workspaces"
 );
 console.log("✓ Curriculum prerequisite traversal tests passed!");

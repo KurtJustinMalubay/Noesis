@@ -3,6 +3,7 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -634,6 +635,21 @@ export default function App() {
   const masteredCount = store.nodes.filter(
     (node) => node.status === "mastered"
   ).length;
+  const curriculumWorkspaceProgress = useMemo(() => {
+    if (!store.activeWorkspaceId) return store.workspaceProgress;
+    return {
+      ...store.workspaceProgress,
+      [store.activeWorkspaceId]: {
+        nodeCount: store.nodes.length,
+        masteredCount,
+      },
+    };
+  }, [
+    masteredCount,
+    store.activeWorkspaceId,
+    store.nodes.length,
+    store.workspaceProgress,
+  ]);
 
   return (
     <div
@@ -902,6 +918,7 @@ export default function App() {
             >
               <CurriculumTreeView
                 workspaces={store.workspaces}
+                workspaceProgress={curriculumWorkspaceProgress}
                 workspaceDeletionRevision={store.workspaceDeletionRevision}
                 trees={curriculumTrees}
                 onTreesChange={setCurriculumTrees}
