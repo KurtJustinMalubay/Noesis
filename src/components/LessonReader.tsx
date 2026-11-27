@@ -11,15 +11,32 @@ import {
   FileText,
   GraduationCap,
   Copy,
+  LocateFixed,
   Maximize2,
   Minimize2,
   Plus,
   RefreshCw,
   Shapes,
+  SkipBack,
+  SkipForward,
   Sparkles,
   Trash2,
-  X,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
+import {
+  isTtsSupported,
+  speakWithAppVoice,
+  splitMarkdownIntoSpeechSections,
+  stopSpeaking,
+} from "../utils/speech";
+import {
+  clearWordHighlight,
+  collectDomWords,
+  highlightSpokenWord,
+  type DomWordEntry,
+} from "../utils/wordHighlight";
+import { normalizeEscapedMarkdownLineBreaks } from "../utils/normalizeEscapedMarkdownLineBreaks.ts";
 import type { GraphNode } from "../types/domain";
 import type { AppTheme } from "../ai/keyStore";
 import {
@@ -40,6 +57,7 @@ import {
   type LessonMedia,
 } from "./ui/LessonMediaViewer";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
+import { DrawerChevronIcon } from "./DrawerChevronIcon";
 
 const EXAMPLE_TOOLS: Array<{ id: WorkedExampleTool; label: string }> = [
   { id: "mermaid", label: "Mermaid Diagram / Automata Graph" },
@@ -130,6 +148,27 @@ export function LessonReader({
     useState(false);
   const [isGeneratingExample, setIsGeneratingExample] = useState(false);
   const [isOpeningVisualBoard, setIsOpeningVisualBoard] = useState(false);
+  const [isSpeakingLesson, setIsSpeakingLesson] = useState(false);
+  const [isFollowingSpeech, setIsFollowingSpeech] = useState(true);
+  const isFollowingSpeechRef = useRef(true);
+  isFollowingSpeechRef.current = isFollowingSpeech;
+  const [speechSectionIndex, setSpeechSectionIndex] = useState(0);
+  const speechRunRef = useRef(0);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const sectionRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const domWordsRef = useRef<DomWordEntry[]>([]);
+  const wordCursorRef = useRef(0);
+  const lastFollowScrollAtRef = useRef(0);
+  const lastFollowCheckAtRef = useRef(0);
+  const pendingFollowFrameRef = useRef<number | null>(null);
+  const pendingFollowRangeRef = useRef<Range | null>(null);
+  const cancelPendingFollow = () => {
+    if (pendingFollowFrameRef.current !== null) {
+      cancelAnimationFrame(pendingFollowFrameRef.current);
+      pendingFollowFrameRef.current = null;
+    }
+    pendingFollowRangeRef.current = null;
+  };
   const [streamedExample, setStreamedExample] = useState("");
   const exampleAbortRef = useRef<AbortController | null>(null);
   const onToastRef = useRef(onToast);
@@ -148,7 +187,74 @@ export function LessonReader({
 
   useEffect(() => {
     setIsRegenerationConfirmationOpen(false);
+    speechRunRef.current += 1;
+    stopSpeaking();
+    clearWordHighlight();
+    cancelPendingFollow();
+    setIsSpeakingLesson(false);
+    setSpeechSectionIndex(0);
   }, [node.id]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      speechRunRef.current += 1;
+      stopSpeaking();
+      clearWordHighlight();
+      cancelPendingFollow();
+      setIsSpeakingLesson(false);
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    return () => {
+      speechRunRef.current += 1;
+      stopSpeaking();
+      clearWordHighlight();
+      cancelPendingFollow();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (
+        document.querySelector(
+          '[aria-modal="true"], [data-confirm-delete], [data-exit-confirmation]'
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (activeMedia) {
+        setActiveMedia(null);
+      } else if (isRegenerationConfirmationOpen) {
+        setIsRegenerationConfirmationOpen(false);
+      } else {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [activeMedia, isOpen, isRegenerationConfirmationOpen, onClose]);
+
+  useEffect(() => {
+    if (!isOpen || !isRegenerationConfirmationOpen) return;
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(
+          '#lesson-regeneration-confirmation, [aria-controls="lesson-regeneration-confirmation"]'
+        )
+      ) {
+        return;
+      }
+      setIsRegenerationConfirmationOpen(false);
+    };
+    window.addEventListener("pointerdown", handleOutsidePointerDown);
+    return () =>
+      window.removeEventListener("pointerdown", handleOutsidePointerDown);
+  }, [isOpen, isRegenerationConfirmationOpen]);
 
   useEffect(() => {
     enterFramesRef.current.forEach((frame) => cancelAnimationFrame(frame));
@@ -368,6 +474,141 @@ export function LessonReader({
     setIsRendered(false);
   };
 
+  const lessonMarkdown = normalizeEscapedMarkdownLineBreaks(
+    node.lesson_markdown ?? ""
+  );
+  const speechSections =
+    lessonMarkdown && !isHydrating
+      ? splitMarkdownIntoSpeechSections(node.title, lessonMarkdown)
+      : [];
+  const clampedSectionIndex = Math.min(
+    speechSectionIndex,
+    Math.max(0, speechSections.length - 1)
+  );
+
+  const stopLessonSpeech = () => {
+    speechRunRef.current += 1;
+    stopSpeaking();
+    clearWordHighlight();
+    cancelPendingFollow();
+    setIsSpeakingLesson(false);
+  };
+
+  const scrollRangeIntoFollowBand = (range: Range) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const now = performance.now();
+    pendingFollowRangeRef.current = range;
+    if (
+      now - lastFollowCheckAtRef.current < 100 ||
+      pendingFollowFrameRef.current !== null
+    ) {
+      return;
+    }
+    lastFollowCheckAtRef.current = now;
+
+    pendingFollowFrameRef.current = requestAnimationFrame(() => {
+      pendingFollowFrameRef.current = null;
+      if (!isFollowingSpeechRef.current) return;
+      const currentRange = pendingFollowRangeRef.current;
+      pendingFollowRangeRef.current = null;
+      if (!currentRange) return;
+      const wordRect = currentRange.getBoundingClientRect();
+      if (wordRect.height === 0 && wordRect.width === 0) return;
+      const containerRect = container.getBoundingClientRect();
+      const topThreshold = containerRect.top + containerRect.height * 0.18;
+      const bottomThreshold = containerRect.bottom - containerRect.height * 0.22;
+
+      const checkTime = performance.now();
+      if (
+        (wordRect.top < topThreshold || wordRect.bottom > bottomThreshold) &&
+        checkTime - lastFollowScrollAtRef.current >= 250
+      ) {
+        lastFollowScrollAtRef.current = checkTime;
+        const targetCenter = containerRect.top + containerRect.height * 0.42;
+        const delta = wordRect.top - targetCenter;
+        container.scrollBy({ top: delta, behavior: "smooth" });
+      }
+    });
+  };
+
+  const speakLessonSection = (index: number) => {
+    if (speechSections.length === 0) return;
+    const bounded = Math.max(0, Math.min(speechSections.length - 1, index));
+    const runId = speechRunRef.current + 1;
+    speechRunRef.current = runId;
+    setSpeechSectionIndex(bounded);
+    setIsSpeakingLesson(true);
+    setIsFollowingSpeech(true);
+    clearWordHighlight();
+    wordCursorRef.current = 0;
+
+    const sectionEl = sectionRefs.current[bounded];
+    domWordsRef.current = sectionEl ? collectDomWords(sectionEl) : [];
+
+    speakWithAppVoice(speechSections[bounded].text, {
+      onStart: () => {
+        if (speechRunRef.current === runId) {
+          setIsSpeakingLesson(true);
+          const el = sectionRefs.current[bounded];
+          if (el && domWordsRef.current.length === 0) {
+            domWordsRef.current = collectDomWords(el);
+          }
+        }
+      },
+      onWord: (progress) => {
+        if (speechRunRef.current !== runId) return;
+        if (domWordsRef.current.length === 0) {
+          const el = sectionRefs.current[bounded];
+          if (el) domWordsRef.current = collectDomWords(el);
+        }
+        const ratio =
+          progress.totalChars > 0 ? progress.charIndex / progress.totalChars : 0;
+        const { matchedIndex, range } = highlightSpokenWord(
+          domWordsRef.current,
+          progress.word,
+          ratio,
+          wordCursorRef.current
+        );
+        wordCursorRef.current = matchedIndex;
+        if (isFollowingSpeechRef.current && range) {
+          scrollRangeIntoFollowBand(range);
+        }
+      },
+      onEnd: () => {
+        if (speechRunRef.current !== runId) return;
+        clearWordHighlight();
+        if (bounded + 1 < speechSections.length) {
+          speakLessonSection(bounded + 1);
+        } else {
+          setIsSpeakingLesson(false);
+        }
+      },
+      onError: (msg) => {
+        if (speechRunRef.current !== runId) return;
+        clearWordHighlight();
+        setIsSpeakingLesson(false);
+        onToast?.(msg);
+      },
+    });
+  };
+
+  useEffect(() => {
+    if (!isSpeakingLesson || !isFollowingSpeech) return;
+    const target = sectionRefs.current[clampedSectionIndex];
+    const container = scrollContainerRef.current;
+    if (!target || !container) return;
+    const targetRect = target.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const isAlreadyVisible =
+      targetRect.top >= containerRect.top &&
+      targetRect.top <= containerRect.bottom - 80;
+    if (!isAlreadyVisible) {
+      lastFollowScrollAtRef.current = performance.now();
+      target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [isSpeakingLesson, isFollowingSpeech, clampedSectionIndex]);
+
   if (!isRendered) return null;
 
   return (
@@ -382,64 +623,156 @@ export function LessonReader({
         isVisible ? "lesson-reader-panel-visible" : ""
       }`}
     >
-      <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border)] px-5 py-5 sm:px-6">
-        <div>
-          <div className="flex items-center gap-2 font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--color-accent)]">
-            <BookOpen className="h-3.5 w-3.5" />
-            <span>Layer {node.layer_index + 1} / Module</span>
+      <div className="border-b border-[var(--color-border)] px-5 py-4 sm:px-6 sm:py-5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2 font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--color-accent)]">
+            <BookOpen className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">Layer {node.layer_index + 1} / Module</span>
             {node.status === "mastered" && (
-              <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-2 py-0.5 font-sans text-[9px] font-semibold normal-case tracking-normal text-[var(--color-success)]">
+              <span className="shrink-0 rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-2 py-0.5 font-sans text-[9px] font-semibold normal-case tracking-normal text-[var(--color-success)]">
                 Mastered
               </span>
             )}
           </div>
-          <h2 className="mt-2 font-serif text-2xl font-semibold leading-tight tracking-tight text-[var(--color-ink)]">
-            {node.title}
-          </h2>
-          <p className="mt-2 max-w-[52ch] text-[13px] leading-5 text-[var(--color-muted)]">
-            <RichContent inline>{node.summary_hint}</RichContent>
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {onOpenVisualBoard && (
+          <div className="flex shrink-0 items-center gap-1">
             <button
               type="button"
-              onClick={() => void openVisualBoard()}
-              disabled={isHydrating || isOpeningVisualBoard}
-              className="inline-flex h-10 items-center gap-2 rounded-xl border border-[var(--color-border)] px-3 text-xs font-semibold text-[var(--color-accent)] transition hover:bg-[var(--color-accent-soft)] disabled:cursor-wait disabled:opacity-50"
-              aria-label="Open or create this lesson's visual board"
-              title="Open or create this lesson's visual board"
+              onClick={() => setIsExpanded((expanded) => !expanded)}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+              aria-label={isExpanded ? "Restore lesson panel size" : "Expand lesson panel"}
+              aria-pressed={isExpanded}
+              title={isExpanded ? "Restore panel size" : "Expand panel"}
             >
-              <Shapes className="h-4 w-4" />
-              <span>Visual board</span>
+              {isExpanded ? (
+                <Minimize2 className="h-4 w-4" />
+              ) : (
+                <Maximize2 className="h-4 w-4" />
+              )}
             </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setIsExpanded((expanded) => !expanded)}
-            className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
-            aria-label={isExpanded ? "Restore lesson panel size" : "Expand lesson panel"}
-            aria-pressed={isExpanded}
-            title={isExpanded ? "Restore panel size" : "Expand panel"}
-          >
-            {isExpanded ? (
-              <Minimize2 className="h-4 w-4" />
-            ) : (
-              <Maximize2 className="h-4 w-4" />
-            )}
-          </button>
-          <button
-            onClick={onClose}
-            className="flex h-10 w-10 items-center justify-center rounded-xl text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
-            aria-label="Close lesson"
-          >
-            <X className="h-4 w-4" />
-          </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="group/close flex h-8 w-8 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] focus-visible:outline-2 focus-visible:outline-[var(--color-focus-ring)]"
+              aria-label="Close lesson"
+              title="Collapse lesson"
+            >
+              <DrawerChevronIcon
+                direction="right"
+                className="h-4 w-4 motion-safe:transition-transform motion-safe:duration-150 group-hover/close:translate-x-0.5"
+              />
+            </button>
+          </div>
         </div>
+
+        <h2 className="mt-2 font-serif text-2xl font-semibold leading-tight tracking-tight text-[var(--color-ink)]">
+          {node.title}
+        </h2>
+        <p className="mt-1.5 max-w-[60ch] text-[13px] leading-5 text-[var(--color-muted)]">
+          <RichContent inline>{node.summary_hint}</RichContent>
+        </p>
+
+        {((isTtsSupported() && speechSections.length > 0) || onOpenVisualBoard) && (
+          <div className="mt-3.5 flex flex-wrap items-center gap-2">
+            {isTtsSupported() && speechSections.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isSpeakingLesson) {
+                      stopLessonSpeech();
+                      return;
+                    }
+                    speakLessonSection(clampedSectionIndex);
+                  }}
+                  aria-pressed={isSpeakingLesson}
+                  aria-label={isSpeakingLesson ? "Stop reading lesson" : "Listen to lesson"}
+                  title={isSpeakingLesson ? "Stop reading" : "Listen to lesson"}
+                  className={`inline-flex h-9 items-center gap-1.5 rounded-xl border px-3 text-xs font-semibold transition ${
+                    isSpeakingLesson
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                      : "border-[var(--color-border)] text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                  }`}
+                >
+                  {isSpeakingLesson ? (
+                    <VolumeX className="h-3.5 w-3.5" />
+                  ) : (
+                    <Volume2 className="h-3.5 w-3.5" />
+                  )}
+                  <span>{isSpeakingLesson ? "Stop" : "Listen"}</span>
+                </button>
+
+                {speechSections.length > 1 && (
+                  <div className="inline-flex h-9 items-center rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-1">
+                    <button
+                      type="button"
+                      onClick={() => speakLessonSection(clampedSectionIndex - 1)}
+                      disabled={clampedSectionIndex <= 0}
+                      className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:opacity-35"
+                      aria-label="Previous lesson section"
+                      title="Previous section"
+                    >
+                      <SkipBack className="h-3.5 w-3.5" />
+                    </button>
+                    <select
+                      value={clampedSectionIndex}
+                      onChange={(event) =>
+                        speakLessonSection(Number(event.target.value))
+                      }
+                      aria-label="Jump to lesson section"
+                      title="Jump to section"
+                      className="max-w-[150px] cursor-pointer select-none truncate bg-transparent px-1.5 text-[11px] font-medium text-[var(--color-ink)] outline-none focus:outline-none focus-visible:outline-none focus:ring-0"
+                    >
+                      {speechSections.map((section, index) => (
+                        <option key={section.id} value={index}>
+                          {index + 1}/{speechSections.length} · {section.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => speakLessonSection(clampedSectionIndex + 1)}
+                      disabled={clampedSectionIndex >= speechSections.length - 1}
+                      className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:opacity-35"
+                      aria-label="Next lesson section"
+                      title="Next section"
+                    >
+                      <SkipForward className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {onOpenVisualBoard && (
+              <button
+                type="button"
+                onClick={() => void openVisualBoard()}
+                disabled={isHydrating || isOpeningVisualBoard}
+                className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-[var(--color-border)] px-3 text-xs font-semibold text-[var(--color-accent)] transition hover:bg-[var(--color-accent-soft)] disabled:cursor-wait disabled:opacity-50"
+                aria-label="Open or create this lesson's visual board"
+                title="Open or create this lesson's visual board"
+              >
+                <Shapes className="h-3.5 w-3.5" />
+                <span>Visual board</span>
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div
-        className={`lesson-reader-content flex-1 space-y-6 overflow-y-auto bg-[var(--color-panel)] px-5 py-6 select-text sm:px-6 ${
+        ref={scrollContainerRef}
+        onWheel={() => {
+          if (isSpeakingLesson && isFollowingSpeech) {
+            setIsFollowingSpeech(false);
+          }
+        }}
+        onTouchMove={() => {
+          if (isSpeakingLesson && isFollowingSpeech) {
+            setIsFollowingSpeech(false);
+          }
+        }}
+        className={`lesson-reader-content relative flex-1 space-y-6 overflow-y-auto bg-[var(--color-panel)] px-5 py-6 select-text sm:px-6 ${
           isExpanded ? "lesson-reader-content-expanded" : ""
         }`}
       >
@@ -450,7 +783,7 @@ export function LessonReader({
               Generating lesson content...
             </p>
             <p className="mt-1 text-xs text-[var(--color-muted)]">
-              Grounding with relevant local sources
+              Using your study files
             </p>
             {generationPreview && (
               <pre className="mt-5 max-h-[45vh] w-full max-w-2xl overflow-y-auto whitespace-pre-wrap rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-4 text-left font-sans text-sm leading-6 text-[var(--color-ink)]">
@@ -612,12 +945,55 @@ export function LessonReader({
                 </div>
               </div>
             )}
-            <RichContent
-              className="prose lesson-prose prose-sm max-w-[72ch] select-text"
-              onOpenMedia={setActiveMedia}
-            >
-              {node.lesson_markdown ?? "_No lesson content generated yet._"}
-            </RichContent>
+            {speechSections.length > 0 ? (
+              <div className="space-y-4">
+                {speechSections.map((section, index) => {
+                  const isCurrentSection =
+                    isSpeakingLesson && index === clampedSectionIndex;
+                  return (
+                    <div
+                      key={section.id}
+                      ref={(el) => {
+                        sectionRefs.current[index] = el;
+                      }}
+                      className={`rounded-r-xl transition-colors duration-200 ${
+                        isCurrentSection
+                          ? "border-l-2 border-[var(--color-accent)] bg-[var(--color-accent-soft)]/50 py-2 pl-3.5 pr-2"
+                          : ""
+                      }`}
+                    >
+                      <RichContent
+                        className="prose lesson-prose prose-sm max-w-[72ch] select-text"
+                        onOpenMedia={setActiveMedia}
+                      >
+                        {section.markdown}
+                      </RichContent>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <RichContent
+                className="prose lesson-prose prose-sm max-w-[72ch] select-text"
+                onOpenMedia={setActiveMedia}
+              >
+                {lessonMarkdown || "_No lesson content generated yet._"}
+              </RichContent>
+            )}
+
+            {isSpeakingLesson && !isFollowingSpeech && (
+              <div className="pointer-events-none sticky bottom-3 z-20 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setIsFollowingSpeech(true)}
+                  className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full bg-[var(--color-accent)] px-3.5 py-1.5 text-xs font-semibold text-white shadow-lg transition hover:brightness-105"
+                  aria-label="Follow along with spoken lesson section"
+                >
+                  <LocateFixed className="h-3.5 w-3.5" />
+                  Follow
+                </button>
+              </div>
+            )}
 
             <section className="space-y-3 border-t border-[var(--color-border)] pt-4">
               <div className="flex items-center justify-between gap-2">

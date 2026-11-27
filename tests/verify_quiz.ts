@@ -1,5 +1,6 @@
 import {
   getDifficultyQuotas,
+  getLocalQuizBatches,
   generateNodeQuiz,
   loadQuizPreferences,
   gradeSubjectiveBatch,
@@ -135,6 +136,16 @@ async function run(): Promise<void> {
       progressiveTen.medium === 4 &&
       progressiveTen.hard === 3,
     "progressive hybrid mode should distribute ten questions across easy, medium, and hard"
+  );
+  const compactLocalBatches = getLocalQuizBatches(
+    new Map([["mcq", 10]]),
+    1200
+  );
+  assert(
+    compactLocalBatches
+      .map((batch) => batch.get("mcq"))
+      .join(",") === "4,4,2",
+    "local quiz batches should shrink to fit the configured response token budget"
   );
 
   let requestCount = 0;
@@ -306,7 +317,9 @@ async function run(): Promise<void> {
       contents?: Array<{ parts?: Array<{ text?: string }> }>;
       generationConfig?: {
         maxOutputTokens?: number;
+        responseMimeType?: string;
         responseSchema?: {
+          type?: string;
           properties?: {
             questions?: { items?: { required?: string[] } };
           };
@@ -320,11 +333,15 @@ async function run(): Promise<void> {
         body.generationConfig?.responseSchema?.properties?.questions?.items
           ?.required ?? [];
       assert(
-        required.includes("options") &&
+        body.generationConfig?.responseMimeType === "application/json" &&
+          body.generationConfig.responseSchema?.type === "OBJECT" &&
+          required.includes("options") &&
           required.includes("answerIndex") &&
           required.includes("referenceAnswer") &&
-          required.includes("starterCode"),
-        "structured quiz schema should require fields needed by its question types"
+          required.includes("starterCode") &&
+          !required.includes("difficulty") &&
+          !required.includes("id"),
+        "structured quiz schema should require only question fields and leave difficulty assignment to the app"
       );
     }
     const questions = generationCalls === 1 ? firstBatch : [codingQuestion];
@@ -350,10 +367,12 @@ async function run(): Promise<void> {
       generated.some((question) => question.type === "open_ended") &&
       generated.map((question) => question.difficulty).join(",") ===
         "easy,medium,hard" &&
-      generationPrompts[0].includes("Difficulty quotas: 1 easy, 1 medium, 1 hard") &&
+      generationPrompts[0].includes(
+        "Required questions: 1 mcq, 1 open_ended, 1 coding"
+      ) &&
       generationPrompts[1].includes("Missing question counts: 1 coding") &&
       generationBudgets[0] >= 1300,
-    "quiz generation should request only missing formats with enough output tokens, then merge the valid completion"
+    "quiz generation should use a concise format request, then merge valid missing questions"
   );
 
   let tolerantGenerationCalls = 0;
@@ -424,12 +443,99 @@ async function run(): Promise<void> {
     "quiz generation should accept common provider field variants and synthesize omitted non-answer metadata without retrying"
   );
 
+  let rateLimitCalls = 0;
+  let rateLimitSchemaKeys: string[] = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    rateLimitCalls += 1;
+    const body = JSON.parse(String(init?.body)) as {
+      generationConfig?: {
+        responseSchema?: {
+          properties?: {
+            questions?: {
+              items?: { properties?: Record<string, unknown> };
+            };
+          };
+        };
+      };
+    };
+    rateLimitSchemaKeys = Object.keys(
+      body.generationConfig?.responseSchema?.properties?.questions?.items
+        ?.properties ?? {}
+    );
+    return new Response(
+      JSON.stringify({ error: { message: "Quota exceeded" } }),
+      { status: 429, statusText: "Too Many Requests" }
+    );
+  }) as typeof fetch;
+  let rateLimitMessage = "";
+  try {
+    await generateNodeQuiz(quizNode, {
+      formats: ["mcq"],
+      count: 3,
+      language: "auto",
+    });
+  } catch (error) {
+    rateLimitMessage = error instanceof Error ? error.message : String(error);
+  }
+  assert(
+    rateLimitCalls === 1 &&
+      rateLimitSchemaKeys.sort().join(",") ===
+        "answerIndex,explanation,options,prompt,type" &&
+      rateLimitMessage.includes("rate limit") &&
+      rateLimitMessage.includes("try fewer questions"),
+    "multiple-choice quizzes should use a minimal schema and stop after one rate-limited request with free-tier guidance"
+  );
+
+  storedAiSettings = JSON.stringify({
+    provider: "openai-compatible",
+    openAiPreset: "groq",
+    openAiApiKeys: { groq: "test-key" },
+    openAiFastModel: "llama-3.1-8b-instant",
+    localBaseUrl: "https://api.groq.com/openai/v1",
+  });
+  let hostedProviderCalls = 0;
+  let hostedProviderPrompt = "";
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    hostedProviderCalls += 1;
+    const body = JSON.parse(String(init?.body)) as {
+      messages?: Array<{ role: string; content: string }>;
+    };
+    hostedProviderPrompt =
+      body.messages?.find((message) => message.role === "user")?.content ?? "";
+    const questions = Array.from({ length: 12 }, (_, index) => ({
+      id: `hosted-mcq-${index}`,
+      type: "mcq",
+      prompt: `Hosted-provider question ${index + 1}`,
+      options: ["A", "B", "C", "D"],
+      answerIndex: index % 4,
+      explanation: "This tests the concept.",
+    }));
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ questions }) } }],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }) as typeof fetch;
+  const hostedProviderQuestions = await generateNodeQuiz(quizNode, {
+    formats: ["mcq"],
+    count: 12,
+    language: "auto",
+  });
+  assert(
+    hostedProviderQuestions.length === 12 &&
+      hostedProviderCalls === 1 &&
+      !hostedProviderPrompt.includes("Batch 1 of"),
+    "hosted OpenAI-compatible providers should generate a quiz in one request instead of local-model batches"
+  );
+
   storedAiSettings = JSON.stringify({
     provider: "openai-compatible",
     localBaseUrl: "http://127.0.0.1:11434/v1",
     localModel: "small-local-model",
   });
   let localCodingCalls = 0;
+  const localCodingResponseFormats: unknown[] = [];
   const codingBatchSizes: number[] = [];
   const codingBatchPrompts: string[] = [];
   const codingProgress: Array<{ completed: number; total: number }> = [];
@@ -437,7 +543,9 @@ async function run(): Promise<void> {
     localCodingCalls += 1;
     const body = JSON.parse(String(init?.body)) as {
       messages?: Array<{ role: string; content: string }>;
+      response_format?: unknown;
     };
+    localCodingResponseFormats.push(body.response_format);
     const prompt = body.messages?.find((message) => message.role === "user")?.content ?? "";
     codingBatchPrompts.push(prompt);
     const requested = Number(
@@ -474,6 +582,32 @@ async function run(): Promise<void> {
       codingBatchPrompts[1].includes("Local coding question 1-0") &&
       codingProgress[codingProgress.length - 1].completed === 3,
     "local coding quizzes should use batches of at most two and report incremental progress"
+  );
+  assert(
+    localCodingResponseFormats.length === 3 &&
+      localCodingResponseFormats.every((value) => {
+        if (!value || typeof value !== "object") return false;
+        const format = value as {
+          type?: unknown;
+          json_schema?: {
+            strict?: unknown;
+            schema?: {
+              type?: unknown;
+              additionalProperties?: unknown;
+              required?: unknown;
+            };
+          };
+        };
+        return (
+          format.type === "json_schema" &&
+          format.json_schema?.strict === true &&
+          format.json_schema.schema?.type === "object" &&
+          format.json_schema.schema?.additionalProperties === false &&
+          Array.isArray(format.json_schema.schema?.required) &&
+          format.json_schema.schema.required.includes("questions")
+        );
+      }),
+    "each local quiz batch should request a strict JSON object with a required questions array"
   );
 
   let localMcqCalls = 0;

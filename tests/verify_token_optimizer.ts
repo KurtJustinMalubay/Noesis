@@ -184,4 +184,18 @@ assert(
   "vault ranking should deduplicate overlapping chunks and return top-K results"
 );
 
+const dashboardTutorPayload = buildTutorPayload({
+  provider: "gemini",
+  userMessage: "What should I study next?",
+  dashboardContext:
+    "Study Dashboard Overview:\n- Concepts: 4/10 mastered (40%), 2 in progress\n- Flashcards: 5 due now",
+  vaultChunks: [],
+  history: [],
+});
+assert(
+  dashboardTutorPayload.userPrompt.includes("Study Dashboard Overview:") &&
+    dashboardTutorPayload.userPrompt.includes("5 due now"),
+  "tutor payload should include dashboard context when no lesson is active"
+);
+
 console.log("✓ Token optimizer and bounded vault ranking tests passed!");

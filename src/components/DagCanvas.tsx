@@ -49,6 +49,7 @@ interface DagCanvasProps {
   canUndo: boolean;
   canRedo: boolean;
   onSelectNode: (nodeId: string) => void;
+  onDeselectNode?: () => void;
   onSetLayoutMode: (mode: CanvasLayoutMode) => Promise<void>;
   onMoveNode: (nodeId: string, x: number, y: number) => Promise<void>;
   onRealignGrid: () => Promise<void>;
@@ -135,6 +136,7 @@ export function DagCanvas({
   canUndo,
   canRedo,
   onSelectNode,
+  onDeselectNode,
   onSetLayoutMode,
   onMoveNode,
   onRealignGrid,
@@ -154,6 +156,7 @@ export function DagCanvas({
   const containerRef = useRef<HTMLDivElement>(null);
   const graphTrackRef = useRef<HTMLDivElement>(null);
   const dotGridRef = useRef<HTMLDivElement>(null);
+  const pointerDownClientRef = useRef<{ x: number; y: number; isBackground: boolean } | null>(null);
   const [pan, setPan] = useState({ x: 450, y: 80 });
   const [scale, setScale] = useState(1);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
@@ -174,6 +177,7 @@ export function DagCanvas({
   );
   const [showArchivedConcepts, setShowArchivedConcepts] = useState(false);
   const [isToolbarExpanded, setIsToolbarExpanded] = useState(true);
+  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorTitle, setEditorTitle] = useState("");
   const [editorSummary, setEditorSummary] = useState("");
@@ -562,8 +566,14 @@ export function DagCanvas({
         "[data-dag-node], [data-dag-edge], button, [data-canvas-popover], [data-canvas-toolbar]"
       )
     ) {
+      pointerDownClientRef.current = null;
       return;
     }
+    pointerDownClientRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      isBackground: true,
+    };
     startPan(e);
   };
 
@@ -591,6 +601,16 @@ export function DagCanvas({
     if (!isDragging) return;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    const down = pointerDownClientRef.current;
+    pointerDownClientRef.current = null;
+    if (
+      down?.isBackground &&
+      e.button === 0 &&
+      Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5
+    ) {
+      setSelectedEdge(null);
+      onDeselectNode?.();
     }
     setPan(panRef.current);
     setIsDragging(false);
@@ -970,6 +990,24 @@ export function DagCanvas({
       if (e.key === "Escape") setConfirmDeleteNode(null);
       return;
     }
+    if (e.key === "Escape") {
+      if (editor) {
+        setEditor(null);
+        return;
+      }
+      if (openMenuNodeId) {
+        setOpenMenuNodeId(null);
+        return;
+      }
+      if (selectedEdge) {
+        setSelectedEdge(null);
+        return;
+      }
+      if (selectedNodeId && onDeselectNode) {
+        onDeselectNode();
+        return;
+      }
+    }
     if (!selectedEdge || (e.key !== "Delete" && e.key !== "Backspace")) return;
     const target = e.target;
     if (
@@ -986,6 +1024,73 @@ export function DagCanvas({
       onDisconnectNodes(edge.sourceId, edge.targetId)
     );
   };
+
+  useEffect(() => {
+    if (
+      !editor &&
+      !openMenuNodeId &&
+      !selectedEdge &&
+      !confirmDeleteNode &&
+      !isMoreMenuOpen &&
+      !(selectedNodeId && onDeselectNode)
+    ) {
+      return;
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (
+        document.querySelector(
+          '[aria-modal="true"], [data-confirm-delete], [data-exit-confirmation]'
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (confirmDeleteNode) {
+        setConfirmDeleteNode(null);
+      } else if (editor) {
+        setEditor(null);
+      } else if (openMenuNodeId) {
+        setOpenMenuNodeId(null);
+      } else if (isMoreMenuOpen) {
+        setIsMoreMenuOpen(false);
+      } else if (selectedEdge) {
+        setSelectedEdge(null);
+      } else if (selectedNodeId && onDeselectNode) {
+        onDeselectNode();
+      }
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [
+    confirmDeleteNode,
+    editor,
+    isMoreMenuOpen,
+    onDeselectNode,
+    openMenuNodeId,
+    selectedEdge,
+    selectedNodeId,
+  ]);
+
+  useEffect(() => {
+    if (!openMenuNodeId && !editor && !isMoreMenuOpen) return;
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(
+          "[data-canvas-popover], [data-node-menu-trigger], [data-canvas-more-menu]"
+        )
+      ) {
+        return;
+      }
+      setOpenMenuNodeId(null);
+      setEditor(null);
+      setIsMoreMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", handleOutsidePointerDown);
+    return () =>
+      window.removeEventListener("pointerdown", handleOutsidePointerDown);
+  }, [editor, isMoreMenuOpen, openMenuNodeId]);
 
   const startLayoutAnimation = () => {
     setIsAnimatingLayout(true);
@@ -1504,6 +1609,7 @@ export function DagCanvas({
 
               <button
                 type="button"
+                data-node-menu-trigger
                 aria-label={`${node.title} options`}
                 title="Concept options"
                 onPointerDown={(e) => e.stopPropagation()}
@@ -1987,47 +2093,71 @@ export function DagCanvas({
           </button>
         </div>
         </div>
-        <details
+        <div
+          data-canvas-more-menu
           className={`canvas-more-menu relative ${isToolbarExpanded ? "" : "hidden"}`}
         >
-          <summary className="flex min-h-9 cursor-pointer list-none items-center rounded-lg border border-[#e6e3dd] bg-white/80 px-3 text-[11px] font-semibold text-slate-600 hover:bg-[#f2f1ed] focus-visible:outline">
+          <button
+            type="button"
+            onClick={() => setIsMoreMenuOpen((open) => !open)}
+            aria-expanded={isMoreMenuOpen}
+            aria-haspopup="menu"
+            className="flex min-h-9 cursor-pointer items-center rounded-lg border border-[#e6e3dd] bg-white/80 px-3 text-[11px] font-semibold text-slate-600 hover:bg-[#f2f1ed] focus-visible:outline"
+          >
             More
-          </summary>
-          <div className="absolute bottom-full left-0 mb-2 flex min-w-48 flex-col gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-1.5 text-[var(--color-ink)] shadow-xl">
-            {layoutMode === "free" && (
-              <>
+          </button>
+          {isMoreMenuOpen && (
+            <div
+              role="menu"
+              className="absolute bottom-full left-0 mb-2 flex min-w-48 flex-col gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-1.5 text-[var(--color-ink)] shadow-xl"
+            >
+              {layoutMode === "free" && (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsMoreMenuOpen(false);
+                      void resetToAutoLayout();
+                    }}
+                    className="rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)]"
+                    title="Restore automatic positions and layer backdrops"
+                  >
+                    Reset to auto-layout
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsMoreMenuOpen(false);
+                      void realignGrid();
+                    }}
+                    className="rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)]"
+                    title="Snap free-place nodes to the 16px grid"
+                  >
+                    Re-align to grid
+                  </button>
+                </>
+              )}
+              {showArchiveControls && (
                 <button
                   type="button"
-                  onClick={() => void resetToAutoLayout()}
-                  className="rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)]"
-                  title="Restore automatic positions and layer backdrops"
+                  role="menuitem"
+                  disabled={!workspaceId}
+                  onClick={() => {
+                    setIsMoreMenuOpen(false);
+                    setShowArchivedConcepts(true);
+                  }}
+                  className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                  title="View archived concepts"
                 >
-                  Reset to auto-layout
+                  <Archive className="h-4 w-4" />
+                  Archived concepts
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void realignGrid()}
-                  className="rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)]"
-                  title="Snap free-place nodes to the 16px grid"
-                >
-                  Re-align to grid
-                </button>
-              </>
-            )}
-            {showArchiveControls && (
-              <button
-                type="button"
-                disabled={!workspaceId}
-                onClick={() => setShowArchivedConcepts(true)}
-                className="flex items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-                title="View archived concepts"
-              >
-                <Archive className="h-4 w-4" />
-                Archived concepts
-              </button>
-            )}
-          </div>
-        </details>
+              )}
+            </div>
+          )}
+        </div>
         <button
           type="button"
           onClick={() => setIsToolbarExpanded((expanded) => !expanded)}
@@ -2058,13 +2188,13 @@ export function DagCanvas({
         >
           <div className="mb-1.5 flex items-center justify-between gap-2">
             <span className="truncate text-[10px] font-semibold text-[var(--color-ink)]">
-              DAG outside view
+              Map outside view
             </span>
             <button
               type="button"
               onClick={fitGraph}
-              title="Fit the full DAG to the canvas"
-              aria-label="Find and fit the full DAG"
+              title="Fit the full map to the screen"
+              aria-label="Find and fit the full map"
               className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--color-accent-soft)] px-2 py-1 text-[9px] font-semibold text-[var(--color-accent)] hover:brightness-95"
             >
               <Compass
@@ -2076,7 +2206,7 @@ export function DagCanvas({
           </div>
           <button
             type="button"
-            aria-label="Navigate to a location in the DAG overview"
+            aria-label="Navigate to a location in the map overview"
             title="Click the overview to navigate"
             className="block h-[88px] w-full overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-canvas)]"
             onClick={(event) => {

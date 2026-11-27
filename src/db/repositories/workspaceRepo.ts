@@ -100,6 +100,7 @@ export async function getWorkspaceProgressSummaries(): Promise<
      FROM workspaces w
      LEFT JOIN nodes n
        ON n.workspace_id = w.id AND n.archived_at IS NULL
+     WHERE w.archived_at IS NULL
      GROUP BY w.id`
   );
   const summaries: Record<string, WorkspaceProgressSummary> = {};

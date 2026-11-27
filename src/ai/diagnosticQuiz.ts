@@ -2,6 +2,7 @@ import type {
   QuizQuestion,
   QuizQuestionType,
 } from "../types/domain";
+import { normalizeMathMarkdown } from "../components/ui/normalizeMathMarkdown.ts";
 
 const QUESTION_TYPE_ALIASES: Record<string, QuizQuestionType> = {
   mcq: "mcq",
@@ -63,11 +64,16 @@ function normalizeOptions(value: unknown): string[] {
   }
 
   const options = candidates.map((option) => {
-    if (typeof option === "string") return option.trim();
+    if (typeof option === "string") {
+      const cleaned = normalizeMathMarkdown(option).trim();
+      // Reject raw JSON-like object strings if malformed
+      if (/^\{[\s\S]*"[\w]+"[\s\S]*\}$/.test(cleaned)) return "";
+      return cleaned;
+    }
     if (option && typeof option === "object" && !Array.isArray(option)) {
       const record = option as Record<string, unknown>;
       const text = record.text ?? record.label ?? record.value;
-      return typeof text === "string" ? text.trim() : "";
+      return typeof text === "string" ? normalizeMathMarkdown(text).trim() : "";
     }
     return typeof option === "number" || typeof option === "boolean"
       ? String(option)
@@ -130,7 +136,9 @@ function getString(
 ): string | null {
   for (const key of keys) {
     const value = item[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "string" && value.trim()) {
+      return normalizeMathMarkdown(value).trim();
+    }
   }
   return null;
 }

@@ -25,26 +25,35 @@ import {
   Search,
   Sparkles,
   Trash2,
+  User,
+  Volume2,
+  VolumeX,
   X,
 } from "lucide-react";
+import { isTtsSupported, speakWithAppVoice, stopSpeaking } from "../utils/speech";
 import {
+  getOpenAiPreset,
   getReviewsCompletedToday,
   LOCAL_CONTEXT_WINDOW_MAX,
   LOCAL_CONTEXT_WINDOW_MIN,
   LOCAL_OUTPUT_TOKENS_MAX,
   LOCAL_OUTPUT_TOKENS_MIN,
   loadAiSettings,
+  OPENAI_COMPATIBLE_PRESETS,
   saveAiSettings,
   APP_THEME_OPTIONS,
+  type OpenAiCompatiblePresetId,
 } from "../ai/keyStore";
-import { fetchLocalModels, testGeminiConnection } from "../ai/geminiClient";
+import { fetchOpenAiModels, testGeminiConnection } from "../ai/geminiClient";
 import { ingestLocalFilePath } from "../vault/ingestService";
 import { useNoesisStore, type ActiveModal } from "../store/useNoesisStore";
 import { usePluginStore } from "../plugins/pluginStore";
 import {
   BUILT_IN_PLUGINS,
   FLASHCARDS_PLUGIN_ID,
+  KOKORO_TTS_PLUGIN_ID,
 } from "../plugins/registry";
+import { KokoroVoiceSettings } from "./KokoroVoiceSettings";
 import type {
   DueFlashcard,
   WorkspaceFlashcard,
@@ -218,12 +227,25 @@ export function Modals({
   settingsGuideRequest,
   settingsCloseRequest,
 }: ModalsProps) {
+  const [backdropSettingsCloseRequest, setBackdropSettingsCloseRequest] =
+    useState(0);
+
+  const handleBackdropClick = () => {
+    if (activeModal === "new_workspace" && isGeneratingCurriculum) return;
+    if (activeModal === "settings") {
+      setBackdropSettingsCloseRequest((count) => count + 1);
+      return;
+    }
+    onClose();
+  };
+
   return (
     <>
       <AnimatedPresence
         present={activeModal !== "none" && activeModal !== "diagnostic"}
         motion="modal"
         exitDuration={170}
+        onBackdropClick={handleBackdropClick}
         className="motion-modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-[#253641]/25 p-4 backdrop-blur-[3px]"
       >
         {activeModal === "new_workspace" && (
@@ -281,8 +303,11 @@ export function Modals({
             onQuizCacheCleared={onQuizCacheCleared}
             onRequestExit={onRequestExit}
             guideSectionRequest={settingsGuideRequest}
-            closeRequest={settingsCloseRequest}
+            closeRequest={settingsCloseRequest + backdropSettingsCloseRequest}
           />
+        )}
+        {activeModal === "profile" && (
+          <QuickProfileModal onClose={onClose} onToast={onToast} />
         )}
       </AnimatedPresence>
       {activeModal === "diagnostic" && (
@@ -651,6 +676,7 @@ function ReviewQueueModal({
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(
     null
   );
+  const [isSpeakingCard, setIsSpeakingCard] = useState(false);
   const [formNodeId, setFormNodeId] = useState(nodes[0]?.id ?? "");
   const [frontDraft, setFrontDraft] = useState("");
   const [backDraft, setBackDraft] = useState("");
@@ -668,6 +694,15 @@ function ReviewQueueModal({
   const dialogRef = useRef<HTMLDivElement>(null);
   const isGradingRef = useRef(false);
   const current = dueCards[0];
+
+  useEffect(() => {
+    stopSpeaking();
+    setIsSpeakingCard(false);
+  }, [current?.id, revealed]);
+
+  useEffect(() => {
+    return () => stopSpeaking();
+  }, []);
   const totalCards = reviewedCount + dueCards.length;
   const progressPercent = totalCards
     ? Math.round((reviewedCount / totalCards) * 100)
@@ -1036,20 +1071,61 @@ function ReviewQueueModal({
             ) : (
               <div className="mx-auto max-w-2xl">
                 <div className="mb-3 flex items-center justify-between gap-3">
-                  <span className="max-w-[70%] truncate rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3 py-1.5 text-xs font-semibold text-[var(--color-muted)]">
+                  <span className="max-w-[60%] truncate rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3 py-1.5 text-xs font-semibold text-[var(--color-muted)]">
                     {current.node_title}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      startEditing(current);
-                      setActiveView("library");
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
-                  >
-                    <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                    Edit card
-                  </button>
+                  <div className="flex items-center gap-1">
+                    {isTtsSupported() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isSpeakingCard) {
+                            stopSpeaking();
+                            setIsSpeakingCard(false);
+                            return;
+                          }
+                          const textToRead = revealed
+                            ? `${current.front}. Answer: ${current.back}`
+                            : current.front;
+                          speakWithAppVoice(textToRead, {
+                            onStart: () => setIsSpeakingCard(true),
+                            onEnd: () => setIsSpeakingCard(false),
+                            onError: (msg) => {
+                              setIsSpeakingCard(false);
+                              onToast(msg);
+                            },
+                          });
+                        }}
+                        aria-pressed={isSpeakingCard}
+                        aria-label={
+                          isSpeakingCard ? "Stop reading card" : "Read card aloud"
+                        }
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                          isSpeakingCard
+                            ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                            : "text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                        }`}
+                      >
+                        {isSpeakingCard ? (
+                          <VolumeX className="h-3.5 w-3.5" aria-hidden="true" />
+                        ) : (
+                          <Volume2 className="h-3.5 w-3.5" aria-hidden="true" />
+                        )}
+                        {isSpeakingCard ? "Stop" : "Listen"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        startEditing(current);
+                        setActiveView("library");
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                    >
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                      Edit card
+                    </button>
+                  </div>
                 </div>
                 <div className="relative min-h-[260px] overflow-hidden rounded-3xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-6 sm:p-8">
                   <div className="absolute left-0 top-0 h-1 w-full bg-[var(--color-accent)]/70" />
@@ -1649,7 +1725,7 @@ function DocumentVaultModal({
             `Already indexed and available here: ${res.document.file_name}`
           );
         } else {
-          onToast(`Indexed ${res.document.file_name} (${res.chunkCount} FTS5 chunks)`);
+          onToast(`Added ${res.document.file_name} (${res.chunkCount} searchable sections)`);
         }
       }
       await onRefresh();
@@ -1695,7 +1771,7 @@ function DocumentVaultModal({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-base font-bold text-[#2c414f]">
           <Layers className="h-5 w-5 text-[#527a91]" />
-          <span id="document-vault-title">Local FTS5 Document Vault</span>
+          <span id="document-vault-title">Document Vault</span>
         </div>
         <button
           type="button"
@@ -1707,8 +1783,7 @@ function DocumentVaultModal({
         </button>
       </div>
       <p className="mt-1.5 text-xs leading-5 text-slate-600">
-        Index PDFs, Markdown, or text notes locally with SHA-256 deduplication and
-        SQLite BM25 full-text search.
+        Save PDFs, Markdown, or text notes on your device for instant full-text search.
       </p>
 
       <label className="mt-3 flex items-center gap-2 rounded-lg border border-[#dedfdc] bg-[#fbfaf8] px-3 py-2 text-slate-500">
@@ -1834,14 +1909,24 @@ function SettingsModal({
   } | null;
   closeRequest: number;
 }) {
-  type Section = "ai" | "canvas" | "plugins" | "study" | "vault" | "shortcuts";
+  type Section =
+    | "profile"
+    | "ai"
+    | "canvas"
+    | "plugins"
+    | "voice"
+    | "study"
+    | "vault"
+    | "shortcuts";
   const sections: Array<{
     id: Section;
     title: string;
     icon: typeof Sparkles;
   }> = [
+    { id: "profile", title: "Profile", icon: User },
     { id: "canvas", title: "Appearance & Themes", icon: Monitor },
     { id: "plugins", title: "Plugins", icon: Puzzle },
+    { id: "voice", title: "Voice & Audio", icon: Volume2 },
     { id: "ai", title: "AI & Speed", icon: Sparkles },
     { id: "study", title: "Study", icon: GraduationCap },
     { id: "vault", title: "Vault & Data", icon: HardDrive },
@@ -1852,8 +1937,19 @@ function SettingsModal({
   const initial = loadAiSettings();
   const [provider, setProvider] = useState<AiProvider>(initial.provider);
   const [apiKey, setApiKey] = useState(initial.apiKey);
+  const [openAiPreset, setOpenAiPreset] = useState<OpenAiCompatiblePresetId>(
+    initial.openAiPreset
+  );
+  const [openAiApiKeys, setOpenAiApiKeys] = useState<
+    Partial<Record<OpenAiCompatiblePresetId, string>>
+  >(initial.openAiApiKeys);
+  const [openAiFastModel, setOpenAiFastModel] = useState(
+    initial.openAiFastModel || initial.localModel
+  );
+  const [openAiSynthesisModel, setOpenAiSynthesisModel] = useState(
+    initial.openAiSynthesisModel || initial.localModel
+  );
   const [localBaseUrl, setLocalBaseUrl] = useState(initial.localBaseUrl);
-  const [localModel, setLocalModel] = useState(initial.localModel);
   const [localContextWindowTokens, setLocalContextWindowTokens] = useState(
     String(initial.localContextWindowTokens)
   );
@@ -1896,6 +1992,7 @@ function SettingsModal({
   );
   const [showUnsavedChanges, setShowUnsavedChanges] = useState(false);
   const [isKeyVisible, setIsKeyVisible] = useState(false);
+  const [isOpenAiKeyVisible, setIsOpenAiKeyVisible] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [availableLocalModels, setAvailableLocalModels] = useState<string[]>([]);
@@ -1905,12 +2002,17 @@ function SettingsModal({
   >(null);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const currentOpenAiPreset = getOpenAiPreset(openAiPreset);
+  const currentOpenAiApiKey = openAiApiKeys[openAiPreset] ?? "";
   const initialDraftSnapshot = useRef<string | null>(null);
   const draftSnapshot = JSON.stringify({
     provider,
     apiKey,
+    openAiPreset,
+    openAiApiKeys,
+    openAiFastModel,
+    openAiSynthesisModel,
     localBaseUrl,
-    localModel,
     localContextWindowTokens,
     localMaxOutputTokens,
     localTemperature,
@@ -2041,11 +2143,23 @@ function SettingsModal({
         onToast("Enter a model ID for each custom model.");
         return;
       }
+      const trimmedFastOpenAiModel =
+        openAiFastModel.trim() || openAiSynthesisModel.trim();
+      const trimmedSynthesisOpenAiModel =
+        openAiSynthesisModel.trim() || trimmedFastOpenAiModel;
       if (
         provider === "openai-compatible" &&
-        (!localBaseUrl.trim() || !localModel.trim())
+        (!localBaseUrl.trim() || !trimmedFastOpenAiModel)
       ) {
-        onToast("Enter a local endpoint and model name.");
+        onToast("Enter a base URL and at least one model name.");
+        return;
+      }
+      if (
+        provider === "openai-compatible" &&
+        currentOpenAiPreset.requiresApiKey &&
+        !currentOpenAiApiKey.trim()
+      ) {
+        onToast(`Enter your ${currentOpenAiPreset.label} API key.`);
         return;
       }
       if (
@@ -2063,7 +2177,7 @@ function SettingsModal({
           topPValue < 0 ||
           topPValue > 1)
       ) {
-        onToast("Check the local model context, token, temperature, and top-p values.");
+        onToast("Check the model context, token, temperature, and top-p values.");
         return;
       }
       saveAiSettings({
@@ -2072,8 +2186,12 @@ function SettingsModal({
         fastModel,
         synthesisModel,
         creativityPreset,
+        openAiPreset,
+        openAiApiKeys,
+        openAiFastModel: trimmedFastOpenAiModel,
+        openAiSynthesisModel: trimmedSynthesisOpenAiModel,
         localBaseUrl,
-        localModel,
+        localModel: trimmedFastOpenAiModel,
         localContextWindowTokens: contextWindowValue,
         localMaxOutputTokens: outputTokenValue,
         localTemperature: temperatureValue,
@@ -2089,20 +2207,35 @@ function SettingsModal({
     }
   };
 
+  const handleSelectOpenAiPreset = (nextPresetId: OpenAiCompatiblePresetId) => {
+    const nextPreset = getOpenAiPreset(nextPresetId);
+    setOpenAiPreset(nextPresetId);
+    if (nextPreset.defaultBaseUrl) {
+      setLocalBaseUrl(nextPreset.defaultBaseUrl);
+    }
+    setLocalContextWindowTokens(String(nextPreset.defaultContextWindowTokens));
+    setLocalMaxOutputTokens(String(nextPreset.defaultMaxOutputTokens));
+    setAvailableLocalModels([]);
+  };
+
   const handleConnectionTest = async () => {
     setIsTestingConnection(true);
     try {
+      const openAiTestModel =
+        openAiFastModel.trim() || openAiSynthesisModel.trim();
       await testGeminiConnection({
         provider,
-        apiKey: provider === "gemini" ? apiKey.trim() : undefined,
-        modelId:
-          provider === "gemini" ? fastModel : localModel.trim(),
+        apiKey:
+          provider === "gemini"
+            ? apiKey.trim()
+            : currentOpenAiApiKey.trim() || undefined,
+        modelId: provider === "gemini" ? fastModel : openAiTestModel,
         baseUrl: localBaseUrl.trim(),
       });
       onToast(
         provider === "gemini"
           ? "Gemini connection successful."
-          : "Local AI connection successful."
+          : `${currentOpenAiPreset.label} connection successful.`
       );
     } catch (err) {
       onToast(err instanceof Error ? err.message : String(err));
@@ -2114,13 +2247,19 @@ function SettingsModal({
   const handleFetchLocalModels = async () => {
     setIsFetchingModels(true);
     try {
-      const models = await fetchLocalModels(localBaseUrl);
+      const models = await fetchOpenAiModels(
+        localBaseUrl,
+        currentOpenAiApiKey.trim() || undefined
+      );
       setAvailableLocalModels(models);
-      if (models.length > 0 && !localModel.trim()) setLocalModel(models[0]);
+      if (models.length > 0) {
+        if (!openAiFastModel.trim()) setOpenAiFastModel(models[0]);
+        if (!openAiSynthesisModel.trim()) setOpenAiSynthesisModel(models[0]);
+      }
       onToast(
         models.length
-          ? `Found ${models.length} local model${models.length === 1 ? "" : "s"}.`
-          : "The local endpoint returned no models."
+          ? `Found ${models.length} model${models.length === 1 ? "" : "s"}.`
+          : "The endpoint returned no models."
       );
     } catch (error) {
       onToast(error instanceof Error ? error.message : String(error));
@@ -2224,6 +2363,59 @@ function SettingsModal({
         </header>
 
         <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5 select-text">
+          {section === "profile" && (
+            <section className="space-y-4">
+              <div className="rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] p-4">
+                <h3 className="text-xs font-semibold text-slate-800">
+                  Your study profile
+                </h3>
+                <p className="mt-1 text-[11px] leading-5 text-slate-500">
+                  Used to greet you on the Dashboard and help your AI tutor address you naturally. Stored only on this device.
+                </p>
+                <div className="mt-3 space-y-3">
+                  <label className="block">
+                    <span className="text-[11px] font-semibold text-slate-700">
+                      Your name
+                    </span>
+                    <input
+                      type="text"
+                      value={preferences.profileName}
+                      maxLength={80}
+                      onChange={(event) =>
+                        setPreferences((current) => ({
+                          ...current,
+                          profileName: event.target.value,
+                          profilePromptSeen: true,
+                        }))
+                      }
+                      placeholder="e.g. Alex"
+                      className={settingsSelectClass}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-[11px] font-semibold text-slate-700">
+                      What are you studying? (optional)
+                    </span>
+                    <input
+                      type="text"
+                      value={preferences.profileFocus}
+                      maxLength={120}
+                      onChange={(event) =>
+                        setPreferences((current) => ({
+                          ...current,
+                          profileFocus: event.target.value,
+                          profilePromptSeen: true,
+                        }))
+                      }
+                      placeholder="e.g. Computer Science, Pre-Med, Spanish"
+                      className={settingsSelectClass}
+                    />
+                  </label>
+                </div>
+              </div>
+            </section>
+          )}
+
           {section === "ai" && (
             <>
               <SettingsField label="Provider">
@@ -2234,8 +2426,10 @@ function SettingsModal({
                   }
                   className={settingsDropdownClass}
                 >
-                  <option value="gemini">Google Gemini</option>
-                  <option value="openai-compatible">OpenAI-compatible local</option>
+                  <option value="gemini">Google Gemini (Default)</option>
+                  <option value="openai-compatible">
+                    OpenAI-Compatible (Cloud &amp; Local)
+                  </option>
                 </select>
               </SettingsField>
               {provider === "gemini" ? (
@@ -2340,62 +2534,232 @@ function SettingsModal({
                 </>
               ) : (
                 <>
-                  <SettingsField label="Local endpoint">
-                    <input
-                      value={localBaseUrl}
-                      onChange={(event) => setLocalBaseUrl(event.target.value)}
-                      placeholder="http://localhost:11434/v1"
-                      className={settingsSelectClass}
-                    />
-                    <p className="mt-1 text-[10px] leading-4 text-slate-500">
-                      Foundry Local: run <code>foundry service status</code>. Enter the service URL, /v1 URL, or chat-completions URL; Noesis normalizes model and chat routes.
-                    </p>
+                  <SettingsField label="Provider preset">
+                    <select
+                      value={openAiPreset}
+                      onChange={(event) =>
+                        handleSelectOpenAiPreset(
+                          event.target.value as OpenAiCompatiblePresetId
+                        )
+                      }
+                      className={settingsDropdownClass}
+                    >
+                      <optgroup label="Cloud APIs">
+                        {OPENAI_COMPATIBLE_PRESETS.filter(
+                          (preset) => preset.kind === "cloud"
+                        ).map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="Local Servers">
+                        {OPENAI_COMPATIBLE_PRESETS.filter(
+                          (preset) => preset.kind === "local"
+                        ).map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      {OPENAI_COMPATIBLE_PRESETS.filter(
+                        (preset) => preset.kind === "custom"
+                      ).map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                    </select>
                   </SettingsField>
-                  <SettingsField label="Local model">
-                    <div className="flex gap-2">
+
+                  <section>
+                    <h3 className="text-xs font-semibold text-slate-800">
+                      {currentOpenAiPreset.label} API key{" "}
+                      {!currentOpenAiPreset.requiresApiKey && (
+                        <span className="font-normal text-slate-500">
+                          (optional)
+                        </span>
+                      )}
+                    </h3>
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      Stored locally per provider preset; sent only to your configured endpoint.
+                    </p>
+                    <div className="mt-2 flex gap-2">
                       <input
-                        value={localModel}
-                        onChange={(event) => setLocalModel(event.target.value)}
-                        placeholder="Installed model name"
-                        className={settingsSelectClass}
+                        type={isOpenAiKeyVisible ? "text" : "password"}
+                        value={currentOpenAiApiKey}
+                        onChange={(event) =>
+                          setOpenAiApiKeys((prev) => ({
+                            ...prev,
+                            [openAiPreset]: event.target.value,
+                          }))
+                        }
+                        placeholder={
+                          currentOpenAiPreset.requiresApiKey
+                            ? `Paste ${currentOpenAiPreset.label} API key`
+                            : "Optional API key (leave blank for local servers)"
+                        }
+                        autoComplete="off"
+                        className="min-w-0 flex-1 rounded-lg border border-[#dedfdc] bg-[#fbfaf8] px-3 py-2.5 text-xs text-slate-800 focus:border-[#6f9ab6] focus:outline-none focus:ring-2 focus:ring-[#d9e7ef]"
                       />
                       <button
                         type="button"
-                        disabled={isFetchingModels || !localBaseUrl.trim()}
-                        onClick={() => void handleFetchLocalModels()}
-                        className="mt-1 shrink-0 rounded-lg border border-[#d7e3e5] bg-[#f4f8f7] px-3 text-xs font-semibold text-[var(--color-ink)] hover:bg-[#eaf2f0] disabled:opacity-50"
+                        onClick={() =>
+                          setIsOpenAiKeyVisible((visible) => !visible)
+                        }
+                        className="rounded-lg border border-[#dedfdc] px-3 text-slate-600 hover:bg-[#f8f7f4]"
+                        aria-label={
+                          isOpenAiKeyVisible ? "Hide API key" : "Show API key"
+                        }
                       >
-                        {isFetchingModels ? "Fetching…" : "Detect"}
+                        {isOpenAiKeyVisible ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
                       </button>
                       <button
                         type="button"
                         disabled={
                           isTestingConnection ||
-                          !localModel.trim() ||
-                          !localBaseUrl.trim()
+                          (!openAiFastModel.trim() &&
+                            !openAiSynthesisModel.trim()) ||
+                          !localBaseUrl.trim() ||
+                          (currentOpenAiPreset.requiresApiKey &&
+                            !currentOpenAiApiKey.trim())
                         }
                         onClick={() => void handleConnectionTest()}
-                        className="mt-1 rounded-lg border border-[#d7e3e5] bg-[#f4f8f7] px-3 text-xs font-semibold text-[var(--color-ink)] hover:bg-[#eaf2f0] disabled:opacity-50"
+                        className="rounded-lg border border-[#d7e3e5] bg-[#f4f8f7] px-3 text-xs font-semibold text-[var(--color-ink)] hover:bg-[#eaf2f0] disabled:opacity-50"
                       >
                         {isTestingConnection ? "Testing…" : "Test"}
                       </button>
                     </div>
-                    {availableLocalModels.length > 0 && (
-                      <select
-                        value={availableLocalModels.includes(localModel) ? localModel : ""}
-                        onChange={(event) => setLocalModel(event.target.value)}
-                        className={`${settingsDropdownClass} mt-2`}
+                    {currentOpenAiPreset.keyUrl && (
+                      <a
+                        href={currentOpenAiPreset.keyUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-2 inline-flex text-[11px] font-semibold text-[var(--color-accent)] hover:underline"
                       >
-                        <option value="">Choose a detected model…</option>
-                        {availableLocalModels.map((model) => (
-                          <option key={model} value={model}>{model}</option>
-                        ))}
-                      </select>
+                        Get an API key from {currentOpenAiPreset.label}
+                      </a>
                     )}
+                  </section>
+
+                  <SettingsField label="Base URL">
+                    <input
+                      value={localBaseUrl}
+                      onChange={(event) => setLocalBaseUrl(event.target.value)}
+                      placeholder={
+                        currentOpenAiPreset.defaultBaseUrl ||
+                        "https://api.example.com/v1"
+                      }
+                      className={settingsSelectClass}
+                    />
+                    <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                      {currentOpenAiPreset.hint ??
+                        "Enter the base URL, /v1 URL, or chat-completions URL; Noesis normalizes model discovery and chat routes."}
+                    </p>
                   </SettingsField>
+
+                  <details
+                    open
+                    className="disclosure-chevron settings-disclosure rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-4"
+                  >
+                    <summary className="cursor-pointer py-3 text-xs font-semibold text-[var(--color-ink)]">
+                      Model selection
+                    </summary>
+                    <div className="space-y-4 border-t border-[var(--color-border)] py-4">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-[11px] text-slate-500">
+                          Choose separate models for quick tasks and deep lessons.
+                        </p>
+                        <button
+                          type="button"
+                          disabled={
+                            isFetchingModels ||
+                            !localBaseUrl.trim() ||
+                            (currentOpenAiPreset.requiresApiKey &&
+                              !currentOpenAiApiKey.trim())
+                          }
+                          onClick={() => void handleFetchLocalModels()}
+                          className="shrink-0 rounded-lg border border-[#d7e3e5] bg-[#f4f8f7] px-3 py-1.5 text-xs font-semibold text-[var(--color-ink)] hover:bg-[#eaf2f0] disabled:opacity-50"
+                        >
+                          {isFetchingModels ? "Fetching…" : "Detect models"}
+                        </button>
+                      </div>
+
+                      <SettingsField label="Fast model">
+                        <input
+                          value={openAiFastModel}
+                          onChange={(event) =>
+                            setOpenAiFastModel(event.target.value)
+                          }
+                          placeholder={currentOpenAiPreset.placeholderFastModel}
+                          className={settingsSelectClass}
+                        />
+                        {availableLocalModels.length > 0 && (
+                          <select
+                            value={
+                              availableLocalModels.includes(openAiFastModel)
+                                ? openAiFastModel
+                                : ""
+                            }
+                            onChange={(event) =>
+                              setOpenAiFastModel(event.target.value)
+                            }
+                            className={`${settingsDropdownClass} mt-2`}
+                          >
+                            <option value="">Choose a detected model…</option>
+                            {availableLocalModels.map((model) => (
+                              <option key={model} value={model}>
+                                {model}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </SettingsField>
+
+                      <SettingsField label="Synthesis model">
+                        <input
+                          value={openAiSynthesisModel}
+                          onChange={(event) =>
+                            setOpenAiSynthesisModel(event.target.value)
+                          }
+                          placeholder={
+                            currentOpenAiPreset.placeholderSynthesisModel
+                          }
+                          className={settingsSelectClass}
+                        />
+                        {availableLocalModels.length > 0 && (
+                          <select
+                            value={
+                              availableLocalModels.includes(
+                                openAiSynthesisModel
+                              )
+                                ? openAiSynthesisModel
+                                : ""
+                            }
+                            onChange={(event) =>
+                              setOpenAiSynthesisModel(event.target.value)
+                            }
+                            className={`${settingsDropdownClass} mt-2`}
+                          >
+                            <option value="">Choose a detected model…</option>
+                            {availableLocalModels.map((model) => (
+                              <option key={model} value={model}>
+                                {model}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </SettingsField>
+                    </div>
+                  </details>
+
                   <details className="disclosure-chevron settings-disclosure rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-4">
                     <summary className="cursor-pointer py-3 text-xs font-semibold text-[var(--color-ink)]">
-                      Advanced local inference limits
+                      Advanced inference limits
                     </summary>
                     <section className="border-t border-[var(--color-border)] py-4">
                     <p className="mt-1 text-[11px] leading-5 text-slate-500">
@@ -2539,8 +2903,8 @@ function SettingsModal({
                       }
                       className={`rounded-xl border p-2 text-left transition ${
                         preferences.theme === theme.id
-                          ? "border-2 border-[var(--color-accent)] bg-[var(--color-accent-soft)] ring-2 ring-[var(--color-accent)] ring-offset-1"
-                          : "border-[#e2e4df] hover:border-[#bfcbd0]"
+                          ? "border-2 border-[var(--color-accent)] bg-[var(--color-accent-soft)] ring-2 ring-[var(--color-accent)] ring-offset-1 ring-offset-[var(--color-panel)]"
+                          : "border-[var(--color-border)] hover:border-[var(--color-border-strong)]"
                       }`}
                     >
                       <span className="mb-2 flex h-8 overflow-hidden rounded-lg border border-black/5">
@@ -2556,7 +2920,7 @@ function SettingsModal({
                         className={`text-[10px] font-semibold ${
                           preferences.theme === theme.id
                             ? "text-[var(--color-accent)]"
-                            : "text-slate-700"
+                            : "text-[var(--color-ink)]"
                         }`}
                       >
                         {theme.label}
@@ -2753,6 +3117,19 @@ function SettingsModal({
                       <span className="mt-1 block text-[10px] leading-4 text-slate-500">
                         {plugin.description}
                       </span>
+                      {plugin.id === KOKORO_TTS_PLUGIN_ID && enabled && (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            setSection("voice");
+                          }}
+                          className="mt-2 inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-50"
+                        >
+                          <Volume2 className="h-3 w-3" />
+                          Configure &amp; download voice model
+                        </button>
+                      )}
                     </span>
                     <input
                       type="checkbox"
@@ -2771,6 +3148,15 @@ function SettingsModal({
                 );
               })}
             </section>
+          )}
+
+          {section === "voice" && (
+            <KokoroVoiceSettings
+              preferences={preferences}
+              onUpdatePreferences={setPreferences}
+              kokoroEnabled={enabledPluginIds.includes(KOKORO_TTS_PLUGIN_ID)}
+              onToast={onToast}
+            />
           )}
 
           {section === "study" && (
@@ -2844,9 +3230,9 @@ function SettingsModal({
                 <StatCard label="Workspaces" value={stats?.workspaceCount} />
                 <StatCard label="Concept nodes" value={stats?.nodeCount} />
                 <StatCard label="Documents" value={stats?.documentCount} />
-                <StatCard label="Indexed FTS5 chunks" value={stats?.chunkCount} />
+                <StatCard label="Searchable sections" value={stats?.chunkCount} />
                 <StatCard
-                  label="Database size"
+                  label="Storage size"
                   value={
                     stats
                       ? `${(stats.databaseSizeBytes / (1024 * 1024)).toFixed(2)} MB`
@@ -2856,7 +3242,7 @@ function SettingsModal({
               </div>
               <div className="rounded-xl border border-[#e7e7e1] bg-[#fbfaf8] p-4">
                 <h3 className="text-xs font-semibold text-slate-800">
-                  Local database maintenance
+                  Storage & search maintenance
                 </h3>
                 <p className="mt-1 text-[11px] leading-5 text-slate-500">
                   Rebuild search, optimize storage, or clear quiz cache. Documents and graphs stay intact.
@@ -2871,18 +3257,18 @@ function SettingsModal({
                     className="flex items-center justify-center gap-1.5 rounded-lg border border-[#dce4e5] bg-white px-2 py-2 text-[10px] font-semibold text-slate-700 hover:bg-[#f5f7f5] disabled:opacity-50"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
-                    Rebuild FTS5 index
+                    Rebuild search index
                   </button>
                   <button
                     type="button"
                     disabled={isMaintaining}
                     onClick={() =>
-                      void runMaintenance(compactDatabase, "SQLite database optimized.")
+                      void runMaintenance(compactDatabase, "Storage optimized.")
                     }
                     className="flex items-center justify-center gap-1.5 rounded-lg border border-[#dce4e5] bg-white px-2 py-2 text-[10px] font-semibold text-slate-700 hover:bg-[#f5f7f5] disabled:opacity-50"
                   >
                     <HardDrive className="h-3.5 w-3.5" />
-                    Optimize database
+                    Optimize storage
                   </button>
                   <button
                     type="button"
@@ -3063,6 +3449,155 @@ function SegmentedSetting({
         </button>
       ))}
     </div>
+  );
+}
+
+function QuickProfileModal({
+  onClose,
+  onToast,
+}: {
+  onClose: () => void;
+  onToast: (msg: string) => void;
+}) {
+  const store = useNoesisStore();
+  const [name, setName] = useState(store.preferences.profileName);
+  const [focus, setFocus] = useState(store.preferences.profileFocus);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const dismiss = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      if (!store.preferences.profilePromptSeen) {
+        await store.setPreferences({
+          ...store.preferences,
+          profilePromptSeen: true,
+        });
+      }
+    } catch {
+      // Non-fatal if persistence fails on skip
+    } finally {
+      setIsSaving(false);
+      onClose();
+    }
+  };
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      void dismiss();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  });
+
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      await store.setPreferences({
+        ...store.preferences,
+        profileName: name.trim(),
+        profileFocus: focus.trim(),
+        profilePromptSeen: true,
+      });
+      onToast("Profile saved.");
+      onClose();
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <form
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="quick-profile-title"
+      onSubmit={(event) => void handleSubmit(event)}
+      className="w-full max-w-md rounded-2xl border border-[#e1dfd9] bg-white p-6 shadow-[0_24px_70px_rgba(27,39,47,0.2)]"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--color-accent-soft)] text-[var(--color-accent)]">
+            <User className="h-4 w-4" />
+          </span>
+          <div>
+            <h2
+              id="quick-profile-title"
+              className="text-base font-bold text-[#2c414f]"
+            >
+              Quick profile
+            </h2>
+            <p className="text-[11px] text-slate-500">
+              Personalizes your Dashboard and AI tutor
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void dismiss()}
+          aria-label="Close profile setup"
+          className="rounded-lg p-1 text-slate-400 transition hover:bg-[#f3f2ee] hover:text-slate-700"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="mt-5 space-y-3.5">
+        <label className="block">
+          <span className="text-xs font-semibold text-slate-700">
+            What should Noesis call you?
+          </span>
+          <input
+            type="text"
+            autoFocus
+            maxLength={80}
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="e.g. Alex"
+            className="mt-1.5 w-full select-text rounded-xl border border-[#dedfdc] bg-[#fbfaf8] px-3.5 py-2.5 text-sm text-slate-800 outline-none placeholder:text-slate-400 focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent-soft)]"
+          />
+        </label>
+
+        <label className="block">
+          <span className="text-xs font-semibold text-slate-700">
+            What are you studying?{" "}
+            <span className="font-normal text-slate-400">(optional)</span>
+          </span>
+          <input
+            type="text"
+            maxLength={120}
+            value={focus}
+            onChange={(event) => setFocus(event.target.value)}
+            placeholder="e.g. Computer Science, Biology, Spanish"
+            className="mt-1.5 w-full select-text rounded-xl border border-[#dedfdc] bg-[#fbfaf8] px-3.5 py-2.5 text-sm text-slate-800 outline-none placeholder:text-slate-400 focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent-soft)]"
+          />
+        </label>
+      </div>
+
+      <div className="mt-6 flex items-center justify-end gap-2">
+        <button
+          type="button"
+          disabled={isSaving}
+          onClick={() => void dismiss()}
+          className="rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-500 transition hover:bg-[#f3f2ee] hover:text-slate-700 disabled:opacity-50"
+        >
+          Skip for now
+        </button>
+        <button
+          type="submit"
+          disabled={isSaving}
+          className="rounded-xl bg-[var(--color-accent-button)] px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:brightness-95 disabled:opacity-50"
+        >
+          {isSaving ? "Saving…" : "Save profile"}
+        </button>
+      </div>
+    </form>
   );
 }
 

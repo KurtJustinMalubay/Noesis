@@ -1,9 +1,134 @@
+export type OpenAiCompatiblePresetId =
+  | "openai"
+  | "openrouter"
+  | "groq"
+  | "deepseek"
+  | "ollama"
+  | "lmstudio"
+  | "foundry"
+  | "custom";
+
+export interface OpenAiCompatiblePreset {
+  id: OpenAiCompatiblePresetId;
+  label: string;
+  kind: "cloud" | "local" | "custom";
+  defaultBaseUrl: string;
+  requiresApiKey: boolean;
+  defaultContextWindowTokens: number;
+  defaultMaxOutputTokens: number;
+  placeholderFastModel: string;
+  placeholderSynthesisModel: string;
+  keyUrl?: string;
+  hint?: string;
+}
+
+export const OPENAI_COMPATIBLE_PRESETS: readonly OpenAiCompatiblePreset[] = [
+  {
+    id: "openai",
+    label: "OpenAI",
+    kind: "cloud",
+    defaultBaseUrl: "https://api.openai.com/v1",
+    requiresApiKey: true,
+    defaultContextWindowTokens: 65536,
+    defaultMaxOutputTokens: 4096,
+    placeholderFastModel: "gpt-4o-mini",
+    placeholderSynthesisModel: "gpt-4o",
+    keyUrl: "https://platform.openai.com/api-keys",
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    kind: "cloud",
+    defaultBaseUrl: "https://openrouter.ai/api/v1",
+    requiresApiKey: true,
+    defaultContextWindowTokens: 65536,
+    defaultMaxOutputTokens: 4096,
+    placeholderFastModel: "openai/gpt-4o-mini",
+    placeholderSynthesisModel: "anthropic/claude-3.5-sonnet",
+    keyUrl: "https://openrouter.ai/keys",
+  },
+  {
+    id: "groq",
+    label: "Groq",
+    kind: "cloud",
+    defaultBaseUrl: "https://api.groq.com/openai/v1",
+    requiresApiKey: true,
+    defaultContextWindowTokens: 32768,
+    defaultMaxOutputTokens: 4096,
+    placeholderFastModel: "llama-3.1-8b-instant",
+    placeholderSynthesisModel: "llama-3.3-70b-versatile",
+    keyUrl: "https://console.groq.com/keys",
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    kind: "cloud",
+    defaultBaseUrl: "https://api.deepseek.com/v1",
+    requiresApiKey: true,
+    defaultContextWindowTokens: 65536,
+    defaultMaxOutputTokens: 4096,
+    placeholderFastModel: "deepseek-chat",
+    placeholderSynthesisModel: "deepseek-reasoner",
+    keyUrl: "https://platform.deepseek.com/api_keys",
+  },
+  {
+    id: "ollama",
+    label: "Ollama (Local)",
+    kind: "local",
+    defaultBaseUrl: "http://localhost:11434/v1",
+    requiresApiKey: false,
+    defaultContextWindowTokens: 4096,
+    defaultMaxOutputTokens: 2048,
+    placeholderFastModel: "llama3.2",
+    placeholderSynthesisModel: "qwen2.5:14b",
+  },
+  {
+    id: "lmstudio",
+    label: "LM Studio (Local)",
+    kind: "local",
+    defaultBaseUrl: "http://localhost:1234/v1",
+    requiresApiKey: false,
+    defaultContextWindowTokens: 4096,
+    defaultMaxOutputTokens: 2048,
+    placeholderFastModel: "local-model",
+    placeholderSynthesisModel: "local-model",
+  },
+  {
+    id: "foundry",
+    label: "Foundry Local",
+    kind: "local",
+    defaultBaseUrl: "http://localhost:5272/v1",
+    requiresApiKey: false,
+    defaultContextWindowTokens: 4096,
+    defaultMaxOutputTokens: 2048,
+    placeholderFastModel: "phi-3.5-mini",
+    placeholderSynthesisModel: "qwen2.5-7b",
+    hint: "Run `foundry service status` to confirm your local service URL.",
+  },
+  {
+    id: "custom",
+    label: "Custom Endpoint",
+    kind: "custom",
+    defaultBaseUrl: "",
+    requiresApiKey: false,
+    defaultContextWindowTokens: 16384,
+    defaultMaxOutputTokens: 2048,
+    placeholderFastModel: "model-id",
+    placeholderSynthesisModel: "model-id",
+    hint: "Enter any OpenAI-compatible base URL (e.g. LiteLLM, vLLM, Together, or self-hosted).",
+  },
+] as const;
+
 export interface AiSettings {
   provider: AiProvider;
   apiKey: string;
   fastModel: string;
   synthesisModel: string;
   creativityPreset: "focused" | "balanced" | "exploratory";
+  openAiPreset: OpenAiCompatiblePresetId;
+  openAiApiKeys: Partial<Record<OpenAiCompatiblePresetId, string>>;
+  openAiFastModel: string;
+  openAiSynthesisModel: string;
   localBaseUrl: string;
   localModel: string;
   localContextWindowTokens: number;
@@ -32,10 +157,10 @@ export const GEMINI_MODEL_OPTIONS = [
 export const APP_THEME_OPTIONS = [
   { id: "daylight", label: "Windows 11 Daylight", mode: "light", swatches: ["#f5f6f3", "#ffffff", "#326a9f"] },
   { id: "mica-dark", label: "Mica Dark", mode: "dark", swatches: ["#202020", "#2c2c2c", "#79b4ed"] },
-  { id: "warm-paper", label: "Warm Paper", mode: "light", swatches: ["#f4efe5", "#fffaf0", "#8a6341"] },
-  { id: "nordic-frost", label: "Nordic Frost", mode: "light", swatches: ["#edf2f5", "#fbfdff", "#507d9d"] },
-  { id: "sage-studio", label: "Sage Studio", mode: "light", swatches: ["#eef1e8", "#fbfcf7", "#687b5d"] },
-  { id: "midnight-dusk", label: "Midnight Dusk", mode: "dark", swatches: ["#16151D", "#1F1E29", "#F02475"] },
+  { id: "warm-paper", label: "Warm Paper", mode: "light", swatches: ["#f4efe5", "#fffaf0", "#765537"] },
+  { id: "nordic-frost", label: "Nordic Frost", mode: "light", swatches: ["#edf2f5", "#fbfdff", "#3f6680"] },
+  { id: "sage-studio", label: "Sage Studio", mode: "light", swatches: ["#eef1e8", "#fbfcf7", "#526a48"] },
+  { id: "midnight-dusk", label: "Midnight Dusk", mode: "dark", swatches: ["#16151D", "#1F1E29", "#FF76A0"] },
   { id: "tako", label: "Tako", mode: "dark", swatches: ["#211F2E", "#2A273A", "#F3B375"] },
   { id: "nord-night", label: "Nord Night", mode: "dark", swatches: ["#242933", "#2E3440", "#88C0D0"] },
   { id: "catppuccin-mocha", label: "Catppuccin Mocha", mode: "dark", swatches: ["#1E1E2E", "#313244", "#CBA6F7"] },
@@ -44,7 +169,7 @@ export const APP_THEME_OPTIONS = [
   { id: "strawberry-daiquiri", label: "Strawberry Daiquiri", mode: "light", swatches: ["#FFF8F8", "#FFEBEE", "#B61E46"] },
   { id: "lavender-mist", label: "Lavender Mist", mode: "light", swatches: ["#F7F5FF", "#EDE7F6", "#6750A4"] },
   { id: "teal-turquoise", label: "Teal & Turquoise", mode: "light", swatches: ["#F4FBFB", "#E0F2F1", "#00695C"] },
-  { id: "catppuccin-latte", label: "Catppuccin Latte", mode: "light", swatches: ["#EFF1F5", "#E6E9EF", "#7287FD"] },
+  { id: "catppuccin-latte", label: "Catppuccin Latte", mode: "light", swatches: ["#EFF1F5", "#E6E9EF", "#4658AD"] },
 ] as const;
 
 export type AppTheme = (typeof APP_THEME_OPTIONS)[number]["id"];
@@ -67,14 +192,65 @@ const DEFAULT_SETTINGS: AiSettings = {
   fastModel: "gemini-3.5-flash-lite",
   synthesisModel: "gemini-3.5-flash-lite",
   creativityPreset: "balanced",
+  openAiPreset: "ollama",
+  openAiApiKeys: {},
+  openAiFastModel: "",
+  openAiSynthesisModel: "",
   localBaseUrl: "http://localhost:11434/v1",
   localModel: "",
-  localContextWindowTokens: 2048,
-  localMaxOutputTokens: 1200,
+  localContextWindowTokens: 4096,
+  localMaxOutputTokens: 2048,
   localTemperature: 0.4,
   localTopP: 0.9,
   lessonDepth: "standard",
 };
+
+export function getOpenAiPreset(
+  presetId: OpenAiCompatiblePresetId | string | undefined
+): OpenAiCompatiblePreset {
+  return (
+    OPENAI_COMPATIBLE_PRESETS.find((preset) => preset.id === presetId) ??
+    OPENAI_COMPATIBLE_PRESETS[OPENAI_COMPATIBLE_PRESETS.length - 1]
+  );
+}
+
+export function inferOpenAiPresetFromUrl(
+  baseUrl: string
+): OpenAiCompatiblePresetId {
+  const normalized = baseUrl.trim().toLowerCase();
+  if (!normalized) return "ollama";
+  if (normalized.includes("api.openai.com")) return "openai";
+  if (normalized.includes("openrouter.ai")) return "openrouter";
+  if (normalized.includes("api.groq.com")) return "groq";
+  if (normalized.includes("api.deepseek.com")) return "deepseek";
+  if (normalized.includes(":11434")) return "ollama";
+  if (normalized.includes(":1234")) return "lmstudio";
+  if (normalized.includes(":5272")) return "foundry";
+  return "custom";
+}
+
+export function getOpenAiApiKey(
+  settings: Pick<AiSettings, "openAiPreset" | "openAiApiKeys">,
+  presetId: OpenAiCompatiblePresetId = settings.openAiPreset
+): string {
+  return (settings.openAiApiKeys?.[presetId] ?? "").trim();
+}
+
+export const KOKORO_VOICE_OPTIONS = [
+  { id: "af_heart", label: "Heart (US · Warm Female)" },
+  { id: "af_bella", label: "Bella (US · Clear Female)" },
+  { id: "af_nicole", label: "Nicole (US · Soft Female)" },
+  { id: "af_sarah", label: "Sarah (US · Natural Female)" },
+  { id: "af_sky", label: "Sky (US · Bright Female)" },
+  { id: "am_adam", label: "Adam (US · Deep Male)" },
+  { id: "am_michael", label: "Michael (US · Balanced Male)" },
+  { id: "bf_emma", label: "Emma (UK · Clear Female)" },
+  { id: "bf_isabella", label: "Isabella (UK · Warm Female)" },
+  { id: "bm_george", label: "George (UK · Classic Male)" },
+  { id: "bm_lewis", label: "Lewis (UK · Crisp Male)" },
+] as const;
+
+export type KokoroVoiceId = (typeof KOKORO_VOICE_OPTIONS)[number]["id"];
 
 export interface UserPreferences {
   theme: AppTheme;
@@ -92,6 +268,13 @@ export interface UserPreferences {
   showAppTutorial: boolean;
   launchInFullscreen: boolean;
   reduceMotion: boolean;
+  profileName: string;
+  profileFocus: string;
+  profilePromptSeen: boolean;
+  kokoroVoice: KokoroVoiceId;
+  kokoroSpeed: number;
+  webSpeechRate: number;
+  webSpeechPitch: number;
 }
 
 export const DEFAULT_PREFERENCES: UserPreferences = {
@@ -110,6 +293,13 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
   showAppTutorial: false,
   launchInFullscreen: true,
   reduceMotion: false,
+  profileName: "",
+  profileFocus: "",
+  profilePromptSeen: false,
+  kokoroVoice: "af_heart",
+  kokoroSpeed: 1,
+  webSpeechRate: 1,
+  webSpeechPitch: 1,
 };
 
 const DARK_THEMES = APP_THEME_OPTIONS.filter(({ mode }) => mode === "dark").map(
@@ -145,11 +335,25 @@ function boundedNumber(
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-function getLocalDateKey(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
-    now.getDate()
+function getLocalDateKey(date: Date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+    date.getDate()
   ).padStart(2, "0")}`;
+}
+
+function sanitizeOpenAiApiKeys(
+  raw: unknown
+): Partial<Record<OpenAiCompatiblePresetId, string>> {
+  if (!raw || typeof raw !== "object") return {};
+  const result: Partial<Record<OpenAiCompatiblePresetId, string>> = {};
+  const record = raw as Record<string, unknown>;
+  for (const preset of OPENAI_COMPATIBLE_PRESETS) {
+    const value = record[preset.id];
+    if (typeof value === "string" && value.trim()) {
+      result[preset.id] = value.trim();
+    }
+  }
+  return result;
 }
 
 export function loadAiSettings(): AiSettings {
@@ -157,6 +361,27 @@ export function loadAiSettings(): AiSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<AiSettings>;
+    const localBaseUrl =
+      typeof parsed.localBaseUrl === "string" && parsed.localBaseUrl.trim()
+        ? parsed.localBaseUrl.trim()
+        : DEFAULT_SETTINGS.localBaseUrl;
+    const legacyLocalModel =
+      typeof parsed.localModel === "string" ? parsed.localModel.trim() : "";
+    const openAiFastModel =
+      typeof parsed.openAiFastModel === "string" && parsed.openAiFastModel.trim()
+        ? parsed.openAiFastModel.trim()
+        : legacyLocalModel;
+    const openAiSynthesisModel =
+      typeof parsed.openAiSynthesisModel === "string" &&
+      parsed.openAiSynthesisModel.trim()
+        ? parsed.openAiSynthesisModel.trim()
+        : openAiFastModel || legacyLocalModel;
+    const hasValidPreset = OPENAI_COMPATIBLE_PRESETS.some(
+      (preset) => preset.id === parsed.openAiPreset
+    );
+    const openAiPreset: OpenAiCompatiblePresetId = hasValidPreset
+      ? (parsed.openAiPreset as OpenAiCompatiblePresetId)
+      : inferOpenAiPresetFromUrl(localBaseUrl);
     return {
       provider:
         parsed.provider === "openai-compatible"
@@ -176,12 +401,12 @@ export function loadAiSettings(): AiSettings {
         parsed.creativityPreset === "exploratory"
           ? parsed.creativityPreset
           : "balanced",
-      localBaseUrl:
-        typeof parsed.localBaseUrl === "string" && parsed.localBaseUrl.trim()
-          ? parsed.localBaseUrl.trim()
-          : DEFAULT_SETTINGS.localBaseUrl,
-      localModel:
-        typeof parsed.localModel === "string" ? parsed.localModel.trim() : "",
+      openAiPreset,
+      openAiApiKeys: sanitizeOpenAiApiKeys(parsed.openAiApiKeys),
+      openAiFastModel,
+      openAiSynthesisModel,
+      localBaseUrl,
+      localModel: openAiFastModel || legacyLocalModel,
       localContextWindowTokens: boundedInteger(
         parsed.localContextWindowTokens,
         LOCAL_CONTEXT_WINDOW_MIN,
@@ -218,6 +443,10 @@ export function loadAiSettings(): AiSettings {
 }
 
 export function saveAiSettings(settings: AiSettings): void {
+  const openAiFastModel =
+    settings.openAiFastModel.trim() || settings.localModel.trim();
+  const openAiSynthesisModel =
+    settings.openAiSynthesisModel.trim() || openAiFastModel;
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
@@ -227,9 +456,13 @@ export function saveAiSettings(settings: AiSettings): void {
       synthesisModel:
         settings.synthesisModel.trim() || DEFAULT_SETTINGS.synthesisModel,
       creativityPreset: settings.creativityPreset,
+      openAiPreset: settings.openAiPreset,
+      openAiApiKeys: sanitizeOpenAiApiKeys(settings.openAiApiKeys),
+      openAiFastModel,
+      openAiSynthesisModel,
       localBaseUrl:
         settings.localBaseUrl.trim() || DEFAULT_SETTINGS.localBaseUrl,
-      localModel: settings.localModel.trim(),
+      localModel: openAiFastModel,
       localContextWindowTokens: boundedInteger(
         settings.localContextWindowTokens,
         LOCAL_CONTEXT_WINDOW_MIN,
@@ -339,6 +572,41 @@ export function loadUserPreferences(): UserPreferences {
         typeof parsed.reduceMotion === "boolean"
           ? parsed.reduceMotion
           : DEFAULT_PREFERENCES.reduceMotion,
+      profileName:
+        typeof parsed.profileName === "string"
+          ? parsed.profileName.slice(0, 80)
+          : DEFAULT_PREFERENCES.profileName,
+      profileFocus:
+        typeof parsed.profileFocus === "string"
+          ? parsed.profileFocus.slice(0, 120)
+          : DEFAULT_PREFERENCES.profileFocus,
+      profilePromptSeen:
+        typeof parsed.profilePromptSeen === "boolean"
+          ? parsed.profilePromptSeen
+          : DEFAULT_PREFERENCES.profilePromptSeen,
+      kokoroVoice: KOKORO_VOICE_OPTIONS.some(
+        (voice) => voice.id === parsed.kokoroVoice
+      )
+        ? (parsed.kokoroVoice as KokoroVoiceId)
+        : DEFAULT_PREFERENCES.kokoroVoice,
+      kokoroSpeed: boundedNumber(
+        parsed.kokoroSpeed,
+        0.6,
+        1.6,
+        DEFAULT_PREFERENCES.kokoroSpeed
+      ),
+      webSpeechRate: boundedNumber(
+        parsed.webSpeechRate,
+        0.6,
+        1.6,
+        DEFAULT_PREFERENCES.webSpeechRate
+      ),
+      webSpeechPitch: boundedNumber(
+        parsed.webSpeechPitch,
+        0.6,
+        1.5,
+        DEFAULT_PREFERENCES.webSpeechPitch
+      ),
     };
   } catch {
     return { ...DEFAULT_PREFERENCES };
@@ -347,6 +615,43 @@ export function loadUserPreferences(): UserPreferences {
 
 export function saveUserPreferences(preferences: UserPreferences): void {
   localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(preferences));
+}
+
+export interface WeeklyConsistencyDay {
+  label: string;
+  dateKey: string;
+  count: number;
+  status: "completed" | "missed" | "today_pending" | "future";
+}
+
+const WEEKDAY_SHORT_LABELS = ["M", "T", "W", "T", "F", "S", "S"] as const;
+
+export function getWeeklyReviewConsistency(
+  now: Date = new Date()
+): WeeklyConsistencyDay[] {
+  const mondayOffset = (now.getDay() + 6) % 7;
+  return WEEKDAY_SHORT_LABELS.map((label, index) => {
+    const targetDate = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - mondayOffset + index
+    );
+    const dateKey = getLocalDateKey(targetDate);
+    const rawCount = Number(
+      localStorage.getItem(`${REVIEW_COUNT_PREFIX}${dateKey}`) ?? 0
+    );
+    const count =
+      Number.isFinite(rawCount) && rawCount > 0 ? Math.floor(rawCount) : 0;
+    const status: WeeklyConsistencyDay["status"] =
+      index > mondayOffset
+        ? "future"
+        : count > 0
+          ? "completed"
+          : index === mondayOffset
+            ? "today_pending"
+            : "missed";
+    return { label, dateKey, count, status };
+  });
 }
 
 export function getReviewsCompletedToday(): number {
@@ -367,7 +672,18 @@ export function recordCompletedReview(): number {
 
 export function hasConfiguredApiKey(): boolean {
   const settings = loadAiSettings();
-  return settings.provider === "openai-compatible"
-    ? Boolean(settings.localModel.trim())
-    : settings.apiKey.trim().length > 10;
+  if (settings.provider === "openai-compatible") {
+    const hasModel = Boolean(
+      settings.openAiFastModel.trim() ||
+        settings.openAiSynthesisModel.trim() ||
+        settings.localModel.trim()
+    );
+    const hasBaseUrl = Boolean(settings.localBaseUrl.trim());
+    if (!hasModel || !hasBaseUrl) return false;
+    const preset = getOpenAiPreset(settings.openAiPreset);
+    return preset.requiresApiKey
+      ? getOpenAiApiKey(settings).length > 0
+      : true;
+  }
+  return settings.apiKey.trim().length > 10;
 }

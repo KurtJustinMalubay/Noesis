@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  ChevronDown,
-  FilePlus2,
-  Shapes,
-} from "lucide-react";
+import { createPortal } from "react-dom";
+import { AlertTriangle, FolderKanban, GitBranch, Shapes } from "lucide-react";
 import { Excalidraw } from "@excalidraw/excalidraw";
 import type {
   ExcalidrawInitialDataState,
@@ -32,7 +29,10 @@ interface ExcalidrawWorkspaceProps {
   selectedNode: GraphNode | null;
   nodes: GraphNode[];
   appearanceMode: AppearanceMode;
-  isFullscreen: boolean;
+  sidebarPortalTarget: HTMLElement | null;
+  sidebarCollapsed: boolean;
+  createBoardRequest: number;
+  boardSearchQuery: string;
   onSelectNode: (nodeId: string | null) => Promise<void>;
   onToast: (message: string) => void;
 }
@@ -78,7 +78,10 @@ export function ExcalidrawWorkspace({
   selectedNode,
   nodes,
   appearanceMode,
-  isFullscreen,
+  sidebarPortalTarget,
+  sidebarCollapsed,
+  createBoardRequest,
+  boardSearchQuery,
   onSelectNode,
   onToast,
 }: ExcalidrawWorkspaceProps) {
@@ -86,7 +89,6 @@ export function ExcalidrawWorkspace({
   const [activeBoardId, setActiveBoardId] = useState<string | null>(null);
   const [boardsLoaded, setBoardsLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [showNewBoardMenu, setShowNewBoardMenu] = useState(false);
   const [sceneError, setSceneError] = useState<string | null>(null);
   const pendingSceneRef = useRef<{
     boardId: string;
@@ -96,6 +98,7 @@ export function ExcalidrawWorkspace({
   const initialFollowAppliedRef = useRef(false);
   const lastFollowedNodeIdRef = useRef<string | null>(selectedNode?.id ?? null);
   const handledBoardRequestRef = useRef<number | null>(null);
+  const handledCreateBoardRequestRef = useRef(0);
 
   const activeBoard =
     boards.find((board) => board.id === activeBoardId) ?? null;
@@ -241,7 +244,6 @@ export function ExcalidrawWorkspace({
 
   const createBoard = async (node: GraphNode | null) => {
     savePendingScene();
-    setShowNewBoardMenu(false);
     const now = Date.now();
     const boardId = crypto.randomUUID();
     try {
@@ -275,6 +277,19 @@ export function ExcalidrawWorkspace({
     }
   };
 
+  useEffect(() => {
+    if (
+      !boardsLoaded ||
+      createBoardRequest === 0 ||
+      handledCreateBoardRequestRef.current === createBoardRequest
+    ) {
+      return;
+    }
+
+    handledCreateBoardRequestRef.current = createBoardRequest;
+    void createBoard(selectedNode);
+  }, [boardsLoaded, createBoardRequest, selectedNode?.id]);
+
   const handleSceneChange = (
     boardId: string,
     elements: Parameters<NonNullable<ExcalidrawProps["onChange"]>>[0],
@@ -301,150 +316,154 @@ export function ExcalidrawWorkspace({
 
   const nodeBoards = boards.filter((board) => board.node_id !== null);
   const workspaceBoards = boards.filter((board) => board.node_id === null);
+  const normalizedBoardSearch = boardSearchQuery.trim().toLocaleLowerCase();
+  const matchesBoardSearch = (board: PluginBoard) =>
+    sidebarCollapsed ||
+    normalizedBoardSearch.length === 0 ||
+    `${board.title} ${board.node_title ?? ""}`
+      .toLocaleLowerCase()
+      .includes(normalizedBoardSearch);
+  const visibleNodeBoards = nodeBoards.filter(matchesBoardSearch);
+  const visibleWorkspaceBoards = workspaceBoards.filter(matchesBoardSearch);
+  const conceptSelector = (
+    <select
+      id="excalidraw-concept-selector"
+      value={selectedNode?.id ?? ""}
+      onChange={(event) =>
+        void onSelectNode(event.target.value || null).catch((error) =>
+          onToast(`Could not select concept: ${errorMessage(error)}`)
+        )
+      }
+      aria-label="Current concept"
+      title="Current concept"
+      className={
+        sidebarCollapsed
+          ? "absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          : "mt-1.5 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-panel)] px-2 py-1.5 text-[10px] font-normal normal-case tracking-normal text-[var(--color-ink)]"
+      }
+    >
+      <option value="">Workspace boards</option>
+      {nodes.map((node) => (
+        <option key={node.id} value={node.id}>
+          {node.title}
+        </option>
+      ))}
+    </select>
+  );
 
   return (
-    <div className="excalidraw-workspace flex h-full min-h-0 min-w-0 flex-1 bg-[var(--color-panel)]" data-fullscreen={isFullscreen}>
-        <aside
-          aria-hidden={isFullscreen}
-          inert={isFullscreen}
-          className={`flex shrink-0 flex-col overflow-hidden border-r bg-[var(--color-panel)] transition-[width,opacity,border-color] duration-300 ease-[var(--ease-spring)] ${
-            isFullscreen
-              ? "w-0 border-transparent opacity-0"
-              : "w-60 border-[var(--color-border)] opacity-100"
-          }`}
-        >
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
-          <div className="flex items-center gap-2 text-xs font-semibold">
-            <Shapes className="h-4 w-4 text-[var(--color-accent)]" />
-            Boards
-          </div>
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setShowNewBoardMenu((open) => !open)}
-              className="flex items-center gap-1 rounded-md bg-[var(--color-accent-button)] px-2 py-1.5 text-[10px] font-semibold text-white hover:brightness-95"
-              aria-expanded={showNewBoardMenu}
+    <>
+      {sidebarPortalTarget &&
+        createPortal(
+          <aside className="flex h-full w-full min-w-0 shrink-0 flex-col overflow-hidden bg-[var(--color-sidebar)]">
+            <div
+              className={`border-b border-[var(--color-border)] ${
+                sidebarCollapsed
+                  ? "flex justify-center p-1"
+                  : "px-3 py-2"
+              }`}
             >
-              <FilePlus2 className="h-3.5 w-3.5" />
-              New
-              <ChevronDown className="h-3 w-3" />
-            </button>
-            {showNewBoardMenu && (
-              <div className="absolute right-0 top-full z-30 mt-1 w-48 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-1 shadow-xl">
-                <button
-                  type="button"
-                  onClick={() => void createBoard(null)}
-                  className="w-full rounded-md px-2.5 py-2 text-left text-[11px] hover:bg-[var(--color-hover)]"
+              {sidebarCollapsed ? (
+                <div
+                  className="relative grid h-10 w-10 place-items-center rounded-lg text-[var(--color-muted)] focus-within:ring-2 focus-within:ring-[var(--color-accent-soft)]"
+                  title="Current concept"
                 >
-                  Workspace board
-                </button>
-                <button
-                  type="button"
-                  disabled={!selectedNode}
-                  onClick={() => selectedNode && void createBoard(selectedNode)}
-                  className="w-full rounded-md px-2.5 py-2 text-left text-[11px] hover:bg-[var(--color-hover)] disabled:cursor-not-allowed disabled:opacity-45"
+                  <GitBranch className="h-4 w-4" aria-hidden="true" />
+                  {conceptSelector}
+                </div>
+              ) : (
+                <label
+                  htmlFor="excalidraw-concept-selector"
+                  className="block text-[9px] font-semibold uppercase tracking-wider text-[var(--color-muted)]"
                 >
-                  {selectedNode
-                    ? `Board for ${selectedNode.title}`
-                    : "Select a concept for a board"}
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="border-b border-[var(--color-border)] px-3 py-2">
-          <label className="block text-[9px] font-semibold uppercase tracking-wider text-[var(--color-muted)]">
-            Follow concept
-            <select
-              value={selectedNode?.id ?? ""}
-              onChange={(event) =>
-                void onSelectNode(event.target.value || null).catch((error) =>
-                  onToast(`Could not select concept: ${errorMessage(error)}`)
-                )
-              }
-              className="mt-1.5 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-panel)] px-2 py-1.5 text-[10px] font-normal normal-case tracking-normal text-[var(--color-ink)]"
-            >
-              <option value="">Workspace boards</option>
-              {nodes.map((node) => (
-                <option key={node.id} value={node.id}>
-                  {node.title}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+                  Current concept
+                  {conceptSelector}
+                </label>
+              )}
+            </div>
 
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
-          {loadError && (
-            <p className="rounded-lg border border-rose-300 bg-rose-50 p-2 text-[10px] leading-4 text-rose-800">
-              Could not load boards: {loadError}
-            </p>
-          )}
-          {boardsLoaded && !loadError && boards.length === 0 && (
+            <div
+              className={`min-h-0 flex-1 overflow-y-auto ${
+                sidebarCollapsed ? "space-y-2 p-1" : "space-y-4 p-3"
+              }`}
+            >
+          {loadError &&
+            (sidebarCollapsed ? (
+              <div
+                role="alert"
+                title={`Could not load boards: ${loadError}`}
+                className="mx-auto grid h-10 w-10 place-items-center rounded-lg text-rose-700"
+              >
+                <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                <span className="sr-only">Could not load boards: {loadError}</span>
+              </div>
+            ) : (
+              <p
+                role="alert"
+                className="rounded-lg border border-rose-300 bg-rose-50 p-2 text-[10px] leading-4 text-rose-800"
+              >
+                Could not load boards: {loadError}
+              </p>
+            ))}
+          {!sidebarCollapsed && boardsLoaded && !loadError && boards.length === 0 && (
             <p className="px-1 text-[10px] leading-4 text-[var(--color-muted)]">
-              Create a workspace board or a board for the selected concept.
+              Create a board to start capturing visual ideas.
             </p>
           )}
-          {workspaceBoards.length > 0 && (
+          {!sidebarCollapsed &&
+            boardsLoaded &&
+            !loadError &&
+            boards.length > 0 &&
+            visibleWorkspaceBoards.length + visibleNodeBoards.length === 0 && (
+              <p className="px-2 py-3 text-[10px] text-[var(--color-muted)]">
+              No boards match "{boardSearchQuery.trim()}".
+              </p>
+            )}
+          {visibleWorkspaceBoards.length > 0 && (
             <section>
-              <h3 className="mb-1 px-2 text-[9px] font-semibold uppercase tracking-wider text-[var(--color-muted)]">
-                Workspace
-              </h3>
-              {workspaceBoards.map((board) => (
+              {!sidebarCollapsed && (
+                <h3 className="mb-1 px-2 text-[9px] font-semibold uppercase tracking-wider text-[var(--color-muted)]">
+                  Workspace boards
+                </h3>
+              )}
+              {visibleWorkspaceBoards.map((board) => (
                 <BoardButton
                   key={board.id}
                   board={board}
                   active={board.id === activeBoardId}
+                  collapsed={sidebarCollapsed}
                   onSelect={() => activateBoard(board)}
                 />
               ))}
             </section>
           )}
-          {nodeBoards.length > 0 && (
+          {visibleNodeBoards.length > 0 && (
             <section>
-              <h3 className="mb-1 px-2 text-[9px] font-semibold uppercase tracking-wider text-[var(--color-muted)]">
-                Concepts
-              </h3>
-              {nodeBoards.map((board) => (
+              {!sidebarCollapsed && (
+                <h3 className="mb-1 px-2 text-[9px] font-semibold uppercase tracking-wider text-[var(--color-muted)]">
+                  Concept boards
+                </h3>
+              )}
+              {visibleNodeBoards.map((board) => (
                 <BoardButton
                   key={board.id}
                   board={board}
                   active={board.id === activeBoardId}
+                  collapsed={sidebarCollapsed}
                   onSelect={() => activateBoard(board)}
                   subtitle={board.node_title ?? "Deleted concept"}
                 />
               ))}
             </section>
           )}
-        </div>
-        </aside>
+            </div>
+          </aside>,
+          sidebarPortalTarget
+        )}
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div
-          aria-hidden={isFullscreen}
-          inert={isFullscreen}
-          className={`flex shrink-0 items-center justify-between overflow-hidden border-b px-4 transition-[height,opacity,border-color] duration-300 ease-[var(--ease-spring)] ${
-            isFullscreen
-              ? "h-0 border-transparent opacity-0"
-              : "h-11 border-[var(--color-border)] opacity-100"
-          }`}
-        >
-          <div className="min-w-0">
-            <p className="truncate text-[11px] font-semibold">
-              {activeBoard?.title ?? "Excalidraw"}
-            </p>
-            <p className="truncate text-[9px] text-[var(--color-muted)]">
-              {activeBoard
-                ? activeBoard.node_id
-                  ? `Concept: ${activeBoard.node_title ?? "Unknown concept"}`
-                  : "Workspace board"
-                : "Select or create a board"}
-            </p>
-          </div>
-          <span className="text-[9px] text-[var(--color-muted)]">
-            {activeBoard ? "Saved locally" : ""}
-          </span>
-        </div>
+      <div
+        className="excalidraw-workspace flex h-full min-h-0 min-w-0 flex-1 bg-[var(--color-panel)]"
+      >
         <div className="relative h-full min-h-0 min-w-0 w-full flex-1">
           {activeBoard && initialData ? (
             <Excalidraw
@@ -476,47 +495,62 @@ export function ExcalidrawWorkspace({
               <Shapes className="h-8 w-8 text-[var(--color-muted)]" />
               <p className="mt-3 text-sm font-semibold">Your visual workspace</p>
               <p className="mt-1 max-w-xs text-[11px] leading-5 text-[var(--color-muted)]">
-                {isFullscreen
-                  ? "Exit fullscreen to select or create a board."
-                  : "Boards can belong to this workspace or follow an individual concept."}
+                Boards can belong to this workspace or follow an individual concept.
               </p>
             </div>
           )}
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
 function BoardButton({
   board,
   active,
+  collapsed,
   onSelect,
   subtitle,
 }: {
   board: PluginBoard;
   active: boolean;
+  collapsed: boolean;
   onSelect: () => void;
   subtitle?: string;
 }) {
+  const Icon = board.node_id ? GitBranch : FolderKanban;
   return (
     <button
       type="button"
       onClick={onSelect}
-      className={`mb-0.5 w-full rounded-lg px-2.5 py-2 text-left transition ${
+      title={subtitle ? `${board.title} · ${subtitle}` : board.title}
+      aria-label={subtitle ? `${board.title}, ${subtitle}` : board.title}
+      aria-current={active ? "page" : undefined}
+      className={`mb-0.5 flex items-start rounded-lg text-left transition-colors ${
+        collapsed
+          ? "mx-auto h-10 w-10 items-center justify-center px-0"
+          : "w-full gap-2 px-2.5 py-2"
+      } ${
         active
           ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
           : "text-[var(--color-ink)] hover:bg-[var(--color-hover)]"
       }`}
     >
-      <span className="block truncate text-[11px] font-medium">
-        {board.title}
-      </span>
-      {subtitle && (
-        <span className="mt-0.5 block truncate text-[9px] text-[var(--color-muted)]">
-          {subtitle}
+      <Icon
+        className={`h-3.5 w-3.5 shrink-0 text-[var(--color-muted)] ${
+          collapsed ? "" : "mt-0.5"
+        }`}
+      />
+      <span className={collapsed ? "sr-only" : "min-w-0 flex-1"}>
+        <span className="block truncate text-[11px] font-medium">
+          {board.title}
         </span>
-      )}
+        {subtitle && (
+          <span className="mt-0.5 block truncate text-[9px] text-[var(--color-muted)]">
+            {subtitle}
+          </span>
+        )}
+      </span>
     </button>
   );
 }

@@ -25,6 +25,7 @@ export interface TutorPayloadInput {
   lessonSummary?: string;
   lessonLayer?: number;
   lessonMarkdown?: string | null;
+  dashboardContext?: string | null;
   vaultChunks: Array<{
     file_name: string;
     heading?: string | null;
@@ -324,7 +325,16 @@ export function buildTutorPayload(input: TutorPayloadInput): TutorPayload {
         }
       )
     : "";
-  const lessonContext = [lessonMeta, lesson].filter(Boolean).join("\n");
+  const dashboardSummary =
+    !lessonMeta && !lesson && input.dashboardContext
+      ? truncateAtParagraphBoundary(
+          minifyContextText(input.dashboardContext),
+          budget.lesson
+        )
+      : "";
+  const lessonContext = [lessonMeta, lesson, dashboardSummary]
+    .filter(Boolean)
+    .join("\n");
   const vaultParts: string[] = [];
   let vaultTokens = 0;
   for (const chunk of input.vaultChunks) {

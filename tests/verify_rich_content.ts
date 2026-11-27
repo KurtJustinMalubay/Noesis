@@ -2,6 +2,7 @@ import {
   normalizeMathMarkdown,
   stripMathMarkup,
 } from "../src/components/ui/normalizeMathMarkdown.ts";
+import { normalizeEscapedMarkdownLineBreaks } from "../src/utils/normalizeEscapedMarkdownLineBreaks.ts";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
@@ -59,6 +60,31 @@ const codeMarkdown = [
 assert(
   normalizeMathMarkdown(codeMarkdown) === codeMarkdown,
   "math normalization must leave inline and fenced code unchanged"
+);
+const escapedLineBreakMarkdown = String.raw`# Logic & Proof Techniques:\n\n## 1. Why Logic Matters\nLogic is useful.\n\n\(\nu\)`;
+const normalizedLineBreaks = normalizeMathMarkdown(escapedLineBreakMarkdown);
+assert(
+  normalizedLineBreaks.startsWith(
+    String.raw`# Logic & Proof Techniques:
+
+## 1. Why Logic Matters
+Logic is useful.
+
+`
+  ) &&
+    normalizedLineBreaks.endsWith("$\\nu$"),
+  "escaped lesson line breaks should restore Markdown structure and preserve LaTeX commands"
+);
+const escapedLineBreakCode =
+  "Inline `" +
+  String.raw`\n` +
+  "`\n\n```text\n" +
+  String.raw`\n` +
+  "\n```";
+assert(
+  normalizeEscapedMarkdownLineBreaks(escapedLineBreakCode) ===
+    escapedLineBreakCode,
+  "escaped line breaks inside inline and fenced code should remain unchanged"
 );
 
 console.log("✓ Rich content math normalization tests passed!");

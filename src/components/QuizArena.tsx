@@ -14,6 +14,8 @@ import {
   ChevronRight,
   Code2,
   FileText,
+  Mic,
+  MicOff,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -23,7 +25,15 @@ import {
   Save,
   Sparkles,
   Square,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
+import {
+  isTtsSupported,
+  speakWithAppVoice,
+  startDictation,
+  stopSpeaking,
+} from "../utils/speech";
 import { loadQuizPreferences, saveQuizPreferences } from "../ai/quizService";
 import type { QuizBatchProgress } from "../ai/quizService";
 import type { AppTheme } from "../ai/keyStore";
@@ -147,6 +157,12 @@ export function QuizArena({
   const [isComplete, setIsComplete] = useState(savedScore !== null);
   const [isOverviewOpen, setIsOverviewOpen] = useState(false);
   const [isQuestionNavOpen, setIsQuestionNavOpen] = useState(true);
+  const [speakingQuestionId, setSpeakingQuestionId] = useState<string | null>(
+    null
+  );
+  const [isListeningAnswer, setIsListeningAnswer] = useState(false);
+  const [speechNotice, setSpeechNotice] = useState<string | null>(null);
+  const stopDictationRef = useRef<(() => void) | null>(null);
   const dirtyRef = useRef(false);
 
   const quizItems = useMemo(() => {
@@ -344,6 +360,95 @@ export function QuizArena({
       .getElementById(`quiz-question-${activeQuestion.id}`)
       ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [activeItem?.type, activeQuestion?.id]);
+
+  useEffect(() => {
+    const handleEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (
+        document.querySelector(
+          '[aria-modal="true"], [data-confirm-delete], [data-exit-confirmation]'
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [onClose]);
+
+  useEffect(() => {
+    stopSpeaking();
+    setSpeakingQuestionId(null);
+    stopDictationRef.current?.();
+    stopDictationRef.current = null;
+    setIsListeningAnswer(false);
+    setSpeechNotice(null);
+  }, [activeQuestion?.id]);
+
+  useEffect(() => {
+    return () => {
+      stopSpeaking();
+      stopDictationRef.current?.();
+    };
+  }, []);
+
+  const toggleSpeakQuestion = (question: QuizQuestion) => {
+    if (speakingQuestionId === question.id) {
+      stopSpeaking();
+      setSpeakingQuestionId(null);
+      return;
+    }
+    setSpeechNotice(null);
+    const optionsText = question.options?.length
+      ? ` Options: ${question.options
+          .map((opt, idx) => `${idx + 1}: ${opt}`)
+          .join(". ")}`
+      : "";
+    speakWithAppVoice(`${question.prompt}${optionsText}`, {
+      onStart: () => setSpeakingQuestionId(question.id),
+      onEnd: () =>
+        setSpeakingQuestionId((current) =>
+          current === question.id ? null : current
+        ),
+      onError: (msg) => {
+        setSpeakingQuestionId(null);
+        setSpeechNotice(msg);
+      },
+    });
+  };
+
+  const toggleDictateAnswer = (questionId: string) => {
+    if (isListeningAnswer) {
+      stopDictationRef.current?.();
+      stopDictationRef.current = null;
+      setIsListeningAnswer(false);
+      return;
+    }
+    setSpeechNotice(null);
+    setIsListeningAnswer(true);
+    stopDictationRef.current = startDictation({
+      onFinalTranscript: (transcript) => {
+        if (!transcript) return;
+        const current = (answersRef.current[questionId] as string) ?? "";
+        const next = current.trim()
+          ? `${current.trimEnd()} ${transcript}`
+          : transcript;
+        updateAnswer(questionId, next);
+      },
+      onEnd: () => {
+        stopDictationRef.current = null;
+        setIsListeningAnswer(false);
+      },
+      onError: (msg) => {
+        stopDictationRef.current = null;
+        setIsListeningAnswer(false);
+        setSpeechNotice(msg);
+      },
+    });
+  };
 
   const handleArenaKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
@@ -739,6 +844,21 @@ export function QuizArena({
             </div>
           )}
           <main className="flex min-h-0 flex-1 overflow-hidden">
+            {isComplete && score !== null ? (
+              <QuizExamReview
+                questions={questions}
+                answers={answersRef.current}
+                gradingResults={gradingResults}
+                score={score}
+                passThreshold={passThreshold}
+                onRetake={() => void handleRetake()}
+                onDrillWeakConcepts={() => {
+                  if (nodeId) onConfigure(nodeId);
+                  else void handleRetake();
+                }}
+              />
+            ) : (
+              <>
             <aside
               id="quiz-item-overview"
               aria-label="Assessment item overview"
@@ -928,6 +1048,32 @@ export function QuizArena({
                     <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-2 py-0.5 text-[9px] text-[var(--color-muted)]">
                       {(activeQuestion.difficulty ?? "medium").toUpperCase()}
                     </span>
+                    {isTtsSupported() && (
+                      <button
+                        type="button"
+                        onClick={() => toggleSpeakQuestion(activeQuestion)}
+                        aria-pressed={speakingQuestionId === activeQuestion.id}
+                        aria-label={
+                          speakingQuestionId === activeQuestion.id
+                            ? "Stop reading question"
+                            : "Read question aloud"
+                        }
+                        className={`ml-auto inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold normal-case tracking-normal transition ${
+                          speakingQuestionId === activeQuestion.id
+                            ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                            : "border-[var(--color-border)] text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                        }`}
+                      >
+                        {speakingQuestionId === activeQuestion.id ? (
+                          <VolumeX className="h-3.5 w-3.5" />
+                        ) : (
+                          <Volume2 className="h-3.5 w-3.5" />
+                        )}
+                        {speakingQuestionId === activeQuestion.id
+                          ? "Stop"
+                          : "Listen"}
+                      </button>
+                    )}
                   </div>
                   <RichContent className="prose prose-sm max-w-none text-[var(--color-ink)]">
                     {activeQuestion.prompt}
@@ -986,9 +1132,39 @@ export function QuizArena({
                 <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
                   {activeQuestion.type === "open_ended" ? (
                     <div className="flex min-h-0 flex-1 flex-col">
-                      <label className="mb-2 text-xs font-semibold">
-                        Your response
-                      </label>
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <label className="text-xs font-semibold">
+                          Your response
+                        </label>
+                        <button
+                          type="button"
+                          disabled={isComplete || isSubmitting}
+                          onClick={() => toggleDictateAnswer(activeQuestion.id)}
+                          aria-pressed={isListeningAnswer}
+                          aria-label={
+                            isListeningAnswer
+                              ? "Stop voice dictation"
+                              : "Speak your response"
+                          }
+                          className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition disabled:opacity-50 ${
+                            isListeningAnswer
+                              ? "border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                              : "border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+                          }`}
+                        >
+                          {isListeningAnswer ? (
+                            <MicOff className="h-3.5 w-3.5" />
+                          ) : (
+                            <Mic className="h-3.5 w-3.5" />
+                          )}
+                          {isListeningAnswer ? "Listening…" : "Speak"}
+                        </button>
+                      </div>
+                      {speechNotice && (
+                        <p className="mb-2 text-[11px] text-amber-700">
+                          {speechNotice}
+                        </p>
+                      )}
                       <textarea
                         value={
                           (answersRef.current[activeQuestion.id] as string) ?? ""
@@ -1164,6 +1340,8 @@ export function QuizArena({
                   </nav>
               </aside>
             )}
+              </>
+            )}
           </main>
 
           <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--color-border)] bg-[var(--color-panel)] px-5 py-3">
@@ -1249,6 +1427,215 @@ export function QuizArena({
         </>
       )}
     </div>
+  );
+}
+
+function QuizExamReview({
+  questions,
+  answers,
+  gradingResults,
+  score,
+  passThreshold,
+  onRetake,
+  onDrillWeakConcepts,
+}: {
+  questions: QuizQuestion[];
+  answers: Record<string, QuizAnswer>;
+  gradingResults: QuizGradingResult[];
+  score: number;
+  passThreshold: number;
+  onRetake: () => void;
+  onDrillWeakConcepts: () => void;
+}) {
+  const resultByQuestionId = useMemo(() => {
+    const map = new Map<string, QuizGradingResult>();
+    for (const item of gradingResults) {
+      map.set(item.id, item);
+    }
+    return map;
+  }, [gradingResults]);
+
+  const evaluatedQuestions = questions.map((question) => {
+    const answer = answers[question.id];
+    const grading = resultByQuestionId.get(question.id);
+    const isCorrect =
+      question.type === "mcq"
+        ? typeof answer === "number" && answer === question.answerIndex
+        : Boolean(grading?.passed);
+    return { question, answer, grading, isCorrect };
+  });
+
+  const correctCount = evaluatedQuestions.filter((item) => item.isCorrect).length;
+  const pct = Math.round(score * 100);
+  const passed = pct >= passThreshold;
+
+  const sageBoxStyle = {
+    backgroundColor: "color-mix(in srgb, #4f7a65 11%, var(--color-panel))",
+    borderColor: "color-mix(in srgb, #4f7a65 34%, transparent)",
+    color: "#3f6553",
+  } as const;
+
+  const terracottaBoxStyle = {
+    backgroundColor: "color-mix(in srgb, #b06348 11%, var(--color-panel))",
+    borderColor: "color-mix(in srgb, #b06348 34%, transparent)",
+    color: "#8f4c35",
+  } as const;
+
+  return (
+    <section className="min-w-0 flex-1 overflow-y-auto bg-[var(--color-canvas)] p-4 select-text sm:p-6 lg:p-8">
+      <div className="mx-auto max-w-4xl space-y-5">
+        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-5 shadow-sm sm:p-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="text-3xl font-bold tracking-tight tabular-nums text-[var(--color-ink)]">
+                  {pct}%
+                </span>
+                <span
+                  style={passed ? sageBoxStyle : terracottaBoxStyle}
+                  className="rounded-full border px-2.5 py-0.5 text-[11px] font-semibold"
+                >
+                  {passed ? "Mastery achieved" : `Below ${passThreshold}% target`}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-[var(--color-muted)]">
+                <span className="font-semibold text-[var(--color-ink)]">
+                  {correctCount} / {questions.length}
+                </span>{" "}
+                correct · Exam review
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={onRetake}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3.5 py-2 text-xs font-semibold text-[var(--color-ink)] transition-colors duration-150 hover:border-[var(--color-accent)] hover:bg-[var(--color-hover)]"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Retake Quiz
+              </button>
+              <button
+                type="button"
+                onClick={onDrillWeakConcepts}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--color-accent-button)] px-3.5 py-2 text-xs font-semibold text-[var(--color-accent-foreground)] shadow-sm transition hover:brightness-95"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                Drill Weak Concepts
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          {evaluatedQuestions.map(
+            ({ question, answer, grading, isCorrect }, index) => {
+              const chosenOption =
+                question.type === "mcq" && typeof answer === "number"
+                  ? question.options?.[answer]
+                  : undefined;
+              const correctOption =
+                question.type === "mcq" &&
+                typeof question.answerIndex === "number"
+                  ? question.options?.[question.answerIndex]
+                  : undefined;
+
+              return (
+                <article
+                  key={question.id}
+                  className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-panel)] p-5 shadow-sm sm:p-6"
+                >
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="grid h-7 w-7 place-items-center rounded-lg bg-[var(--color-panel-subtle)] text-xs font-bold text-[var(--color-ink)]">
+                        {index + 1}
+                      </span>
+                      <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[var(--color-muted)]">
+                        {question.type.replace("_", " ")}
+                      </span>
+                      <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-2 py-0.5 text-[9px] font-semibold text-[var(--color-muted)]">
+                        {(question.difficulty ?? "medium").toUpperCase()}
+                      </span>
+                    </div>
+                    <span
+                      style={isCorrect ? sageBoxStyle : terracottaBoxStyle}
+                      className="inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-semibold"
+                    >
+                      {isCorrect ? "Correct" : "Incorrect"}
+                    </span>
+                  </div>
+
+                  <RichContent className="prose prose-sm max-w-none text-[var(--color-ink)]">
+                    {question.prompt}
+                  </RichContent>
+
+                  {question.type === "mcq" ? (
+                    <div className="mt-4 grid gap-2.5 sm:grid-cols-2">
+                      <div
+                        style={isCorrect ? sageBoxStyle : terracottaBoxStyle}
+                        className="rounded-xl border p-3 text-xs"
+                      >
+                        <p className="text-[10px] font-bold uppercase tracking-[0.08em] opacity-80">
+                          Your answer
+                        </p>
+                        <div className="mt-1 font-medium text-[var(--color-ink)]">
+                          {chosenOption ? (
+                            <RichContent inline>{chosenOption}</RichContent>
+                          ) : (
+                            <span className="italic opacity-75">
+                              No answer selected
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {!isCorrect && correctOption && (
+                        <div
+                          style={sageBoxStyle}
+                          className="rounded-xl border p-3 text-xs"
+                        >
+                          <p className="text-[10px] font-bold uppercase tracking-[0.08em] opacity-80">
+                            Correct answer
+                          </p>
+                          <div className="mt-1 font-medium text-[var(--color-ink)]">
+                            <RichContent inline>{correctOption}</RichContent>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="mt-4 space-y-2.5">
+                      {typeof answer === "string" && answer.trim() && (
+                        <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-3 text-xs">
+                          <p className="text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--color-muted)]">
+                            Your response
+                          </p>
+                          <pre className="mt-1 whitespace-pre-wrap font-sans text-xs text-[var(--color-ink)]">
+                            {answer}
+                          </pre>
+                        </div>
+                      )}
+                      {grading && <GradingFeedback result={grading} />}
+                    </div>
+                  )}
+
+                  {question.explanation && (
+                    <div className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-4">
+                      <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-[var(--color-muted)]">
+                        Explanation
+                      </p>
+                      <RichContent className="prose prose-sm mt-1.5 max-w-none text-[var(--color-ink)]">
+                        {question.explanation}
+                      </RichContent>
+                    </div>
+                  )}
+                </article>
+              );
+            }
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 

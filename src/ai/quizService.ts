@@ -1,5 +1,8 @@
 import {
   generateGeminiJson,
+  getLocalOutputTokenBudget,
+  isRateLimitApiError,
+  isLocalAiEndpoint,
   parseGeminiJson,
 } from "./geminiClient.ts";
 import { loadAiSettings } from "./keyStore.ts";
@@ -24,50 +27,55 @@ export const DEFAULT_QUIZ_CONFIG: QuizGenerationConfig = {
   difficultyMode: "medium",
 };
 
-const QUESTION_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    questions: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          id: { type: "STRING" },
-          type: {
-            type: "STRING",
-            enum: ["mcq", "open_ended", "coding"],
-          },
-          prompt: { type: "STRING" },
-          options: { type: "ARRAY", items: { type: "STRING" } },
-          answerIndex: { type: "INTEGER" },
-          rubric: { type: "STRING" },
-          referenceAnswer: { type: "STRING" },
-          language: { type: "STRING" },
-          starterCode: { type: "STRING" },
-          testCases: { type: "ARRAY", items: { type: "STRING" } },
-          hints: { type: "ARRAY", items: { type: "STRING" } },
-          explanation: { type: "STRING" },
-          difficulty: { type: "STRING", enum: ["easy", "medium", "hard"] },
-        },
-        required: [
-          "id",
-          "type",
-          "prompt",
-          "options",
-          "answerIndex",
-          "rubric",
-          "referenceAnswer",
-          "language",
-          "starterCode",
-          "testCases",
-          "explanation",
-          "difficulty",
-        ],
+function getQuestionSchema(
+  formats: Iterable<QuizQuestionType>
+): Record<string, unknown> {
+  const selectedFormats = [...new Set(formats)];
+  const properties: Record<string, unknown> = {
+    type: { type: "STRING", enum: selectedFormats },
+    prompt: { type: "STRING" },
+    explanation: { type: "STRING" },
+  };
+  const required = ["type", "prompt", "explanation"];
+
+  if (selectedFormats.includes("mcq")) {
+    properties.options = { type: "ARRAY", items: { type: "STRING" } };
+    properties.answerIndex = { type: "INTEGER" };
+    required.push("options", "answerIndex");
+  }
+  if (selectedFormats.includes("open_ended")) {
+    properties.rubric = { type: "STRING" };
+    properties.referenceAnswer = { type: "STRING" };
+    required.push("rubric", "referenceAnswer");
+  }
+  if (selectedFormats.includes("coding")) {
+    properties.rubric = { type: "STRING" };
+    properties.referenceAnswer = { type: "STRING" };
+    properties.language = { type: "STRING" };
+    properties.starterCode = { type: "STRING" };
+    properties.testCases = { type: "ARRAY", items: { type: "STRING" } };
+    properties.hints = { type: "ARRAY", items: { type: "STRING" } };
+    required.push(
+      "rubric",
+      "referenceAnswer",
+      "language",
+      "starterCode",
+      "testCases",
+      "hints"
+    );
+  }
+
+  return {
+    type: "OBJECT",
+    properties: {
+      questions: {
+        type: "ARRAY",
+        items: { type: "OBJECT", properties, required },
       },
     },
-  },
-  required: ["questions"],
-};
+    required: ["questions"],
+  };
+}
 
 export function loadQuizPreferences(): QuizGenerationConfig {
   try {
@@ -181,10 +189,88 @@ export function saveQuizPreferences(
   localStorage.setItem(QUIZ_PREFERENCES_KEY, JSON.stringify(config));
 }
 
+function extractCandidateQuestionObjects(rawText: string): unknown[] {
+  const recovered: unknown[] = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let objectStart = -1;
+
+  for (let i = 0; i < rawText.length; i += 1) {
+    const ch = rawText[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === "{") {
+      if (depth === 0) objectStart = i;
+      depth += 1;
+    } else if (ch === "}") {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0 && objectStart >= 0) {
+        const candidate = rawText.slice(objectStart, i + 1);
+        objectStart = -1;
+        if (
+          candidate.includes('"prompt"') ||
+          candidate.includes('"question"') ||
+          candidate.includes('"options"')
+        ) {
+          try {
+            const parsed = parseGeminiJson<Record<string, unknown>>(candidate);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              if (Array.isArray(parsed.questions)) {
+                recovered.push(...parsed.questions);
+              } else {
+                recovered.push(parsed);
+              }
+            }
+          } catch {
+            // Skip unrecoverable fragment
+          }
+        }
+      }
+    }
+  }
+  return recovered;
+}
+
 export function parseQuizPayload(
   rawText: string,
   nodeId: string
 ): QuizQuestion[] {
+  const stripped = rawText
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  try {
+    const parsed = parseGeminiJson<unknown>(stripped || rawText);
+    const normalized = normalizeQuizQuestions(
+      Array.isArray(parsed) ? { questions: parsed } : parsed,
+      nodeId
+    );
+    if (normalized.length > 0) return normalized;
+  } catch {
+    // Fall through to balanced-object recovery
+  }
+
+  const recovered = extractCandidateQuestionObjects(stripped || rawText);
+  if (recovered.length > 0) {
+    const normalized = normalizeQuizQuestions({ questions: recovered }, nodeId);
+    if (normalized.length > 0) return normalized;
+  }
+
   const parsed = parseGeminiJson<unknown>(rawText);
   return normalizeQuizQuestions(
     Array.isArray(parsed) ? { questions: parsed } : parsed,
@@ -220,9 +306,9 @@ function getGenerationTokenBudget(
   const tokensPerQuestion: Record<QuizQuestionType, number> = {
     mcq: 220,
     open_ended: 300,
-    coding: 700,
+    coding: 650,
   };
-  let total = 160;
+  let total = 200;
   for (const [format, count] of counts) {
     total += tokensPerQuestion[format] * count;
   }
@@ -301,13 +387,6 @@ function describeMissingQuestions(
     .join(", ");
 }
 
-function formatDifficultyQuotas(quotas: Record<QuizDifficulty, number>): string {
-  return (["easy", "medium", "hard"] as const)
-    .filter((difficulty) => quotas[difficulty] > 0)
-    .map((difficulty) => `${quotas[difficulty]} ${difficulty}`)
-    .join(", ");
-}
-
 const SUPPORTED_CODING_LANGUAGES = [
   "C",
   "C++",
@@ -326,12 +405,32 @@ export interface QuizBatchProgress {
   total: number;
 }
 
-function getLocalQuizBatches(
-  expectedCounts: Map<QuizQuestionType, number>
+function getRateLimitMessage(error: unknown): Error {
+  const details = error instanceof Error ? error.message : String(error);
+  return new Error(
+    `The AI provider rate limit was reached during quiz generation. Wait for the limit to reset, try fewer questions, or use a local AI model. Details: ${details}`
+  );
+}
+
+export function getLocalQuizBatches(
+  expectedCounts: Map<QuizQuestionType, number>,
+  outputTokenBudget: number
 ): Array<Map<QuizQuestionType, number>> {
   const batches: Array<Map<QuizQuestionType, number>> = [];
+  const tokensPerQuestion: Record<QuizQuestionType, number> = {
+    mcq: 220,
+    open_ended: 300,
+    coding: 650,
+  };
   for (const [type, count] of expectedCounts) {
-    const batchSize = type === "mcq" ? 5 : 2;
+    const maxPerBatch = type === "mcq" ? 5 : 2;
+    const batchSize = Math.max(
+      1,
+      Math.min(
+        maxPerBatch,
+        Math.floor((outputTokenBudget - 200) / tokensPerQuestion[type])
+      )
+    );
     for (let remaining = count; remaining > 0; remaining -= batchSize) {
       batches.push(new Map([[type, Math.min(batchSize, remaining)]]));
     }
@@ -351,28 +450,26 @@ export async function generateNodeQuiz(
 
   const lesson = minifyContextText(
     node.lesson_markdown ?? `${node.title}\n${node.summary_hint}`
-  );
+  ).slice(0, 1600);
   const keyTakeaways =
     lesson.match(
       /(?:^|\n)#{1,3}\s*(?:key takeaways|takeaways)\s*\n([\s\S]*?)(?=\n#{1,3}\s|$)/i
     )?.[1]?.trim() ?? node.summary_hint;
   const expectedCounts = getExpectedFormatCounts(config);
-  const formats = [...expectedCounts.keys()].join(", ");
   const requestedLanguage =
     config.language === "auto"
       ? "Auto-detect from the lesson, then return the chosen language explicitly."
       : config.language;
-  const prompt = `Lesson: ${node.title}\nFormats: ${formats}\nQuestion count: ${config.count} (${formatCountsDescription(
+  const prompt = `Lesson: ${node.title}\nRequired questions: ${formatCountsDescription(
     expectedCounts
-  )})\nTarget language: ${requestedLanguage}\nDifficulty mode: ${config.difficultyMode ?? "medium"}\nDifficulty quotas: ${formatDifficultyQuotas(
-    getDifficultyQuotas(config.count, config.difficultyMode ?? "medium")
-  )}\nKey takeaways: ${keyTakeaways.slice(
+  )} (total ${config.count})\nTarget language: ${requestedLanguage}\nKey takeaways: ${keyTakeaways.slice(
     0,
-    900
-  )}\nLesson reference:\n${lesson.slice(0, 2400)}`;
+    500
+  )}\nLesson reference:\n${lesson}`;
   const maxOutputTokens = getGenerationTokenBudget(expectedCounts);
+  const questionSchema = getQuestionSchema(expectedCounts.keys());
   const systemInstruction =
-    "Return one JSON object with a questions array, never a root array or markdown. Generate lesson-grounded questions in the exact requested difficulty quotas and order Easy, then Medium, then Hard. Label each question easy, medium, or hard. Easy is foundational recall/direct single-step application; Medium is conceptual reasoning/multi-step problem solving; Hard is edge cases, synthesis, proofs, or complex debugging. Every question must include every schema field. For MCQ, provide exactly four distinct options and answerIndex 0-3. For open-ended, provide rubric and referenceAnswer. For coding, provide rubric, referenceAnswer, starterCode, testCases, and language. Use empty strings and [] for fields not used by that question type; use answerIndex 0 when it is not an MCQ.";
+    "Return one JSON object matching the schema, grounded in the lesson. Follow the requested format counts exactly. MCQs need four distinct options and a correct answerIndex. Keep explanations, rubrics, and reference answers concise. Coding questions need a small starterCode and 1-3 testCases. Use no Markdown.";
   let questions: QuizQuestion[] = [];
   let lastError = "The generated quiz did not contain valid questions.";
   const throwIfAborted = () => {
@@ -381,8 +478,15 @@ export async function generateNodeQuiz(
     }
   };
 
-  if (loadAiSettings().provider === "openai-compatible") {
-    const batches = getLocalQuizBatches(expectedCounts);
+  const providerSettings = loadAiSettings();
+  if (
+    providerSettings.provider === "openai-compatible" &&
+    isLocalAiEndpoint(providerSettings.localBaseUrl)
+  ) {
+    const batches = getLocalQuizBatches(
+      expectedCounts,
+      getLocalOutputTokenBudget(maxOutputTokens)
+    );
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
       throwIfAborted();
       const batchCounts = batches[batchIndex];
@@ -412,7 +516,8 @@ export async function generateNodeQuiz(
             maxOutputTokens: getGenerationTokenBudget(missing),
             systemInstruction,
             userPrompt: batchPrompt,
-            jsonSchema: QUESTION_SCHEMA,
+            jsonSchema: getQuestionSchema(missing.keys()),
+            rateLimitMode: "fail-fast",
             signal,
           });
           const additions = selectQuestionsForCounts(
@@ -440,6 +545,7 @@ export async function generateNodeQuiz(
           );
         } catch (error) {
           if (signal?.aborted) throw error;
+          if (isRateLimitApiError(error)) throw getRateLimitMessage(error);
           lastError = error instanceof Error ? error.message : String(error);
           if (attempt === 1) {
             throw new Error(
@@ -477,7 +583,8 @@ export async function generateNodeQuiz(
           attempt === 0
             ? prompt
             : `${prompt}\n\nThe previous response could not be used: ${lastError} Return one complete JSON object with exactly ${config.count} valid questions and the requested format counts.`,
-        jsonSchema: QUESTION_SCHEMA,
+        jsonSchema: questionSchema,
+        rateLimitMode: "fail-fast",
         signal,
       });
       questions = selectQuestionsForCounts(
@@ -493,6 +600,7 @@ export async function generateNodeQuiz(
       }
     } catch (error) {
       if (signal?.aborted) throw error;
+      if (isRateLimitApiError(error)) throw getRateLimitMessage(error);
       lastError = error instanceof Error ? error.message : String(error);
       if (attempt === 1) {
         throw new Error(
@@ -528,7 +636,8 @@ export async function generateNodeQuiz(
         maxOutputTokens: getGenerationTokenBudget(missing),
         systemInstruction,
         userPrompt: completionPrompt,
-        jsonSchema: QUESTION_SCHEMA,
+        jsonSchema: getQuestionSchema(missing.keys()),
+        rateLimitMode: "fail-fast",
         signal,
       });
       const additions = selectQuestionsForCounts(
@@ -561,13 +670,16 @@ export async function generateNodeQuiz(
       }
     } catch (error) {
       if (signal?.aborted) throw error;
+      if (isRateLimitApiError(error)) throw getRateLimitMessage(error);
       lastError = error instanceof Error ? error.message : String(error);
     }
   }
 
   const missing = getMissingQuestionCounts(questions, expectedCounts);
+  const aiSettings = loadAiSettings();
   const localModelHint =
-    loadAiSettings().provider === "openai-compatible"
+    aiSettings.provider === "openai-compatible" &&
+    isLocalAiEndpoint(aiSettings.localBaseUrl)
       ? " For a local model, increase the maximum response tokens in Settings or reduce the question count."
       : "";
   throw new Error(

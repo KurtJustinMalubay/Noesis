@@ -8,24 +8,30 @@ import {
   useState,
 } from "react";
 import {
-  BookOpen,
   Bot,
+  CalendarDays,
   GitBranch,
+  LayoutDashboard,
   Moon,
   Network,
   Shapes,
   Sun,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { exit } from "@tauri-apps/plugin-process";
 import { getDb } from "./db/client";
 import { useNoesisStore } from "./store/useNoesisStore";
 import { usePluginStore } from "./plugins/pluginStore";
 import {
+  AI_USAGE_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
   FLASHCARDS_PLUGIN_ID,
+  STUDY_CALENDAR_PLUGIN_ID,
 } from "./plugins/registry";
 import { DagCanvas } from "./components/DagCanvas";
+import { DashboardView } from "./components/DashboardView";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { ExitConfirmationModal } from "./components/ExitConfirmationModal";
 import {
@@ -42,7 +48,22 @@ import type {
   GraphNode,
 } from "./types/domain";
 import type { WorkspaceProgressSummary } from "./db/repositories/workspaceRepo";
-import type { UserPreferences } from "./ai/keyStore";
+import {
+  buildDashboardContextSummary,
+  getDashboardSnapshot,
+  getGlobalDueFlashcardCount,
+  type DashboardSnapshot,
+} from "./db/repositories/dashboardRepo";
+import {
+  getReviewsCompletedToday,
+  getWeeklyReviewConsistency,
+  type UserPreferences,
+} from "./ai/keyStore";
+import {
+  AI_USAGE_UPDATED_EVENT,
+  getAiUsageSummary,
+  type AiUsageSummary,
+} from "./ai/usage";
 import { getWorkspaceDeletionSummary } from "./db/repositories/workspaceRepo";
 import {
   createPluginBoard,
@@ -54,10 +75,27 @@ import {
 } from "./utils/windowControls";
 import { CurriculumTreeDagView as CurriculumTreeView } from "./components/CurriculumTreeDagView";
 import {
+  archiveCurriculumTree,
   deleteCurriculumTree,
   linkCurriculumTreeWorkspace,
+  renameCurriculumTree,
   restoreCurriculumTree,
 } from "./db/repositories/curriculumTreeRepo";
+import { getCalendarEvents } from "./db/repositories/calendarRepo";
+import { toLocalIsoDate, addIsoDays } from "./calendar/dateUtils";
+import {
+  CALENDAR_REMINDER_GRACE_MS,
+  getDueCalendarReminders,
+} from "./calendar/reminders";
+import type { CalendarEvent } from "./calendar/types";
+import { getUnarchivedWorkspaces } from "./utils/workspaceArchive";
+import {
+  getImportantAppNotification,
+  requestNativeNotificationPermission,
+  sendNativeNotification,
+} from "./utils/nativeNotifications";
+import StudyCalendarView from "./components/StudyCalendarView";
+import { MiniAgendaView } from "./components/MiniAgendaView";
 
 const LessonReader = lazy(() =>
   import("./components/LessonReader").then((module) => ({
@@ -178,15 +216,29 @@ const GUIDE_EDGES: GraphEdge[] = [
   },
 ];
 
-export default function App() {
+function MainApp() {
   const [dbReady, setDbReady] = useState(false);
   const [bootError, setBootError] = useState<string | null>(null);
   const [hasOpenedTutor, setHasOpenedTutor] = useState(false);
   const [tutorPanelReady, setTutorPanelReady] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [excalidrawSidebarTarget, setExcalidrawSidebarTarget] =
+    useState<HTMLDivElement | null>(null);
+  const [excalidrawCreateBoardRequest, setExcalidrawCreateBoardRequest] =
+    useState(0);
+  const [excalidrawBoardSearchQuery, setExcalidrawBoardSearchQuery] =
+    useState("");
   const [mainView, setMainView] = useState<
-    "graph" | "excalidraw" | "curriculum"
-  >("graph");
+    "dashboard" | "graph" | "excalidraw" | "curriculum" | "calendar"
+  >("dashboard");
+  const [dashboardSnapshot, setDashboardSnapshot] =
+    useState<DashboardSnapshot | null>(null);
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
+  const [aiUsage, setAiUsage] = useState<AiUsageSummary>(() =>
+    getAiUsageSummary()
+  );
+  const [globalDueCount, setGlobalDueCount] = useState(0);
+  const [isDashboardLoading, setIsDashboardLoading] = useState(false);
   const [curriculumTrees, setCurriculumTrees] = useState<CurriculumTree[]>([]);
   const [archivedCurriculumTrees, setArchivedCurriculumTrees] = useState<
     CurriculumTree[]
@@ -208,7 +260,6 @@ export default function App() {
   } | null>(null);
   const [settingsCloseRequest, setSettingsCloseRequest] = useState(0);
   const [newWorkspacePrompt, setNewWorkspacePrompt] = useState("");
-  const [isExcalidrawFullscreen, setIsExcalidrawFullscreen] = useState(false);
   const [isExcalidrawLessonOpen, setIsExcalidrawLessonOpen] = useState(false);
   const [lessonBoardOpenRequest, setLessonBoardOpenRequest] = useState<{
     workspaceId: string;
@@ -223,17 +274,50 @@ export default function App() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hasOpenedGuide, setHasOpenedGuide] = useState(false);
   const [hasOpenedModal, setHasOpenedModal] = useState(false);
-  const sidebarCollapsedRef = useRef(false);
-  const sidebarBeforeCanvasExpandRef = useRef<boolean | null>(null);
+  const pendingViewAfterWorkspaceSelectRef = useRef<
+    "dashboard" | "graph" | "curriculum" | "excalidraw" | null
+  >(null);
+  const bootedWorkspaceRef = useRef(false);
+  const prevMainViewRef = useRef<
+    "dashboard" | "graph" | "excalidraw" | "curriculum" | "calendar"
+  >("dashboard");
+  const sidebarCollapsedRef = useRef(true);
+  const sidebarBeforeDashboardRef = useRef<boolean | null>(false);
   const startupGuideEvaluated = useRef(false);
+  const profilePromptEvaluated = useRef(false);
   const launchFullscreenApplied = useRef(false);
+  const checkingCalendarReminders = useRef(false);
   const pendingCurriculumNodeRef = useRef<CurriculumTreeNode | null>(null);
   const lastSelectedNodeRef = useRef<GraphNode | null>(null);
+  const setExcalidrawSidebarSlot = useCallback(
+    (element: HTMLDivElement | null) => setExcalidrawSidebarTarget(element),
+    []
+  );
   const store = useNoesisStore();
+  const activeWorkspaces = useMemo(
+    () => getUnarchivedWorkspaces(store.workspaces),
+    [store.workspaces]
+  );
   const activeWorkspaceIdRef = useRef(store.activeWorkspaceId);
   const enabledPluginIds = usePluginStore((state) => state.enabledPluginIds);
   const excalidrawEnabled = enabledPluginIds.includes(EXCALIDRAW_PLUGIN_ID);
   const flashcardsEnabled = enabledPluginIds.includes(FLASHCARDS_PLUGIN_ID);
+  const aiUsageEnabled = enabledPluginIds.includes(AI_USAGE_PLUGIN_ID);
+  const studyCalendarEnabled = enabledPluginIds.includes(
+    STUDY_CALENDAR_PLUGIN_ID
+  );
+
+  useEffect(() => {
+    const notification = store.toastMessage
+      ? getImportantAppNotification(store.toastMessage)
+      : null;
+    if (!notification) return;
+    void sendNativeNotification(notification.title, notification.body);
+  }, [store.toastMessage]);
+  const isSidebarLockedView =
+    mainView === "dashboard" || mainView === "calendar";
+  const sidebarLockedViewRef = useRef(isSidebarLockedView);
+  sidebarLockedViewRef.current = isSidebarLockedView;
   const settingsGuideRequestId = useRef(0);
   const openSettingsSectionFromGuide = useCallback(
     (section: SettingsTourSection) => {
@@ -250,9 +334,11 @@ export default function App() {
     setSettingsCloseRequest((request) => request + 1);
   }, []);
   const navigateGuideToView = useCallback(
-    (view: "graph" | "curriculum") => {
+    (view: "dashboard" | "graph" | "curriculum" | "calendar") => {
       setMainView(view);
-      setIsExcalidrawFullscreen(false);
+      if (view === "calendar") {
+        void requestNativeNotificationPermission();
+      }
     },
     []
   );
@@ -264,6 +350,296 @@ export default function App() {
     (progress: WorkspaceProgressSummary) => setCurriculumProgress(progress),
     []
   );
+
+  useEffect(() => {
+    const refreshAiUsage = () => setAiUsage(getAiUsageSummary());
+    window.addEventListener(AI_USAGE_UPDATED_EVENT, refreshAiUsage);
+    refreshAiUsage();
+    return () =>
+      window.removeEventListener(AI_USAGE_UPDATED_EVENT, refreshAiUsage);
+  }, []);
+
+  useEffect(() => {
+    if (!dbReady) return;
+    let cancelled = false;
+    void getGlobalDueFlashcardCount()
+      .then((count) => {
+        if (!cancelled) setGlobalDueCount(count);
+      })
+      .catch(() => {
+        // Keep previous global due count if a transient read fails.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    dbReady,
+    store.workspaces.length,
+    store.nodes.length,
+    store.dueCards.length,
+    store.activeModal,
+  ]);
+
+  useEffect(() => {
+    if (!dbReady || mainView !== "dashboard") return;
+    let cancelled = false;
+    setIsDashboardLoading(true);
+    void getDashboardSnapshot()
+      .then((snapshot) => {
+        if (!cancelled) {
+          setDashboardSnapshot(snapshot);
+          setGlobalDueCount(snapshot.totals.dueFlashcardCount);
+        }
+      })
+      .catch(() => {
+        // Keep the previous snapshot if a transient refresh fails.
+      })
+      .finally(() => {
+        if (!cancelled) setIsDashboardLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    dbReady,
+    mainView,
+    store.workspaces.length,
+    store.nodes.length,
+    store.dueCards.length,
+    curriculumTrees.length,
+    store.activeModal,
+  ]);
+
+  useEffect(() => {
+    if (!isTauri() || studyCalendarEnabled) return;
+    void invoke("close_mini_agenda_window").catch((error: unknown) =>
+      store.showToast(
+        `Unable to close the Mini Agenda: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+    );
+  }, [studyCalendarEnabled, store.showToast]);
+
+  useEffect(() => {
+    if (!dbReady || !studyCalendarEnabled) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<{ workspaceId: string; nodeId: string }>(
+      "calendar:open-quiz",
+      async ({ payload }) => {
+        try {
+          await store.selectWorkspace(payload.workspaceId);
+          await store.selectNode(payload.nodeId);
+          await store.openDiagnosticForNode(payload.nodeId);
+          setMainView("graph");
+        } catch (error) {
+          store.showToast(
+            `Unable to open the scheduled quiz: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+      }
+    )
+      .then((dispose) => {
+        if (cancelled) dispose();
+        else unlisten = dispose;
+      })
+      .catch((error: unknown) =>
+        store.showToast(
+          `Unable to listen for scheduled quiz actions: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      );
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [
+    dbReady,
+    store.openDiagnosticForNode,
+    store.selectNode,
+    store.selectWorkspace,
+    store.showToast,
+    studyCalendarEnabled,
+  ]);
+
+  useEffect(() => {
+    if (!dbReady || !studyCalendarEnabled) {
+      setCalendarEvents([]);
+      return;
+    }
+
+    let cancelled = false;
+    const refreshCalendarData = async () => {
+      const startDate = toLocalIsoDate(new Date());
+      const endDate = addIsoDays(startDate, 42);
+      try {
+        const events = await getCalendarEvents(startDate, endDate);
+        if (!cancelled) setCalendarEvents(events);
+      } catch (error) {
+        if (!cancelled) {
+          store.showToast(
+            `Unable to load Study Calendar data: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+      }
+    };
+
+    void refreshCalendarData();
+    let unlisten: (() => void) | undefined;
+    void listen("calendar:updated", () => void refreshCalendarData())
+      .then((dispose) => {
+        if (cancelled) dispose();
+        else unlisten = dispose;
+      })
+      .catch((error: unknown) =>
+        store.showToast(
+          `Unable to listen for calendar updates: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      );
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [dbReady, studyCalendarEnabled, store.showToast]);
+
+  useEffect(() => {
+    if (!dbReady || !studyCalendarEnabled || calendarEvents.length === 0) {
+      return;
+    }
+
+    let active = true;
+    const checkReminders = async () => {
+      if (checkingCalendarReminders.current) return;
+      checkingCalendarReminders.current = true;
+      try {
+        let sentKeys = new Set<string>();
+        try {
+          const serialized = localStorage.getItem(
+            "noesis.calendar.reminder-sent.v1"
+          );
+          const stored = JSON.parse(serialized ?? "[]");
+          if (!Array.isArray(stored)) {
+            throw new Error("Stored calendar reminder keys are not an array.");
+          }
+          sentKeys = new Set(
+            stored.filter((key): key is string => typeof key === "string")
+          );
+        } catch (error) {
+          console.error("Could not read sent calendar reminders.", error);
+        }
+
+        const dueReminders = getDueCalendarReminders(
+          calendarEvents,
+          new Date(),
+          sentKeys
+        );
+        for (const reminder of dueReminders) {
+          if (!active) return;
+          if (
+            Date.now() - reminder.fireAt >
+            CALENDAR_REMINDER_GRACE_MS
+          ) {
+            continue;
+          }
+          if (
+            await sendNativeNotification(
+              reminder.title,
+              reminder.body
+            )
+          ) {
+            sentKeys.add(reminder.key);
+            try {
+              localStorage.setItem(
+                "noesis.calendar.reminder-sent.v1",
+                JSON.stringify([...sentKeys].slice(-256))
+              );
+            } catch (error) {
+              console.error("Could not save sent calendar reminders.", error);
+            }
+          }
+        }
+      } finally {
+        checkingCalendarReminders.current = false;
+      }
+    };
+
+    void checkReminders();
+    const intervalId = window.setInterval(() => void checkReminders(), 15_000);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [calendarEvents, dbReady, studyCalendarEnabled]);
+
+  const weeklyConsistency = useMemo(
+    () => getWeeklyReviewConsistency(),
+    [
+      mainView,
+      dashboardSnapshot,
+      store.dueCards.length,
+      store.activeModal,
+    ]
+  );
+
+  const openGlobalReviewQueue = useCallback(async () => {
+    if (store.dueCards.length === 0) {
+      const dueWorkspace = dashboardSnapshot?.workspaces.find(
+        (ws) => ws.dueFlashcardCount > 0
+      );
+      if (dueWorkspace && dueWorkspace.id !== store.activeWorkspaceId) {
+        if (mainView === "dashboard") {
+          pendingViewAfterWorkspaceSelectRef.current = "dashboard";
+        }
+        await store.selectWorkspace(dueWorkspace.id);
+      }
+    }
+    store.setActiveModal("review");
+  }, [
+    dashboardSnapshot,
+    mainView,
+    store.activeWorkspaceId,
+    store.dueCards.length,
+    store.selectWorkspace,
+    store.setActiveModal,
+  ]);
+
+  const dashboardContext = useMemo(() => {
+    if (mainView !== "dashboard" || !dashboardSnapshot) return null;
+    return buildDashboardContextSummary(
+      dashboardSnapshot,
+      getReviewsCompletedToday(),
+      store.preferences.dailyReviewLimit
+    );
+  }, [mainView, dashboardSnapshot, store.preferences.dailyReviewLimit]);
+
+  const nextDeadline = useMemo(() => {
+    if (!studyCalendarEnabled) return null;
+    const today = toLocalIsoDate(new Date());
+    const latest = addIsoDays(today, 7);
+    return (
+      calendarEvents
+        .filter(
+          (event) =>
+            !event.isCompleted &&
+            (event.eventType === "exam" || event.eventType === "deadline") &&
+            event.dueDate >= today &&
+            event.dueDate <= latest
+        )
+        .sort(
+          (left, right) =>
+            left.dueDate.localeCompare(right.dueDate) ||
+            (left.dueTime ?? "").localeCompare(right.dueTime ?? "")
+        )[0] ?? null
+    );
+  }, [calendarEvents, studyCalendarEnabled]);
 
   useEffect(() => {
     let disposed = false;
@@ -290,6 +666,7 @@ export default function App() {
     };
   }, [requestExitConfirmation, store.showToast]);
   const toggleSidebar = () => {
+    if (sidebarLockedViewRef.current) return;
     const nextCollapsed = !sidebarCollapsedRef.current;
     sidebarCollapsedRef.current = nextCollapsed;
     setSidebarCollapsed(nextCollapsed);
@@ -301,35 +678,40 @@ export default function App() {
           : "expand"
     );
   };
-  const toggleExcalidrawFullscreen = () => {
-    if (isExcalidrawFullscreen) {
-      setIsExcalidrawFullscreen(false);
-      const previousSidebarState = sidebarBeforeCanvasExpandRef.current;
-      sidebarBeforeCanvasExpandRef.current = null;
-      if (
-        previousSidebarState !== null &&
-        previousSidebarState !== sidebarCollapsedRef.current
-      ) {
-        sidebarCollapsedRef.current = previousSidebarState;
-        setSidebarCollapsed(previousSidebarState);
+  const openExcalidrawView = () => {
+    if (sidebarCollapsedRef.current) {
+      sidebarCollapsedRef.current = false;
+      setSidebarCollapsed(false);
+    }
+    setMainView("excalidraw");
+  };
+  const openTopBarView = async (
+    targetView: "graph" | "curriculum" | "excalidraw"
+  ) => {
+    if (mainView === "dashboard" && !activeWorkspace) {
+      if (activeWorkspaces.length > 0) {
+        pendingViewAfterWorkspaceSelectRef.current = targetView;
+        if (targetView === "excalidraw" && !sidebarCollapsedRef.current) {
+          sidebarCollapsedRef.current = true;
+          setSidebarCollapsed(true);
+        }
+        await store.selectWorkspace(activeWorkspaces[0].id);
+        if (targetView === "excalidraw") {
+          openExcalidrawView();
+        } else {
+          setMainView(targetView);
+        }
+        return;
       }
+      store.setActiveModal("new_workspace");
       return;
     }
 
-    sidebarBeforeCanvasExpandRef.current = sidebarCollapsedRef.current;
-    if (!sidebarCollapsedRef.current) {
-      sidebarCollapsedRef.current = true;
-      setSidebarCollapsed(true);
+    if (targetView === "excalidraw") {
+      openExcalidrawView();
+    } else {
+      setMainView(targetView);
     }
-    setIsExcalidrawFullscreen(true);
-  };
-  const openExcalidrawView = () => {
-    if (!sidebarCollapsedRef.current) {
-      sidebarCollapsedRef.current = true;
-      setSidebarCollapsed(true);
-    }
-    setIsExcalidrawFullscreen(false);
-    setMainView("excalidraw");
   };
   const linkPendingCurriculumWorkspace = async () => {
     const node = pendingCurriculumNodeRef.current;
@@ -461,31 +843,55 @@ export default function App() {
   }, [store.activeModal]);
 
   useEffect(() => {
-    if (!excalidrawEnabled) setMainView("graph");
-  }, [excalidrawEnabled]);
+    if (!excalidrawEnabled && mainView === "excalidraw") {
+      setMainView("graph");
+    }
+  }, [excalidrawEnabled, mainView]);
 
   useEffect(() => {
+    if (!dbReady) return;
+    if (!bootedWorkspaceRef.current) {
+      bootedWorkspaceRef.current = true;
+      activeWorkspaceIdRef.current = store.activeWorkspaceId;
+      return;
+    }
     if (activeWorkspaceIdRef.current === store.activeWorkspaceId) return;
     activeWorkspaceIdRef.current = store.activeWorkspaceId;
     setLessonBoardOpenRequest(null);
-    setMainView("graph");
-    setIsExcalidrawFullscreen(false);
-  }, [store.activeWorkspaceId]);
+    const nextView = pendingViewAfterWorkspaceSelectRef.current ?? "graph";
+    pendingViewAfterWorkspaceSelectRef.current = null;
+    setMainView(nextView);
+  }, [dbReady, store.activeWorkspaceId]);
 
   useEffect(() => {
+    const prevView = prevMainViewRef.current;
+    prevMainViewRef.current = mainView;
+
     if (mainView !== "excalidraw") {
-      setIsExcalidrawFullscreen(false);
-      const previousCanvasSidebarState = sidebarBeforeCanvasExpandRef.current;
-      sidebarBeforeCanvasExpandRef.current = null;
-      if (
-        previousCanvasSidebarState !== null &&
-        previousCanvasSidebarState !== sidebarCollapsedRef.current
-      ) {
-        sidebarCollapsedRef.current = previousCanvasSidebarState;
-        setSidebarCollapsed(previousCanvasSidebarState);
+      const wasSidebarLockedView =
+        prevView === "dashboard" || prevView === "calendar";
+      if (isSidebarLockedView) {
+        if (!wasSidebarLockedView) {
+          sidebarBeforeDashboardRef.current =
+            prevView === "excalidraw" ? false : sidebarCollapsedRef.current;
+        }
+        if (!sidebarCollapsedRef.current) {
+          sidebarCollapsedRef.current = true;
+          setSidebarCollapsed(true);
+        }
+      } else if (wasSidebarLockedView) {
+        const restoreState = sidebarBeforeDashboardRef.current;
+        sidebarBeforeDashboardRef.current = null;
+        if (
+          restoreState !== null &&
+          restoreState !== sidebarCollapsedRef.current
+        ) {
+          sidebarCollapsedRef.current = restoreState;
+          setSidebarCollapsed(restoreState);
+        }
       }
     }
-  }, [mainView]);
+  }, [isSidebarLockedView, mainView]);
 
   useEffect(() => {
     if (mainView === "excalidraw") setSidebarMotion(null);
@@ -516,8 +922,25 @@ export default function App() {
       return;
     }
     startupGuideEvaluated.current = true;
-    if (store.preferences.showAppTutorial) setIsGuideOpen(true);
-  }, [dbReady, store.activeModal, store.preferences.showAppTutorial]);
+    if (store.preferences.showAppTutorial) {
+      setIsGuideOpen(true);
+      return;
+    }
+    if (
+      !profilePromptEvaluated.current &&
+      !store.preferences.profilePromptSeen &&
+      !store.preferences.profileName.trim()
+    ) {
+      profilePromptEvaluated.current = true;
+      store.setActiveModal("profile");
+    }
+  }, [
+    dbReady,
+    store.activeModal,
+    store.preferences.profileName,
+    store.preferences.profilePromptSeen,
+    store.preferences.showAppTutorial,
+  ]);
 
   const closeGuide = () => {
     setIsGuideOpen(false);
@@ -636,8 +1059,8 @@ export default function App() {
   }, []);
 
   const activeWorkspace =
-    store.workspaces.find((workspace) => workspace.id === store.activeWorkspaceId) ??
-    null;
+  activeWorkspaces.find((workspace) => workspace.id === store.activeWorkspaceId) ??
+  null;
   const selectedNode =
     store.nodes.find((node) => node.id === store.selectedNodeId) ?? null;
   if (selectedNode) lastSelectedNodeRef.current = selectedNode;
@@ -682,21 +1105,33 @@ export default function App() {
         <>
           <div className="boot-app-content boot-app-content-ready flex h-full w-full">
             <WorkspaceSidebar
-              collapsed={sidebarCollapsed}
-              workspaces={store.workspaces}
+              collapsed={isSidebarLockedView || sidebarCollapsed}
+              isLockedView={isSidebarLockedView}
+              isExcalidrawActive={mainView === "excalidraw"}
+              onExcalidrawSidebarSlotChange={setExcalidrawSidebarSlot}
+              onNewExcalidrawBoard={() =>
+                setExcalidrawCreateBoardRequest((request) => request + 1)
+              }
+              hasExcalidrawLesson={Boolean(lessonNode)}
+              isExcalidrawLessonOpen={isExcalidrawLessonOpen}
+              onToggleExcalidrawLesson={() =>
+                setIsExcalidrawLessonOpen((open) => !open)
+              }
+              excalidrawBoardSearchQuery={excalidrawBoardSearchQuery}
+              onExcalidrawBoardSearchQueryChange={
+                setExcalidrawBoardSearchQuery
+              }
+              workspaces={activeWorkspaces}
               archivedWorkspaces={store.archivedWorkspaces}
               workspaceProgress={store.workspaceProgress}
               activeWorkspaceId={store.activeWorkspaceId}
               nodes={store.nodes}
-              dueCount={store.dueCards.length}
+              dueCount={globalDueCount}
               flashcardsEnabled={flashcardsEnabled}
               documentCount={store.documents.length}
               onToggle={toggleSidebar}
               onSelect={(id) => {
-                if (id !== store.activeWorkspaceId) {
-                  setMainView("graph");
-                  setIsExcalidrawFullscreen(false);
-                }
+                setMainView("graph");
                 return store.selectWorkspace(id);
               }}
               onArchive={store.archiveWorkspace}
@@ -705,14 +1140,46 @@ export default function App() {
               onGetDeleteSummary={getWorkspaceDeletionSummary}
               onNewWorkspace={() => {
                 setMainView("graph");
-                setIsExcalidrawFullscreen(false);
                 store.setActiveModal("new_workspace");
               }}
+              isDashboardActive={
+                mainView === "dashboard" || mainView === "calendar"
+              }
               isCurriculumActive={mainView === "curriculum"}
               curriculumTrees={curriculumTrees}
               archivedCurriculumTrees={archivedCurriculumTrees}
               selectedCurriculumTreeId={selectedCurriculumTreeId}
               onSelectCurriculumTree={setSelectedCurriculumTreeId}
+              onRenameCurriculumTree={async (id, title) => {
+                const trimmed = title.trim();
+                if (!trimmed) return;
+                await renameCurriculumTree(id, trimmed);
+                const now = Date.now();
+                setCurriculumTrees((items) =>
+                  items.map((item) =>
+                    item.id === id
+                      ? { ...item, title: trimmed, updated_at: now }
+                      : item
+                  )
+                );
+              }}
+              onArchiveCurriculumTree={async (id) => {
+                await archiveCurriculumTree(id);
+                const target = curriculumTrees.find((item) => item.id === id);
+                const remaining = curriculumTrees.filter(
+                  (item) => item.id !== id
+                );
+                setCurriculumTrees(remaining);
+                if (target) {
+                  setArchivedCurriculumTrees((items) => [
+                    { ...target, archived_at: Date.now() },
+                    ...items,
+                  ]);
+                }
+                if (selectedCurriculumTreeId === id) {
+                  setSelectedCurriculumTreeId(remaining[0]?.id ?? null);
+                }
+              }}
               onRestoreCurriculumTree={async (id) => {
                 await restoreCurriculumTree(id);
                 const tree = archivedCurriculumTrees.find(
@@ -739,7 +1206,7 @@ export default function App() {
                 setIsCreatingCurriculumTree(true);
               }}
               onVault={() => store.setActiveModal("vault")}
-              onReview={() => store.setActiveModal("review")}
+              onReview={() => void openGlobalReviewQueue()}
               onGuide={() => setIsGuideOpen(true)}
               onSettings={() => {
                 setSettingsGuideRequest(null);
@@ -771,152 +1238,184 @@ export default function App() {
             <div className="flex min-w-0 items-center gap-4">
               <div className="min-w-0">
                 <h1 className="truncate text-sm font-semibold tracking-[-0.01em]">
-                  {mainView === "curriculum"
-                    ? "Curriculum maps"
-                    : activeWorkspace?.title ?? "Learning studio"}
+                  {mainView === "dashboard"
+                    ? "Study dashboard"
+                    : mainView === "calendar"
+                      ? "Study Calendar"
+                    : mainView === "curriculum"
+                      ? "Curriculum maps"
+                      : activeWorkspace?.title ?? "Learning studio"}
                 </h1>
-                {mainView !== "curriculum" && activeWorkspace && (
-                  <p className="mt-0.5 text-[11px] text-[var(--color-muted)]">
-                    {masteredCount} of {store.nodes.length} mastered
-                  </p>
-                )}
+                {mainView !== "curriculum" &&
+                  mainView !== "dashboard" &&
+                  mainView !== "calendar" &&
+                  activeWorkspace && (() => {
+                    const pct =
+                      store.nodes.length > 0
+                        ? Math.round((masteredCount / store.nodes.length) * 100)
+                        : 0;
+                    return (
+                      <div className="mt-1 flex items-center gap-2.5">
+                        <div
+                          role="progressbar"
+                          aria-label="Workspace mastery progress"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={pct}
+                          className="h-1.5 w-28 overflow-hidden rounded-full bg-[var(--color-border)] sm:w-36"
+                        >
+                          <div
+                            className="h-full origin-left rounded-full bg-[var(--color-success)] transition-transform duration-150 ease-[var(--ease-spring)]"
+                            style={{
+                              width: "100%",
+                              transform: `scaleX(${pct / 100})`,
+                            }}
+                          />
+                        </div>
+                        <span className="shrink-0 font-mono text-[10px] font-medium tabular-nums text-[var(--color-muted)]">
+                          {pct}% mastered
+                        </span>
+                      </div>
+                    );
+                  })()}
                 {mainView === "curriculum" &&
                   !isCreatingCurriculumTree &&
-                  selectedCurriculumTreeId && (
-                    <p className="mt-0.5 text-[11px] text-[var(--color-muted)]">
-                      {curriculumProgress.nodeCount > 0
-                        ? `${curriculumProgress.masteredCount} of ${curriculumProgress.nodeCount} linked concepts mastered`
-                        : "No linked concepts yet"}
-                    </p>
-                  )}
-              </div>
-              {mainView !== "curriculum" && store.nodes.length > 0 && (
-                <div className="hidden h-1.5 w-28 overflow-hidden rounded-full bg-[var(--color-border)] sm:block">
-                  <div
-                    className="h-full origin-left rounded-full bg-[var(--color-success)] transition-transform duration-300 ease-[var(--ease-spring)]"
-                    style={{
-                      width: "100%",
-                      transform: `scaleX(${masteredCount / store.nodes.length})`,
-                    }}
-                  />
-                </div>
-              )}
-              {mainView === "curriculum" &&
-                !isCreatingCurriculumTree &&
-                selectedCurriculumTreeId && (
-                  <div
-                    role="progressbar"
-                    aria-label="Curriculum map mastery progress"
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={
+                  selectedCurriculumTreeId && (() => {
+                    const pct =
                       curriculumProgress.nodeCount > 0
                         ? Math.round(
                             (curriculumProgress.masteredCount /
                               curriculumProgress.nodeCount) *
                               100
                           )
-                        : 0
-                    }
-                    aria-valuetext={
-                      curriculumProgress.nodeCount > 0
-                        ? `${curriculumProgress.masteredCount} of ${curriculumProgress.nodeCount} linked concepts mastered`
-                        : "No linked concepts available"
-                    }
-                    className="hidden h-1.5 w-28 overflow-hidden rounded-full bg-[var(--color-border)] sm:block"
-                  >
-                    <div
-                      className="h-full rounded-full bg-[var(--color-success)]"
-                      style={{
-                        width: `${
-                          curriculumProgress.nodeCount > 0
-                            ? (curriculumProgress.masteredCount /
-                                curriculumProgress.nodeCount) *
-                              100
-                            : 0
-                        }%`,
-                      }}
-                    />
-                  </div>
-                )}
+                        : 0;
+                    return (
+                      <div className="mt-1 flex items-center gap-2.5">
+                        <div
+                          role="progressbar"
+                          aria-label="Curriculum map mastery progress"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={pct}
+                          className="h-1.5 w-28 overflow-hidden rounded-full bg-[var(--color-border)] sm:w-36"
+                        >
+                          <div
+                            className="h-full origin-left rounded-full bg-[var(--color-success)] transition-transform duration-150 ease-[var(--ease-spring)]"
+                            style={{
+                              width: "100%",
+                              transform: `scaleX(${pct / 100})`,
+                            }}
+                          />
+                        </div>
+                        <span className="shrink-0 font-mono text-[10px] font-medium tabular-nums text-[var(--color-muted)]">
+                          {pct}% mastered
+                        </span>
+                      </div>
+                    );
+                  })()}
+              </div>
               <nav
                 aria-label="Workspace views"
                 className="flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] p-1 shadow-sm"
               >
                 <button
                   type="button"
+                  data-guide="dashboard-tab"
+                  onClick={() => {
+                    setMainView("dashboard");
+                  }}
+                  aria-pressed={mainView === "dashboard"}
+                  aria-label="Dashboard"
+                  title="Dashboard"
+                  className={`app-topbar-labeled-button flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
+                    mainView === "dashboard"
+                      ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
+                      : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+                  }`}
+                >
+                  <LayoutDashboard className="h-3.5 w-3.5" />
+                  <span aria-hidden="true" className="app-topbar-button-label">
+                    Dashboard
+                  </span>
+                </button>
+                {studyCalendarEnabled && (
+                  <button
+                    type="button"
+                    data-guide="calendar-tab"
+                    onClick={() => {
+                      setMainView("calendar");
+                      void requestNativeNotificationPermission();
+                    }}
+                    aria-pressed={mainView === "calendar"}
+                    aria-label="Calendar"
+                    title="Calendar"
+                    className={`app-topbar-labeled-button flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
+                      mainView === "calendar"
+                        ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
+                        : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+                    }`}
+                  >
+                    <CalendarDays className="h-3.5 w-3.5" />
+                    <span aria-hidden="true" className="app-topbar-button-label">
+                      Calendar
+                    </span>
+                  </button>
+                )}
+                <button
+                  type="button"
                   data-guide="workspace-tab"
-                  onClick={() => setMainView("graph")}
+                  onClick={() => void openTopBarView("graph")}
                   aria-pressed={mainView === "graph"}
-                  className={`flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
+                  aria-label="Workspace"
+                  title="Workspace"
+                  className={`app-topbar-labeled-button flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
                     mainView === "graph"
                       ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
                       : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
                   }`}
                 >
                   <Network className="h-3.5 w-3.5" />
-                  Workspace
+                  <span aria-hidden="true" className="app-topbar-button-label">
+                    Workspace
+                  </span>
                 </button>
                 <button
                   type="button"
                   data-guide="curriculum-tab"
-                  onClick={() => {
-                    setMainView("curriculum");
-                    setIsExcalidrawFullscreen(false);
-                  }}
+                  onClick={() => void openTopBarView("curriculum")}
                   aria-pressed={mainView === "curriculum"}
-                  className={`flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
+                  aria-label="Curriculum"
+                  title="Curriculum"
+                  className={`app-topbar-labeled-button flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
                     mainView === "curriculum"
                       ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
                       : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
                   }`}
                 >
                   <GitBranch className="h-3.5 w-3.5" />
-                  Curriculum
+                  <span aria-hidden="true" className="app-topbar-button-label">
+                    Curriculum
+                  </span>
                 </button>
                 {excalidrawEnabled && (
                   <button
                     type="button"
-                    onClick={openExcalidrawView}
+                    data-guide="excalidraw-tab"
+                    onClick={() => void openTopBarView("excalidraw")}
                     aria-pressed={mainView === "excalidraw"}
-                    className={`flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
+                    aria-label="Excalidraw"
+                    title="Excalidraw"
+                    className={`app-topbar-labeled-button flex min-h-9 items-center gap-2 rounded-lg px-3 text-[11px] font-semibold transition ${
                       mainView === "excalidraw"
                         ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
                         : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
                     }`}
                   >
                     <Shapes className="h-3.5 w-3.5" />
-                    Excalidraw
+                    <span aria-hidden="true" className="app-topbar-button-label">
+                      Excalidraw
+                    </span>
                   </button>
-                )}
-                {mainView === "excalidraw" && lessonNode && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setIsExcalidrawLessonOpen((open) => !open)
-                      }
-                      aria-pressed={isExcalidrawLessonOpen}
-                      className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[10px] font-semibold transition ${
-                        isExcalidrawLessonOpen
-                          ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] shadow-sm"
-                          : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
-                      }`}
-                    >
-                      <BookOpen className="h-3.5 w-3.5" />
-                      Lesson
-                    </button>
-                )}
-                {mainView === "excalidraw" && (
-                    <button
-                      type="button"
-                      onClick={toggleExcalidrawFullscreen}
-                      aria-pressed={isExcalidrawFullscreen}
-                      className="min-h-9 rounded-lg px-3 text-[11px] font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
-                    >
-                      {isExcalidrawFullscreen
-                        ? "Restore canvas"
-                        : "Expand canvas"}
-                    </button>
                 )}
               </nav>
             </div>
@@ -953,14 +1452,16 @@ export default function App() {
                 aria-pressed={store.isTutorOpen}
                 aria-label={store.isTutorOpen ? "Close tutor" : "Open tutor"}
                 title={store.isTutorOpen ? "Close tutor" : "Open tutor"}
-                className={`flex h-10 items-center gap-2 rounded-xl border px-3 text-[11px] font-semibold transition ${
+                className={`app-topbar-labeled-button flex h-10 items-center gap-2 rounded-xl border px-3 text-[11px] font-semibold transition ${
                   store.isTutorOpen
                     ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
                     : "border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] hover:bg-[var(--color-hover)]"
                 }`}
               >
                 <Bot className="h-3.5 w-3.5" />
-                Tutor
+                <span aria-hidden="true" className="app-topbar-button-label">
+                  Tutor
+                </span>
               </button>
             </div>
         </header>
@@ -974,7 +1475,7 @@ export default function App() {
               className="app-page-panel absolute inset-0 flex h-full min-h-0 min-w-0"
             >
               <CurriculumTreeView
-                workspaces={store.workspaces}
+                workspaces={activeWorkspaces}
                 workspaceProgress={curriculumWorkspaceProgress}
                 workspaceDeletionRevision={store.workspaceDeletionRevision}
                 onProgressChange={updateCurriculumProgress}
@@ -1009,31 +1510,140 @@ export default function App() {
                   aria-hidden={mainView === "curriculum"}
                   inert={mainView === "curriculum"}
                   data-active={mainView !== "curriculum"}
+                  data-excalidraw-canvas={mainView === "excalidraw"}
                   className="app-page-panel absolute inset-0 flex h-full min-h-0 min-w-0"
                 >
-                  {mainView === "excalidraw" ? (
-                    activeWorkspace ? (
-                      <Suspense
-                        fallback={
-                          <div className="flex flex-1 items-center justify-center text-xs text-[var(--color-muted)]">
-                            Loading Excalidraw…
-                          </div>
+                  {mainView === "calendar" ? (
+                    <StudyCalendarView
+                      activeWorkspaces={activeWorkspaces.map((workspace) => {
+                        const progress = store.workspaceProgress[workspace.id];
+                        return {
+                          id: workspace.id,
+                          title: workspace.title,
+                          unmasteredCount: Math.max(
+                            0,
+                            (progress?.nodeCount ?? 0) -
+                              (progress?.masteredCount ?? 0)
+                          ),
+                        };
+                      })}
+                      onToast={store.showToast}
+                      onOpenWorkspace={async (workspaceId) => {
+                        await store.selectWorkspace(workspaceId);
+                        setMainView("graph");
+                      }}
+                      onStartQuiz={async (workspaceId, nodeId) => {
+                        await store.selectWorkspace(workspaceId);
+                        await store.selectNode(nodeId);
+                        await store.openDiagnosticForNode(nodeId);
+                        setMainView("graph");
+                      }}
+                    />
+                  ) : mainView === "dashboard" ? (
+                    <div className="min-w-0 flex-1">
+                      <DashboardView
+                        snapshot={dashboardSnapshot}
+                        archivedWorkspaceIds={store.archivedWorkspaces.map(
+                          (workspace) => workspace.id
+                        )}
+                        nextDeadline={nextDeadline}
+                        onOpenCalendar={() => setMainView("calendar")}
+                        aiUsage={aiUsage}
+                        aiUsageEnabled={aiUsageEnabled}
+                        isLoading={isDashboardLoading}
+                        activeWorkspaceTitle={activeWorkspace?.title ?? null}
+                        reviewsCompletedToday={getReviewsCompletedToday()}
+                        dailyReviewLimit={store.preferences.dailyReviewLimit}
+                        weeklyConsistency={weeklyConsistency}
+                        flashcardsEnabled={flashcardsEnabled}
+                        excalidrawEnabled={excalidrawEnabled}
+                        profileName={store.preferences.profileName}
+                        profileFocus={store.preferences.profileFocus}
+                        onEditProfile={() => store.setActiveModal("profile")}
+                        onOpenWorkspace={async (workspaceId) => {
+                          await store.selectWorkspace(workspaceId);
+                          setMainView("graph");
+                        }}
+                        onOpenWorkspaceView={async (workspaceId, view) => {
+                          if (store.activeWorkspaceId !== workspaceId) {
+                            pendingViewAfterWorkspaceSelectRef.current = view;
+                            if (
+                              view === "excalidraw" &&
+                              !sidebarCollapsedRef.current
+                            ) {
+                              sidebarCollapsedRef.current = true;
+                              setSidebarCollapsed(true);
+                            }
+                            await store.selectWorkspace(workspaceId);
+                          }
+                          if (view === "excalidraw") {
+                            openExcalidrawView();
+                          } else {
+                            setMainView(view);
+                          }
+                        }}
+                        onOpenConcept={async (workspaceId, nodeId) => {
+                          await store.selectWorkspace(workspaceId);
+                          await store.selectNode(nodeId);
+                          setMainView("graph");
+                        }}
+                        onRetakeQuiz={async (workspaceId, nodeId) => {
+                          if (store.activeWorkspaceId !== workspaceId) {
+                            pendingViewAfterWorkspaceSelectRef.current =
+                              "dashboard";
+                            await store.selectWorkspace(workspaceId);
+                          }
+                          await store.selectNode(nodeId);
+                          await store.resetDiagnosticAttempt(nodeId);
+                          await store.openDiagnosticForNode(nodeId);
+                        }}
+                        onOpenCurriculumTree={(treeId) => {
+                          setSelectedCurriculumTreeId(treeId);
+                          setIsCreatingCurriculumTree(false);
+                          setMainView("curriculum");
+                        }}
+                        onNewCurriculumMap={() => {
+                          setIsCreatingCurriculumTree(true);
+                          setMainView("curriculum");
+                        }}
+                        onOpenActiveWorkspace={() => setMainView("graph")}
+                        onNewWorkspace={() =>
+                          store.setActiveModal("new_workspace")
                         }
-                      >
-                        <ExcalidrawWorkspace
-                          workspaceId={activeWorkspace.id}
-                          openBoardRequest={lessonBoardOpenRequest}
-                          onBoardRequestHandled={handleLessonBoardRequestHandled}
-                          selectedNode={selectedNode}
-                          nodes={store.nodes}
-                          appearanceMode={store.preferences.appearanceMode}
-                          isFullscreen={isExcalidrawFullscreen}
-                          onSelectNode={(nodeId) => store.selectNode(nodeId)}
-                          onToast={store.showToast}
-                        />
-                      </Suspense>
+                        onOpenReview={() => void openGlobalReviewQueue()}
+                        onOpenVault={() => store.setActiveModal("vault")}
+                      />
+                    </div>
+                  ) : mainView === "excalidraw" ? (
+                    activeWorkspace ? (
+                      <div className="view-crossfade flex h-full min-h-0 min-w-0 flex-1">
+                        <Suspense
+                          fallback={
+                            <div className="flex flex-1 items-center justify-center text-xs text-[var(--color-muted)]">
+                              Loading Excalidraw…
+                            </div>
+                          }
+                        >
+                          <ExcalidrawWorkspace
+                            workspaceId={activeWorkspace.id}
+                            openBoardRequest={lessonBoardOpenRequest}
+                            onBoardRequestHandled={
+                              handleLessonBoardRequestHandled
+                            }
+                            selectedNode={selectedNode}
+                            nodes={store.nodes}
+                            appearanceMode={store.preferences.appearanceMode}
+                            sidebarPortalTarget={excalidrawSidebarTarget}
+                            sidebarCollapsed={sidebarCollapsed}
+                            createBoardRequest={excalidrawCreateBoardRequest}
+                            boardSearchQuery={excalidrawBoardSearchQuery}
+                            onSelectNode={(nodeId) => store.selectNode(nodeId)}
+                            onToast={store.showToast}
+                          />
+                        </Suspense>
+                      </div>
                     ) : (
-                      <div className="flex flex-1 items-center justify-center p-8 text-center">
+                      <div className="view-crossfade flex flex-1 items-center justify-center p-8 text-center">
                         <p className="max-w-sm text-xs leading-5 text-[var(--color-muted)]">
                           Select or create a workspace before opening Excalidraw boards.
                         </p>
@@ -1042,7 +1652,7 @@ export default function App() {
                   ) : !activeWorkspace ? (
                     <div
                       data-guide="canvas"
-                      className="flex flex-1 flex-col items-center justify-center p-8 text-center"
+                      className="view-crossfade flex flex-1 flex-col items-center justify-center p-8 text-center"
                     >
                       {isGuideOpen ? (
                         <GuideDagPreview
@@ -1078,7 +1688,11 @@ export default function App() {
                       )}
                     </div>
                   ) : (
-                    <div data-guide="canvas" className="min-w-0 flex-1">
+                    <div
+                      key={activeWorkspace.id}
+                      data-guide="canvas"
+                      className="view-crossfade min-w-0 flex-1"
+                    >
                       {isGuideOpen && store.nodes.length === 0 ? (
                         <GuideDagPreview
                           showDots={store.preferences.showCanvasDots}
@@ -1193,12 +1807,36 @@ export default function App() {
                 <TutorDrawer
                   isOpen={store.isTutorOpen}
                   activeLesson={
-                    mainView === "excalidraw" ? lessonNode : selectedNode
+                    mainView === "dashboard"
+                      ? null
+                      : mainView === "excalidraw"
+                        ? lessonNode
+                        : selectedNode
                   }
                   activeNodeTitle={
-                    (mainView === "excalidraw" ? lessonNode : selectedNode)
-                      ?.title
+                    mainView === "dashboard"
+                      ? undefined
+                      : (mainView === "excalidraw" ? lessonNode : selectedNode)
+                          ?.title
                   }
+                  dashboardContext={dashboardContext}
+                  userProfile={{
+                    name: store.preferences.profileName,
+                    focus: store.preferences.profileFocus,
+                  }}
+                  studyCalendarEnabled={studyCalendarEnabled}
+                  calendarWorkspaces={activeWorkspaces.map((workspace) => {
+                    const progress = store.workspaceProgress[workspace.id];
+                    return {
+                      id: workspace.id,
+                      title: workspace.title,
+                      unmasteredCount: Math.max(
+                        0,
+                        (progress?.nodeCount ?? 0) -
+                          (progress?.masteredCount ?? 0)
+                      ),
+                    };
+                  })}
                   workspaceId={store.activeWorkspaceId}
                   onPanelReady={() => setTutorPanelReady(true)}
                   onClose={() => store.setTutorOpen(false)}
@@ -1208,18 +1846,6 @@ export default function App() {
             )}
           </div>
 
-          <AnimatedPresence
-            present={Boolean(store.toastMessage)}
-            motion="toast"
-            className="pointer-events-none fixed bottom-5 right-5 z-50"
-            exitDuration={170}
-          >
-            {store.toastMessage ? (
-              <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2.5 text-xs font-medium text-[var(--color-ink)] shadow-[0_12px_36px_rgba(31,43,51,0.14)]">
-                {store.toastMessage}
-              </div>
-            ) : null}
-          </AnimatedPresence>
         </main>
         </div>
         </div>
@@ -1322,6 +1948,8 @@ export default function App() {
               onOpenSettingsSection={openSettingsSectionFromGuide}
               onCloseSettings={closeSettingsFromGuide}
               flashcardsEnabled={flashcardsEnabled}
+              studyCalendarEnabled={studyCalendarEnabled}
+              excalidrawEnabled={excalidrawEnabled}
               onClose={closeGuide}
               showOnStartup={store.preferences.showAppTutorial}
               onShowOnStartupChange={setGuideOnStartup}
@@ -1344,6 +1972,22 @@ export default function App() {
         ready={dbReady || Boolean(bootError)}
         status={bootError ? "Local vault unavailable" : undefined}
       />
+      <AnimatedPresence
+        present={Boolean(store.toastMessage)}
+        motion="toast"
+        className="pointer-events-none fixed bottom-5 right-5 z-[9999]"
+        exitDuration={170}
+      >
+        {store.toastMessage ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)] px-4 py-2.5 text-xs font-medium text-[var(--color-ink)] shadow-[0_12px_36px_rgba(31,43,51,0.18)]"
+          >
+            {store.toastMessage}
+          </div>
+        ) : null}
+      </AnimatedPresence>
     </div>
   );
 }
@@ -1393,4 +2037,11 @@ function GuideDagPreview({
       />
     </div>
   );
+}
+
+export default function App() {
+  if (typeof window !== "undefined" && window.location.hash === "#mini-agenda") {
+    return <MiniAgendaView />;
+  }
+  return <MainApp />;
 }

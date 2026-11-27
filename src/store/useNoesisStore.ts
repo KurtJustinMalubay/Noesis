@@ -107,7 +107,8 @@ export type ActiveModal =
   | "review"
   | "diagnostic"
   | "completion"
-  | "new_workspace";
+  | "new_workspace"
+  | "profile";
 
 interface GraphSnapshot {
   workspaceId: string;
@@ -337,6 +338,12 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
   },
 
   selectWorkspace: async (workspaceId: string) => {
+    const workspace = get().workspaces.find(
+      (item) => item.id === workspaceId && item.archived_at === null
+    );
+    if (!workspace) {
+      throw new Error("The workspace is archived or no longer available.");
+    }
     const requestGeneration = ++workspaceSelectionGeneration;
     const [
       { nodes, edges },
@@ -475,6 +482,11 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     if (wasActiveWorkspace) workspaceSelectionGeneration += 1;
     set({
       workspaces: remaining,
+      workspaceProgress: Object.fromEntries(
+        Object.entries(get().workspaceProgress).filter(
+          ([id]) => id !== workspaceId
+        )
+      ),
       archivedWorkspaces: [
         { ...workspace, archived_at: archivedAt },
         ...get().archivedWorkspaces.filter((item) => item.id !== workspaceId),
@@ -518,10 +530,12 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
       throw new Error("The archived workspace is no longer available.");
     }
     await restoreWorkspaceRecord(workspaceId);
+    const workspaceProgress = await getWorkspaceProgressSummaries();
     set({
       workspaces: [...get().workspaces, { ...workspace, archived_at: null }].sort(
         (left, right) => right.updated_at - left.updated_at
       ),
+      workspaceProgress,
       archivedWorkspaces: get().archivedWorkspaces.filter(
         (item) => item.id !== workspaceId
       ),
@@ -533,6 +547,11 @@ export const useNoesisStore = create<NoesisState>((set, get) => ({
     set({
       archivedWorkspaces: get().archivedWorkspaces.filter(
         (item) => item.id !== workspaceId
+      ),
+      workspaceProgress: Object.fromEntries(
+        Object.entries(get().workspaceProgress).filter(
+          ([id]) => id !== workspaceId
+        )
       ),
       workspaceDeletionRevision: get().workspaceDeletionRevision + 1,
     });

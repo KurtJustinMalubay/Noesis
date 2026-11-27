@@ -1,6 +1,10 @@
 import {
   DEFAULT_PREFERENCES,
+  getOpenAiApiKey,
+  hasConfiguredApiKey,
+  loadAiSettings,
   loadUserPreferences,
+  saveAiSettings,
 } from "../src/ai/keyStore.ts";
 
 function assert(condition: boolean, message: string): void {
@@ -119,4 +123,67 @@ assert(
   "an explicitly disabled plugin should stay disabled after reload"
 );
 
-console.log("✓ Persisted theme and typography preference tests passed!");
+const aiStorage = new Map<string, string>();
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: {
+    getItem: (key: string) => aiStorage.get(key) ?? null,
+    setItem: (key: string, value: string) => aiStorage.set(key, value),
+  },
+});
+
+assert(
+  loadAiSettings().provider === "gemini",
+  "Gemini must remain the default AI provider"
+);
+
+aiStorage.set(
+  "noesis.ai.settings.v1",
+  JSON.stringify({
+    provider: "openai-compatible",
+    localBaseUrl: "http://localhost:11434/v1",
+    localModel: "llama3.2",
+  })
+);
+const migratedAi = loadAiSettings();
+assert(
+  migratedAi.openAiPreset === "ollama" &&
+    migratedAi.openAiFastModel === "llama3.2" &&
+    migratedAi.openAiSynthesisModel === "llama3.2" &&
+    hasConfiguredApiKey(),
+  "legacy local AI settings should migrate to the Ollama preset with fast/synthesis models"
+);
+
+saveAiSettings({
+  ...migratedAi,
+  openAiPreset: "openai",
+  localBaseUrl: "https://api.openai.com/v1",
+  openAiFastModel: "gpt-4o-mini",
+  openAiSynthesisModel: "gpt-4o",
+  openAiApiKeys: {
+    openai: "sk-openai-test",
+    openrouter: "sk-or-test",
+  },
+});
+const cloudAi = loadAiSettings();
+assert(
+  cloudAi.openAiPreset === "openai" &&
+    cloudAi.openAiFastModel === "gpt-4o-mini" &&
+    cloudAi.openAiSynthesisModel === "gpt-4o" &&
+    getOpenAiApiKey(cloudAi) === "sk-openai-test" &&
+    getOpenAiApiKey(cloudAi, "openrouter") === "sk-or-test" &&
+    hasConfiguredApiKey(),
+  "cloud OpenAI-compatible presets should store separate API keys and fast/synthesis models"
+);
+
+saveAiSettings({
+  ...cloudAi,
+  openAiPreset: "groq",
+  localBaseUrl: "https://api.groq.com/openai/v1",
+});
+assert(
+  !hasConfiguredApiKey(),
+  "cloud presets requiring an API key must not report configured when that preset has no key"
+);
+
+console.log("✓ Persisted theme, typography, and AI provider preference tests passed!");

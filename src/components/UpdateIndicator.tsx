@@ -135,7 +135,7 @@ export function UpdateIndicator({ onToast }: UpdateIndicatorProps) {
           : void checkForUpdate(true)
       }
       disabled={isChecking || isInstalling}
-      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-[10px] font-semibold transition disabled:cursor-wait disabled:opacity-70 ${
+      className={`app-topbar-labeled-button inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-[10px] font-semibold transition disabled:cursor-wait disabled:opacity-70 ${
         update
           ? "border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
           : "border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
@@ -157,7 +157,9 @@ export function UpdateIndicator({ onToast }: UpdateIndicatorProps) {
       ) : (
         <RefreshCw className="h-3.5 w-3.5" />
       )}
-      <span className="hidden sm:inline">{label}</span>
+      <span aria-hidden="true" className="app-topbar-button-label">
+        {label}
+      </span>
     </button>
   );
 }

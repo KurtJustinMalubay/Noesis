@@ -2,6 +2,7 @@ import {
   fetchLocalModels,
   generateGeminiJson,
   generateGeminiText,
+  getLocalOutputTokenBudget,
   parseGeminiJson,
   streamGeminiText,
 } from "../src/ai/geminiClient.ts";
@@ -48,6 +49,14 @@ function makeResponse(data: string): Response {
 
 async function run(): Promise<void> {
   try {
+    const defaultLocalSettings = loadAiSettings();
+    assert(
+      defaultLocalSettings.localContextWindowTokens === 4096 &&
+        defaultLocalSettings.localMaxOutputTokens === 2048 &&
+        getLocalOutputTokenBudget(3584) === 2048,
+      "local defaults should leave enough response budget for lessons and multi-question quizzes"
+    );
+
     const repairedJson = parseGeminiJson<{
       lesson_markdown: string;
       flashcards: Array<{ front: string; back: string }>;
@@ -500,6 +509,8 @@ async function run(): Promise<void> {
       apiKey: "saved-gemini-secret",
       localBaseUrl: "http://localhost:11434/v1",
       localModel: "qwen2.5",
+      localContextWindowTokens: 2048,
+      localMaxOutputTokens: 1200,
     });
     let localRequestBody: Record<string, unknown> | null = null;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -581,7 +592,7 @@ async function run(): Promise<void> {
           (localMessages?.reduce((sum, message) => sum + message.content.length, 0) ??
             0) / 4
         ) <= 720,
-      "local output and input budgets should fit a 2048-token context without the old 600-token output ceiling"
+        "configured local output and input budgets should fit a 2048-token context"
     );
 
     storedAiSettings = JSON.stringify({
@@ -736,13 +747,22 @@ async function run(): Promise<void> {
         properties: { repaired: { type: "BOOLEAN" } },
       },
     });
+    const fallbackMessages = structuredLocalBodies[1].messages as
+      | Array<{ role: string; content: string }>
+      | undefined;
     assert(
       localJsonModeResult.repaired &&
         structuredLocalBodies.length === 2 &&
         structuredLocalBodies[0].temperature === 0.25 &&
         structuredLocalBodies[0].response_format !== undefined &&
-        structuredLocalBodies[1].response_format === undefined,
-      "structured local requests should clamp temperature and retry HTTP 422 without response_format"
+        structuredLocalBodies[1].response_format === undefined &&
+        fallbackMessages?.some(
+          (message) =>
+            message.role === "system" &&
+            message.content.includes('"repaired"') &&
+            message.content.includes("valid JSON")
+        ),
+      "structured local requests should clamp temperature and retry unsupported JSON schema mode with JSON instructions preserved"
     );
 
     storedAiSettings = JSON.stringify({

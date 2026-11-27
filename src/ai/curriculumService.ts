@@ -1,11 +1,17 @@
 import {
   generateGeminiJson,
   generateGeminiText,
-  isTransientGeminiApiError,
+  getLocalOutputTokenBudget,
+  isLocalAiEndpoint,
   parseOrRepairGeminiJson,
   streamGeminiText,
   type GeminiRequestOptions,
 } from "./geminiClient";
+import {
+  LESSON_RESPONSE_SCHEMA,
+  normalizeGeneratedLessonPayload,
+  type GeneratedLessonPayload,
+} from "./lessonResponse.ts";
 import { loadAiSettings } from "./keyStore";
 import {
   buildTutorPayload,
@@ -749,6 +755,31 @@ function mapCompactCurriculum(
   };
 }
 
+function extractPartialLessonMarkdown(rawJsonBuffer: string): string {
+  const keyMatch = /"lessonMarkdown"\s*:\s*"/.exec(rawJsonBuffer);
+  if (!keyMatch) return "";
+  let i = keyMatch.index + keyMatch[0].length;
+  let out = "";
+  while (i < rawJsonBuffer.length) {
+    const ch = rawJsonBuffer[i];
+    if (ch === '"') break;
+    if (ch === "\\") {
+      if (i + 1 >= rawJsonBuffer.length) break;
+      const next = rawJsonBuffer[i + 1];
+      if (next === "n") out += "\n";
+      else if (next === "r") out += "\r";
+      else if (next === "t") out += "\t";
+      else if (next === '"' || next === "\\" || next === "/") out += next;
+      else out += next;
+      i += 2;
+    } else {
+      out += ch;
+      i += 1;
+    }
+  }
+  return out;
+}
+
 export async function generateLessonMaterial(
   node: GraphNode,
   workspaceTitle: string,
@@ -759,19 +790,37 @@ export async function generateLessonMaterial(
   citations: string[];
 }> {
   const lessonDepth = loadAiSettings().lessonDepth;
-  const lessonDepthInstructions = {
+  const lessonDepthGuidance = {
     concise:
-      "Write approximately 450–650 words. Focus on core intuition, a formal definition, and one worked example.",
+      "Focus on core intuition, a formal definition, and one worked example.",
     standard:
-      "Write approximately 1,000–1,500 words with structured sections, intuition, formal mechanics, two worked examples, and takeaways.",
+      "Use structured sections for intuition, formal mechanics, worked examples, and takeaways.",
     comprehensive:
-      "Write approximately 2,000–3,200+ words with motivation, formal definitions or theorems, step-by-step derivations, multiple worked examples, edge cases, common pitfalls, and a summary.",
+      "Cover motivation, formal definitions or theorems, step-by-step derivations, multiple worked examples, edge cases, common pitfalls, and a summary.",
   }[lessonDepth];
   const lessonTokenBudgets = {
     concise: 1536,
     standard: 3584,
     comprehensive: 8192,
   } as const;
+  const aiSettings = loadAiSettings();
+  const isLocalModel =
+    aiSettings.provider === "openai-compatible" &&
+    isLocalAiEndpoint(aiSettings.localBaseUrl);
+  const maxOutputTokens = lessonTokenBudgets[lessonDepth];
+  const outputTokenBudget = isLocalModel
+    ? getLocalOutputTokenBudget(maxOutputTokens)
+    : maxOutputTokens;
+  const lessonLengthInstruction = isLocalModel
+    ? `Fit the lesson within approximately ${outputTokenBudget} output tokens and target ${Math.max(
+        250,
+        Math.floor(outputTokenBudget * 0.35)
+      )}–${Math.max(350, Math.floor(outputTokenBudget * 0.5))} words. Prioritize the requested depth by preserving its most important explanations and examples.`
+    : {
+        concise: "Write approximately 450–650 words.",
+        standard: "Write approximately 1,000–1,500 words.",
+        comprehensive: "Write approximately 2,000–3,200+ words.",
+      }[lessonDepth];
   const vaultHits = await searchVaultFts(
     `${node.title} ${node.summary_hint}`,
     5,
@@ -789,49 +838,82 @@ export async function generateLessonMaterial(
       ? vaultHits.map((h) => `[${h.file_name}] ${h.content}`).join("\n\n")
       : "No direct local file excerpts matched; provide rigorous first-principles instruction.";
 
-  const lessonRequest: GeminiRequestOptions = {
+  const lessonRequest: GeminiRequestOptions & {
+    jsonSchema: Record<string, unknown>;
+  } = {
     tier: "synthesis",
+    jsonSchema: LESSON_RESPONSE_SCHEMA,
     systemInstruction:
-      `Teach from first principles. ${lessonDepthInstructions} Use \\frac{numerator}{denominator} for every fraction and never use TeX \\over. Return the complete lesson as raw Markdown only, with clear headings and worked examples. Include a Mermaid flowchart only when a diagram materially clarifies the lesson; otherwise omit it. Any Mermaid block must use simple alphanumeric node IDs and quoted node labels. Do not wrap the lesson in JSON. Only request an online image when a specific real-world example or concept materially benefits from a visual; never add a decorative image or image to the opening just to fill space. When useful, put [[NOESIS_IMAGE: concise specific subject]] on its own line at the relevant point. Request at most one image and prefer no image when the concept is better explained by text, a diagram, or equations.`,
+      `Teach from first principles. ${lessonLengthInstruction} ${lessonDepthGuidance} Return ONLY a valid JSON object matching the schema: { "lessonMarkdown": string, "mermaidDiagram": string, "imageQuery": string }. Inside "lessonMarkdown", write clear Markdown with headings and worked examples; use \\frac{numerator}{denominator} for every fraction and never use TeX \\over. Put an optional Mermaid flowchart (simple alphanumeric node IDs and quoted node labels) in "mermaidDiagram" only when a diagram materially clarifies the lesson, otherwise "". Put a concise Wikimedia Commons image search query in "imageQuery" only when a specific real-world visual materially helps, otherwise "".`,
     userPrompt: `Course: ${workspaceTitle}\nTopic Node: ${node.title}\nScope: ${node.summary_hint}\n\nLocal Vault Context:\n${vaultContext}`,
-    maxOutputTokens: lessonTokenBudgets[lessonDepth],
+    maxOutputTokens,
   };
-  let streamedLesson = "";
-  let generatedLesson: string;
+  let parsedPayload: GeneratedLessonPayload;
+  let streamedRaw = "";
   try {
-    generatedLesson = await streamGeminiText(lessonRequest, (chunk) => {
-      streamedLesson += chunk;
-      onProgress?.(streamedLesson);
+    streamedRaw = await streamGeminiText(lessonRequest, (chunk) => {
+      streamedRaw += chunk;
+      const preview = extractPartialLessonMarkdown(streamedRaw);
+      if (preview) {
+        onProgress?.(preview);
+      }
     });
+    parsedPayload = normalizeGeneratedLessonPayload(
+      await parseOrRepairGeminiJson<GeneratedLessonPayload>(
+        lessonRequest,
+        streamedRaw
+      )
+    );
   } catch (streamError) {
-    if (isTransientGeminiApiError(streamError)) throw streamError;
     try {
       onProgress?.("");
-      generatedLesson = await generateGeminiText(lessonRequest);
+      parsedPayload = normalizeGeneratedLessonPayload(
+        await generateGeminiJson<GeneratedLessonPayload>(lessonRequest)
+      );
     } catch (fallbackError) {
       const describe = (error: unknown) =>
         error instanceof Error ? error.message : String(error);
       throw new Error(
-        `Lesson streaming failed: ${describe(streamError)}. Standard generation fallback failed: ${describe(fallbackError)}`
+        `Lesson generation failed: ${describe(fallbackError)} (stream error: ${describe(streamError)})`
       );
     }
-  }
-  generatedLesson = generatedLesson.trim();
-  if (!generatedLesson) {
-    throw new Error(`Lesson generation returned empty content for ${node.title}.`);
   }
 
   const mermaidBlockPattern =
     /```mermaid[ \t]*\r?\n([\s\S]*?)(?:\r?\n```[ \t]*|$)/gi;
-  const mermaidMatches = Array.from(generatedLesson.matchAll(mermaidBlockPattern));
-  let mermaidDiagram = mermaidMatches[0]?.[1]?.trim() ?? "";
-  let lessonMarkdown = generatedLesson
+  const rawMarkdown =
+    typeof parsedPayload.lessonMarkdown === "string"
+      ? parsedPayload.lessonMarkdown.trim()
+      : "";
+  if (!rawMarkdown) {
+    throw new Error(`Lesson generation returned empty content for ${node.title}.`);
+  }
+
+  const embeddedMermaid =
+    Array.from(rawMarkdown.matchAll(mermaidBlockPattern))[0]?.[1]?.trim() ?? "";
+  let mermaidDiagram =
+    typeof parsedPayload.mermaidDiagram === "string"
+      ? parsedPayload.mermaidDiagram
+          .replace(/^```(?:mermaid)?\s*/i, "")
+          .replace(/```$/g, "")
+          .trim()
+      : "";
+  if (!mermaidDiagram && embeddedMermaid) {
+    mermaidDiagram = embeddedMermaid;
+  }
+
+  let lessonMarkdown = rawMarkdown
     .replace(mermaidBlockPattern, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   const imageRequest = extractLessonImageRequest(lessonMarkdown);
-  const imageResultPromise = imageRequest
-    ? searchCommonsImageSafely(imageRequest.query)
+  const explicitImageQuery =
+    typeof parsedPayload.imageQuery === "string"
+      ? parsedPayload.imageQuery.trim()
+      : "";
+  const effectiveImageQuery = imageRequest?.query || explicitImageQuery;
+  const imageResultPromise = effectiveImageQuery
+    ? searchCommonsImageSafely(effectiveImageQuery)
     : Promise.resolve({ image: null, warning: null });
   if (mermaidDiagram) {
     try {
@@ -872,14 +954,18 @@ export async function generateLessonMaterial(
       }
     }
   }
-  const imageResult = imageRequest
+  const imageResult = effectiveImageQuery
     ? await imageResultPromise
     : { image: null, warning: null };
-  lessonMarkdown = replaceLessonImageRequest(
-    lessonMarkdown,
-    imageRequest?.marker ?? "",
-    imageResult.image ? formatLessonImage(imageResult.image) : ""
-  );
+  if (imageRequest) {
+    lessonMarkdown = replaceLessonImageRequest(
+      lessonMarkdown,
+      imageRequest.marker,
+      imageResult.image ? formatLessonImage(imageResult.image) : ""
+    );
+  } else if (imageResult.image) {
+    lessonMarkdown = `${lessonMarkdown}\n\n${formatLessonImage(imageResult.image)}`;
+  }
   if (imageResult.image) {
     citations.push(
       `Illustration: ${imageResult.image.attribution} — ${imageResult.image.sourceUrl}`
@@ -995,6 +1081,7 @@ export async function askGroundedTutor(
     onChunk?: (text: string) => void;
     onPayload?: (payload: Pick<TutorPayload, "totalTokens" | "savedPercent">) => void;
     lessonContext?: TutorLessonContext | null;
+    dashboardContext?: string | null;
     interactionStyle?: "tutor" | "assistant";
     rollingSummary?: string | null;
     history?: Array<{
@@ -1004,6 +1091,7 @@ export async function askGroundedTutor(
     }>;
     askFollowUpQuestions?: boolean;
     preferConciseReplies?: boolean;
+    userProfile?: { name?: string; focus?: string } | null;
   } = {}
 ): Promise<{
   reply: string;
@@ -1023,9 +1111,12 @@ export async function askGroundedTutor(
   const citations = Array.from(new Set(hits.map((h) => h.file_name)));
   const lessonContext = options.lessonContext;
   const aiSettings = loadAiSettings();
+  const isLocalProvider =
+    aiSettings.provider === "openai-compatible" &&
+    isLocalAiEndpoint(aiSettings.localBaseUrl);
   const outputTokenBudget =
     aiSettings.provider === "openai-compatible"
-      ? Math.min(600, aiSettings.localMaxOutputTokens)
+      ? Math.min(isLocalProvider ? 600 : 1200, aiSettings.localMaxOutputTokens)
       : 1200;
   const payload = buildTutorPayload({
     provider: aiSettings.provider,
@@ -1038,6 +1129,7 @@ export async function askGroundedTutor(
     lessonSummary: lessonContext?.summaryHint,
     lessonLayer: lessonContext?.layerIndex,
     lessonMarkdown: lessonContext?.lessonMarkdown,
+    dashboardContext: options.dashboardContext,
     vaultChunks: hits,
     history: options.history ?? [],
     rollingSummary: options.rollingSummary,
@@ -1047,9 +1139,21 @@ export async function askGroundedTutor(
     savedPercent: payload.savedPercent,
   });
 
+  const profileName = options.userProfile?.name?.trim();
+  const profileFocus = options.userProfile?.focus?.trim();
+  const profileInstruction =
+    profileName || profileFocus
+      ? `\nLearner profile: ${[
+          profileName ? `Name: ${profileName}` : null,
+          profileFocus ? `Studying: ${profileFocus}` : null,
+        ]
+          .filter(Boolean)
+          .join("; ")}. Address the learner naturally when helpful.`
+      : "";
+
   const reply = await streamGeminiText({
     tier: "fast",
-    systemInstruction: `${payload.systemInstruction}\nFor mathematical fractions, use \\frac{numerator}{denominator}; never use TeX \\over.${
+    systemInstruction: `${payload.systemInstruction}${profileInstruction}\nFor mathematical fractions, use \\frac{numerator}{denominator}; never use TeX \\over.${
       options.askFollowUpQuestions === false
         ? "\nDo not end replies with follow-up questions or invitations to continue unless clarification is essential."
         : ""

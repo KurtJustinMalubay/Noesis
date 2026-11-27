@@ -43,7 +43,10 @@ async function run(): Promise<void> {
   const version = sqlite.prepare("PRAGMA user_version").get() as {
     user_version: number;
   };
-  assert(version.user_version === 13, "migrations should advance the schema to v13");
+  assert(
+    version.user_version === 14,
+    "migrations should advance the schema to v14"
+  );
   const curriculumTables = sqlite
     .prepare(
       `SELECT COUNT(*) AS count FROM sqlite_master
@@ -436,7 +439,9 @@ async function run(): Promise<void> {
   );
 
   sqlite.close();
-  console.log("✓ SQLite v13 curriculum map, document sharing, and workspace tests passed!");
+  console.log(
+    "✓ SQLite v14 curriculum map, document sharing, and workspace tests passed!"
+  );
 }
 
 run().catch((error) => {

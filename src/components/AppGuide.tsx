@@ -4,13 +4,14 @@ import { useDelayedUnmount } from "./AnimatedPresence";
 
 const STEPS = [
   {
-    target: "workspace-tab",
-    view: "graph",
-    title: "Welcome",
-    description: "Take a quick tour of the main areas in Noesis.",
+    target: "dashboard-tab",
+    view: "dashboard",
+    title: "Start at the Dashboard",
+    description:
+      "The Dashboard brings your active study priorities into one place.",
     points: [
-      "Use Next to move through the guide, or click a highlighted control to try it.",
-      "The tour will take you to the relevant page as you go.",
+      "Continue Studying highlights concepts to revisit; archived workspaces stay out of active study.",
+      "Use the header to move between Dashboard, Workspaces, and other enabled tools.",
     ],
   },
   {
@@ -30,10 +31,10 @@ const STEPS = [
     settingsSection: "ai",
     title: "Set up AI",
     description:
-      "Choose your provider and add a key or local endpoint in AI & Speed.",
+      "Choose a cloud provider or connect a local model in AI & Speed.",
     points: [
-      "Gemini 3.5 Flash Lite is a good default for free accounts.",
-      "Your API key is stored locally. Use Test to check the connection before saving.",
+      "Use Test to verify the connection, then save. For local models, set the runtime context to match Noesis's configured limit.",
+      "API keys and study data stay on this device unless you choose a cloud provider.",
     ],
   },
   {
@@ -45,18 +46,9 @@ const STEPS = [
     points: [
       "Choose New Workspace → Generate with AI to build a learning map from a topic or your notes.",
       "Choose Start manually to make your own map. Add PDFs or notes in Document Vault.",
-    ],
-  },
-  {
-    target: "canvas",
-    view: "graph",
-    title: "Organize your topics",
-    description:
-      "Arrange topics and show how they connect.",
-    points: [
       "Choose Auto Layout to arrange topics for you, or Free Place to move them anywhere.",
       "Drag a topic’s bottom dot to another topic’s top dot to connect them. Select a line and choose Disconnect to remove it.",
-      "In Free Place, double-click an empty area to add a topic.",
+      "In Free Place, double-click empty canvas to add a topic.",
     ],
   },
   {
@@ -67,19 +59,7 @@ const STEPS = [
       "Each topic has a lesson to help you learn about it.",
     points: [
       "Click a topic without a lock to open its lesson.",
-      "Choose Generate Example to see a worked example.",
-    ],
-  },
-  {
-    target: "curriculum-tab",
-    view: "graph",
-    advanceOnView: "curriculum",
-    title: "Switch between work modes",
-    description:
-      "Use the header tabs to move between Workspaces and Curriculum. The sidebar updates to match the selected mode.",
-    points: [
-      "Click Curriculum in the header to explore it. The guide will continue there automatically.",
-      "Click Workspaces to return to your learning graphs.",
+      "Lessons, quizzes, and Tutor help you learn and check understanding.",
     ],
   },
   {
@@ -87,7 +67,7 @@ const STEPS = [
     view: "curriculum",
     title: "Explore curriculum maps",
     description:
-      "Curriculum maps connect subjects and prerequisites across semesters or years.",
+      "Choose Curriculum in the header to connect subjects and prerequisites across semesters or years.",
     points: [
       "Create a map from the sidebar for a semester, year, or full program.",
       "Add existing workspaces to subjects so each course keeps its own lessons and study data.",
@@ -98,11 +78,35 @@ const STEPS = [
     target: "tutor",
     view: "graph",
     title: "Practice and get help",
-    description: "Check what you’ve learned and ask questions when you need help.",
+    description:
+      "Use the study tools when you want to check understanding or get unstuck.",
     points: [
-      "Take a quiz to check your understanding. Passing a quiz opens the next topics.",
-      "Open Tutor to ask a question. Choose Socratic Tutor for hints or AI Assistant for direct answers.",
-      "Use Flashcards to review cards when they’re due.",
+      "Quizzes check understanding; passing can unlock later topics.",
+      "Tutor offers guided hints or direct answers. Flashcards appear here when enabled.",
+    ],
+  },
+  {
+    target: "calendar-tab",
+    view: "calendar",
+    feature: "calendar",
+    title: "Plan study time",
+    description: "Use Study Calendar to turn deadlines into a manageable plan.",
+    points: [
+      "Add events from a date or use the inline quick-add controls.",
+      "Filter by active workspace or pin the Mini Agenda for quick access.",
+      "Allow Windows notifications for reminders 15 minutes before and at an event; date-only events use 8:45 and 9:00 AM.",
+      "Ask Tutor to create a draft with /plan; review it before adding events.",
+    ],
+  },
+  {
+    target: "excalidraw-tab",
+    view: "graph",
+    feature: "excalidraw",
+    title: "Sketch and connect ideas",
+    description: "Excalidraw gives you a visual canvas alongside your workspace.",
+    points: [
+      "Open it from the header. Its sidebar contains your boards and drawing controls.",
+      "Use the Lesson control to keep the current topic nearby while sketching.",
     ],
   },
   {
@@ -121,11 +125,20 @@ const STEPS = [
 
 interface AppGuideProps {
   isOpen: boolean;
-  currentView: "graph" | "curriculum" | "excalidraw";
-  onNavigate: (view: "graph" | "curriculum") => void;
+  currentView:
+    | "dashboard"
+    | "graph"
+    | "curriculum"
+    | "excalidraw"
+    | "calendar";
+  onNavigate: (
+    view: "dashboard" | "graph" | "curriculum" | "calendar"
+  ) => void;
   onOpenSettingsSection: (section: SettingsTourSection) => void;
   onCloseSettings: () => void;
   flashcardsEnabled: boolean;
+  studyCalendarEnabled: boolean;
+  excalidrawEnabled: boolean;
   onClose: () => void;
   showOnStartup: boolean;
   onShowOnStartupChange: (show: boolean) => void;
@@ -140,6 +153,8 @@ export function AppGuide({
   onOpenSettingsSection,
   onCloseSettings,
   flashcardsEnabled,
+  studyCalendarEnabled,
+  excalidrawEnabled,
   onClose,
   showOnStartup,
   onShowOnStartupChange,
@@ -153,7 +168,13 @@ export function AppGuide({
   const animationFrames = useRef<number[]>([]);
   const onCloseRef = useRef(onClose);
   const { mounted, visible } = useDelayedUnmount(isOpen, 170);
-  const step = STEPS[stepIndex];
+  const steps = STEPS.filter((item) => {
+    if (!("feature" in item)) return true;
+    return item.feature === "calendar"
+      ? studyCalendarEnabled
+      : excalidrawEnabled;
+  });
+  const step = steps[stepIndex] ?? steps[0];
   const stepAdvanceOnView =
     "advanceOnView" in step ? step.advanceOnView : undefined;
   const visiblePoints =
@@ -169,9 +190,9 @@ export function AppGuide({
   onCloseRef.current = onClose;
 
   const navigateToStep = (nextIndex: number) => {
-    const boundedIndex = Math.max(0, Math.min(STEPS.length - 1, nextIndex));
-    const previousStep = STEPS[stepIndex];
-    const nextStep = STEPS[boundedIndex];
+    const boundedIndex = Math.max(0, Math.min(steps.length - 1, nextIndex));
+    const previousStep = steps[stepIndex];
+    const nextStep = steps[boundedIndex];
     setStepIndex(boundedIndex);
     onNavigate(nextStep.view);
     if ("settingsSection" in nextStep) {
@@ -184,14 +205,14 @@ export function AppGuide({
   useEffect(() => {
     if (!isOpen) return;
     setStepIndex(0);
-    onNavigate(STEPS[0].view);
-  }, [isOpen, onNavigate]);
+    onNavigate(steps[0].view);
+  }, [isOpen, onNavigate, studyCalendarEnabled, excalidrawEnabled]);
 
   useEffect(() => {
     if (isOpen && stepAdvanceOnView === currentView) {
       setStepIndex((current) =>
         current === stepIndex
-          ? Math.min(STEPS.length - 1, current + 1)
+          ? Math.min(steps.length - 1, current + 1)
           : current
       );
     }
@@ -309,7 +330,7 @@ export function AppGuide({
         <header className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs font-medium text-[var(--text-secondary)]">
-              Step {stepIndex + 1} of {STEPS.length}
+              Step {stepIndex + 1} of {steps.length}
             </p>
           </div>
           <button
@@ -327,7 +348,7 @@ export function AppGuide({
           className="mt-4 flex gap-1.5"
           role="group"
         >
-          {STEPS.map((item, index) => (
+          {steps.map((item, index) => (
             <button
               key={item.title}
               type="button"
@@ -418,14 +439,14 @@ export function AppGuide({
             <button
               type="button"
               onClick={() =>
-                stepIndex === STEPS.length - 1
+                stepIndex === steps.length - 1
                   ? onClose()
                   : navigateToStep(stepIndex + 1)
               }
               className="flex items-center gap-1.5 rounded-lg bg-[var(--accent-primary)] px-3 py-2 text-[11px] font-semibold text-[var(--bg-surface)] transition hover:brightness-95"
             >
-              {stepIndex === STEPS.length - 1 ? "Done" : "Next"}
-              {stepIndex < STEPS.length - 1 && (
+              {stepIndex === steps.length - 1 ? "Done" : "Next"}
+              {stepIndex < steps.length - 1 && (
                 <ArrowRight className="h-3 w-3" />
               )}
             </button>

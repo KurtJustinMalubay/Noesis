@@ -1,12 +1,14 @@
 import { create } from "zustand";
 import {
   BUILT_IN_PLUGINS,
+  AI_USAGE_PLUGIN_ID,
   FLASHCARDS_PLUGIN_ID,
   isBuiltInPluginId,
 } from "./registry.ts";
 import type { BuiltInPluginId } from "./registry.ts";
 
-const STORAGE_KEY = "noesis.plugins.v2";
+const STORAGE_KEY = "noesis.plugins.v3";
+const PREVIOUS_STORAGE_KEY = "noesis.plugins.v2";
 const LEGACY_STORAGE_KEY = "noesis.plugins.v1";
 
 function loadEnabledPluginIds(): BuiltInPluginId[] {
@@ -14,12 +16,16 @@ function loadEnabledPluginIds(): BuiltInPluginId[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) return parseEnabledPluginIds(raw);
 
-    const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    const previousRaw = localStorage.getItem(PREVIOUS_STORAGE_KEY);
+    const legacyRaw =
+      previousRaw ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!legacyRaw) return getDefaultEnabledPluginIds();
 
     const legacyEnabledIds = parseEnabledPluginIds(legacyRaw);
     const migratedIds = new Set<BuiltInPluginId>(legacyEnabledIds);
-    const newlyAddedDefaults: BuiltInPluginId[] = [FLASHCARDS_PLUGIN_ID];
+    const newlyAddedDefaults: BuiltInPluginId[] = previousRaw
+      ? [AI_USAGE_PLUGIN_ID]
+      : [AI_USAGE_PLUGIN_ID, FLASHCARDS_PLUGIN_ID];
     for (const pluginId of newlyAddedDefaults) {
       const plugin = BUILT_IN_PLUGINS.find((item) => item.id === pluginId);
       if (plugin?.defaultEnabled) migratedIds.add(pluginId);

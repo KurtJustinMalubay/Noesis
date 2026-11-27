@@ -1,6 +1,8 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import {
   GEMINI_MODEL_OPTIONS,
+  getOpenAiApiKey,
+  getOpenAiPreset,
   loadAiSettings,
   type AiProvider,
 } from "./keyStore.ts";
@@ -9,6 +11,11 @@ import {
   parseSafeJson,
 } from "./jsonSafeParser.ts";
 import { fitRequestToProviderBudget } from "./tokenOptimizer.ts";
+import {
+  estimateAiTokens,
+  recordAiUsage,
+  type AiUsageFeature,
+} from "./usage.ts";
 
 export type ModelTier = "fast" | "synthesis";
 
@@ -25,6 +32,8 @@ export interface GeminiRequestOptions {
   baseUrl?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  rateLimitMode?: "retry" | "fail-fast";
+  feature?: AiUsageFeature;
 }
 
 interface GeminiApiResponse {
@@ -38,6 +47,11 @@ interface GeminiApiResponse {
     message?: string;
     status?: string;
   };
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    totalTokenCount?: number;
+  };
 }
 
 interface OpenAiApiResponse {
@@ -46,6 +60,106 @@ interface OpenAiApiResponse {
     delta?: { content?: unknown };
   }>;
   error?: { message?: string; code?: string };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+  prompt_eval_count?: number;
+  eval_count?: number;
+}
+
+interface ProviderTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+interface ProviderUsagePayload {
+  usageMetadata?: GeminiApiResponse["usageMetadata"];
+  usage?: OpenAiApiResponse["usage"];
+  prompt_eval_count?: number;
+  eval_count?: number;
+}
+
+function getTokenCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : null;
+}
+
+function getProviderTokenUsage(
+  provider: AiProvider,
+  payload: ProviderUsagePayload
+): ProviderTokenUsage | null {
+  const inputTokens =
+    provider === "gemini"
+      ? getTokenCount(payload.usageMetadata?.promptTokenCount)
+      : getTokenCount(
+          payload.usage?.prompt_tokens ?? payload.prompt_eval_count
+        );
+  const reportedOutputTokens =
+    provider === "gemini"
+      ? getTokenCount(payload.usageMetadata?.candidatesTokenCount)
+      : getTokenCount(payload.usage?.completion_tokens ?? payload.eval_count);
+  const totalTokens =
+    provider === "gemini"
+      ? getTokenCount(payload.usageMetadata?.totalTokenCount)
+      : getTokenCount(payload.usage?.total_tokens);
+  const outputTokens =
+    reportedOutputTokens ??
+    (inputTokens !== null && totalTokens !== null
+      ? Math.max(0, totalTokens - inputTokens)
+      : null);
+  return inputTokens !== null && outputTokens !== null
+    ? { inputTokens, outputTokens }
+    : null;
+}
+
+function getProviderUsageFromText(
+  provider: AiProvider,
+  responseText: string
+): ProviderTokenUsage | null {
+  try {
+    return getProviderTokenUsage(
+      provider,
+      JSON.parse(responseText) as ProviderUsagePayload
+    );
+  } catch {
+    return null;
+  }
+}
+
+function inferAiUsageFeature(opts: GeminiRequestOptions): AiUsageFeature {
+  if (opts.feature) return opts.feature;
+  const text = `${opts.systemInstruction}\n${opts.userPrompt}`.toLowerCase();
+  if (/\b(quiz|question|mcq|rubric|grading|grade)\b/.test(text)) {
+    return "quizzes";
+  }
+  if (/\b(tutor|socratic|explain to the student|study coach)\b/.test(text)) {
+    return "tutor";
+  }
+  if (/\b(lesson|worked example|curriculum|concept)\b/.test(text)) {
+    return "lessons";
+  }
+  return "other";
+}
+
+function recordResponseUsage(
+  opts: GeminiRequestOptions,
+  text: string,
+  usage: ProviderTokenUsage | null
+): void {
+  const estimatedInputTokens = estimateAiTokens(
+    `${opts.systemInstruction}\n${opts.userPrompt}\n${
+      opts.jsonSchema ? JSON.stringify(opts.jsonSchema) : ""
+    }`
+  );
+  recordAiUsage({
+    inputTokens: usage?.inputTokens ?? estimatedInputTokens,
+    outputTokens: usage?.outputTokens ?? estimateAiTokens(text),
+    isEstimated: usage === null,
+    feature: inferAiUsageFeature(opts),
+  });
 }
 
 interface ProviderConfig {
@@ -138,14 +252,16 @@ function getProviderConfig(opts: GeminiRequestOptions): ProviderConfig {
   const model =
     opts.modelId ??
     (provider === "openai-compatible"
-      ? settings.localModel
+      ? opts.tier === "fast"
+        ? settings.openAiFastModel || settings.localModel
+        : settings.openAiSynthesisModel || settings.localModel
       : opts.tier === "fast"
         ? settings.fastModel
         : settings.synthesisModel);
   if (!model.trim()) {
     throw new Error(
       provider === "openai-compatible"
-        ? "Set a local model name in Settings before making a request."
+        ? "Set an OpenAI-compatible model name in Settings before making a request."
         : "Set a Gemini model in Settings before making a request."
     );
   }
@@ -172,10 +288,10 @@ function getProviderConfig(opts: GeminiRequestOptions): ProviderConfig {
   try {
     endpoint = new URL(baseUrl);
   } catch {
-    throw new Error(`Invalid local AI base URL: ${baseUrl}`);
+    throw new Error(`Invalid OpenAI-compatible base URL: ${baseUrl}`);
   }
   if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
-    throw new Error("Local AI base URL must use HTTP or HTTPS.");
+    throw new Error("OpenAI-compatible base URL must use HTTP or HTTPS.");
   }
   const basePath = endpoint.pathname.replace(/\/+$/, "");
   if (/\/v\d+\/chat\/completions$/i.test(basePath)) {
@@ -190,7 +306,37 @@ function getProviderConfig(opts: GeminiRequestOptions): ProviderConfig {
   }
   endpoint.search = "";
   endpoint.hash = "";
-  return { provider, model, endpoint: endpoint.toString() };
+  const apiKey = (opts.apiKey ?? getOpenAiApiKey(settings)).trim();
+  const preset = getOpenAiPreset(settings.openAiPreset);
+  if (!opts.baseUrl && preset.requiresApiKey && !apiKey) {
+    throw new Error(
+      `Missing ${preset.label} API key. Open Settings to paste your API key.`
+    );
+  }
+  return {
+    provider,
+    model,
+    endpoint: endpoint.toString(),
+    apiKey: apiKey || undefined,
+  };
+}
+
+function getOpenAiHeaders(
+  endpoint: string,
+  apiKey?: string,
+  extra?: Record<string, string>
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...extra,
+  };
+  if (apiKey?.trim()) {
+    headers.Authorization = `Bearer ${apiKey.trim()}`;
+  }
+  if (endpoint.toLowerCase().includes("openrouter.ai")) {
+    headers["X-Title"] = "Noesis";
+  }
+  return headers;
 }
 
 export function isLocalAiEndpoint(baseUrl: string): boolean {
@@ -268,7 +414,7 @@ function formatApiError(
   statusText: string,
   responseText: string
 ): string {
-  const name = provider === "gemini" ? "Gemini" : "Local AI";
+  const name = provider === "gemini" ? "Gemini" : "OpenAI-compatible AI";
   return `${name} API Error (${status}) [${model}]: ${getErrorDetail(
     responseText,
     statusText
@@ -301,6 +447,23 @@ const LOCAL_CONTEXT_SAFETY_TOKENS = 128;
 const LOCAL_MIN_INPUT_TOKENS = 384;
 const GEMINI_OVERLOAD_COOLDOWN_MS = 60_000;
 const overloadedGeminiModels = new Map<string, number>();
+
+export function getLocalOutputTokenBudget(requestedOutputTokens?: number): number {
+  const settings = loadAiSettings();
+  const configuredOutputLimit = Math.min(
+    settings.localMaxOutputTokens,
+    settings.localContextWindowTokens -
+      LOCAL_CONTEXT_SAFETY_TOKENS -
+      LOCAL_MIN_INPUT_TOKENS
+  );
+  return Math.max(
+    1,
+    Math.min(
+      requestedOutputTokens ?? settings.localMaxOutputTokens,
+      configuredOutputLimit
+    )
+  );
+}
 
 export function isTransientGeminiApiError(error: unknown): boolean {
   if (error instanceof AiApiError) {
@@ -344,19 +507,7 @@ function prepareRequestOptions(
 
   const settings = loadAiSettings();
   const contextWindowTokens = settings.localContextWindowTokens;
-  const configuredOutputLimit = Math.min(
-    settings.localMaxOutputTokens,
-    contextWindowTokens -
-      LOCAL_CONTEXT_SAFETY_TOKENS -
-      LOCAL_MIN_INPUT_TOKENS
-  );
-  const maxOutputTokens = Math.max(
-    1,
-    Math.min(
-      opts.maxOutputTokens ?? settings.localMaxOutputTokens,
-      configuredOutputLimit
-    )
-  );
+  const maxOutputTokens = getLocalOutputTokenBudget(opts.maxOutputTokens);
   const inputBudget = Math.max(
     1,
     contextWindowTokens - LOCAL_CONTEXT_SAFETY_TOKENS - maxOutputTokens
@@ -459,7 +610,8 @@ function waitForRetry(delay: number, signal?: AbortSignal): Promise<void> {
 async function fetchWithTransientRetry(
   endpoint: string,
   init: RequestInit,
-  useNativeProxy = false
+  useNativeProxy = false,
+  rateLimitMode: GeminiRequestOptions["rateLimitMode"] = "retry"
 ): Promise<Response> {
   for (let attempt = 0; ; attempt += 1) {
     let response: Response;
@@ -476,7 +628,12 @@ async function fetchWithTransientRetry(
       continue;
     }
 
-    const retryLimit = response.status === 503 ? 4 : MAX_TRANSIENT_RETRIES;
+    const retryLimit =
+      response.status === 429 && rateLimitMode === "fail-fast"
+        ? 0
+        : response.status === 503
+          ? 4
+          : MAX_TRANSIENT_RETRIES;
     if (
       response.ok ||
       !RETRYABLE_HTTP_STATUSES.has(response.status) ||
@@ -541,6 +698,13 @@ function isRetryableGeminiError(error: unknown): error is AiApiError {
   );
 }
 
+export function isRateLimitApiError(error: unknown): boolean {
+  if (error instanceof AiApiError) {
+    return error.status === 429;
+  }
+  return error instanceof Error && /API Error \(429\)/.test(error.message);
+}
+
 async function withConfiguredFallback<T>(
   opts: GeminiRequestOptions,
   request: (requestOptions: GeminiRequestOptions) => Promise<T>
@@ -564,6 +728,9 @@ async function withConfiguredFallback<T>(
       return await request(opts);
     } catch (error) {
       if (!isRetryableGeminiError(error)) throw error;
+      if (error.status === 429 && opts.rateLimitMode === "fail-fast") {
+        throw error;
+      }
       if (error.status === 503) markGeminiModelOverloaded(currentModel);
       primaryError = error;
     }
@@ -613,6 +780,41 @@ function getGeminiRequestBody(opts: GeminiRequestOptions): Record<string, unknow
   };
 }
 
+function toStandardJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === "type" && typeof value === "string") {
+      result[key] = value.toLowerCase();
+    } else if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+      const props: Record<string, unknown> = {};
+      for (const [propKey, propVal] of Object.entries(value as Record<string, unknown>)) {
+        props[propKey] =
+          propVal && typeof propVal === "object" && !Array.isArray(propVal)
+            ? toStandardJsonSchema(propVal as Record<string, unknown>)
+            : propVal;
+      }
+      result[key] = props;
+    } else if (key === "items" && value && typeof value === "object" && !Array.isArray(value)) {
+      result[key] = toStandardJsonSchema(value as Record<string, unknown>);
+    } else {
+      result[key] = value;
+    }
+  }
+  if (result.type === "object") {
+    if (!("additionalProperties" in result)) {
+      result.additionalProperties = false;
+    }
+    if (
+      result.properties &&
+      typeof result.properties === "object" &&
+      !Array.isArray(result.properties)
+    ) {
+      result.required = Object.keys(result.properties as Record<string, unknown>);
+    }
+  }
+  return result;
+}
+
 function getOpenAiRequestBody(
   opts: GeminiRequestOptions,
   model: string,
@@ -620,10 +822,8 @@ function getOpenAiRequestBody(
 ): Record<string, unknown> {
   const settings = loadAiSettings();
   const systemInstruction = opts.jsonSchema
-    ? `${opts.systemInstruction}\nReturn a JSON ${
-        String(opts.jsonSchema.type).toUpperCase() === "ARRAY" ? "array" : "object"
-      } matching this schema: ${JSON.stringify(
-        opts.jsonSchema
+    ? `${opts.systemInstruction}\nReturn ONLY valid JSON matching this schema: ${JSON.stringify(
+        toStandardJsonSchema(opts.jsonSchema)
       )}`
     : opts.systemInstruction;
   return {
@@ -635,7 +835,16 @@ function getOpenAiRequestBody(
     temperature: getTemperature(opts),
     top_p: settings.localTopP,
     max_tokens: opts.maxOutputTokens,
-    response_format: opts.jsonSchema ? { type: "json_object" } : undefined,
+    response_format: opts.jsonSchema
+      ? {
+          type: "json_schema",
+          json_schema: {
+            name: "noesis_response",
+            strict: true,
+            schema: toStandardJsonSchema(opts.jsonSchema),
+          },
+        }
+      : undefined,
     stream,
   };
 }
@@ -685,7 +894,7 @@ function extractTextContent(content: unknown): string {
 function getResponseText(
   provider: AiProvider,
   responseText: string
-): { text: string; error?: string } {
+): { text: string; error?: string; usage: ProviderTokenUsage | null } {
   if (provider === "gemini") {
     const data = JSON.parse(responseText) as GeminiApiResponse;
     return {
@@ -694,6 +903,7 @@ function getResponseText(
           ?.map((part) => part.text ?? "")
           .join("") ?? "",
       error: data.error?.message,
+      usage: getProviderTokenUsage(provider, data),
     };
   }
 
@@ -701,6 +911,7 @@ function getResponseText(
   return {
     text: extractTextContent(data.choices?.[0]?.message?.content),
     error: data.error?.message,
+    usage: getProviderTokenUsage(provider, data),
   };
 }
 
@@ -712,33 +923,40 @@ async function generateGeminiTextOnce(
   const config = getProviderConfig(requestOptions);
   const isGemini = config.provider === "gemini";
   return withRequestTimeout(requestOptions, config, async (signal) => {
-    let response = await fetchWithTransientRetry(config.endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(isGemini ? { "x-goog-api-key": config.apiKey! } : {}),
+    const headers = isGemini
+      ? {
+          "Content-Type": "application/json",
+          "x-goog-api-key": config.apiKey!,
+        }
+      : getOpenAiHeaders(config.endpoint, config.apiKey);
+    let response = await fetchWithTransientRetry(
+      config.endpoint,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(
+          isGemini
+            ? getGeminiRequestBody(requestOptions)
+            : getOpenAiRequestBody(requestOptions, config.model, false)
+        ),
+        signal,
       },
-      body: JSON.stringify(
-        isGemini
-          ? getGeminiRequestBody(requestOptions)
-          : getOpenAiRequestBody(requestOptions, config.model, false)
-      ),
-      signal,
-    }, !isGemini);
+      !isGemini,
+      requestOptions.rateLimitMode
+    );
     if (shouldRetryWithoutJsonMode(requestOptions, config, response.status)) {
       const fallbackResponse = await fetchWithTransientRetry(
         config.endpoint,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: getOpenAiHeaders(config.endpoint, config.apiKey),
           body: JSON.stringify(
             getOpenAiFallbackBody(requestOptions, config.model, false)
           ),
           signal,
         },
-        true
+        true,
+        requestOptions.rateLimitMode
       );
       response = fallbackResponse;
     }
@@ -754,7 +972,11 @@ async function generateGeminiTextOnce(
       );
     }
 
-    let result: { text: string; error?: string };
+    let result: {
+      text: string;
+      error?: string;
+      usage: ProviderTokenUsage | null;
+    };
     try {
       result = getResponseText(config.provider, responseText);
     } catch {
@@ -778,6 +1000,7 @@ async function generateGeminiTextOnce(
         `${config.provider === "gemini" ? "Gemini" : "Local AI"} returned an empty response for model ${config.model}.`
       );
     }
+    recordResponseUsage(requestOptions, result.text, result.usage);
     return result.text;
   });
 }
@@ -834,16 +1057,23 @@ async function streamGeminiTextOnce(
       "?alt=sse"
     : config.endpoint;
   return withRequestTimeout(requestOptions, config, async (signal) => {
-    const headers = {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-      ...(isGemini ? { "x-goog-api-key": config.apiKey! } : {}),
-    };
+    const headers = isGemini
+      ? {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+          "x-goog-api-key": config.apiKey!,
+        }
+      : getOpenAiHeaders(config.endpoint, config.apiKey, {
+          Accept: "text/event-stream",
+        });
     if (!isGemini && isTauri()) {
       const resultChunks: string[] = [];
       let streamError: unknown = null;
+      let streamUsage: ProviderTokenUsage | null = null;
       const handleEvent = (event: string) => {
         if (signal.aborted || !event || event === "[DONE]") return;
+        streamUsage =
+          getProviderUsageFromText(config.provider, event) ?? streamUsage;
         try {
           const text = getStreamText(config.provider, config.model, event);
           if (text) {
@@ -871,9 +1101,7 @@ async function streamGeminiTextOnce(
           endpoint,
           {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
+            headers: getOpenAiHeaders(config.endpoint, config.apiKey),
             body: JSON.stringify(
               getOpenAiFallbackBody(requestOptions, config.model, false)
             ),
@@ -894,10 +1122,18 @@ async function streamGeminiTextOnce(
         );
       }
       if (streamError) throw streamError;
-      if (resultChunks.length > 0) return resultChunks.join("");
+      if (resultChunks.length > 0) {
+        const text = resultChunks.join("");
+        recordResponseUsage(requestOptions, text, streamUsage);
+        return text;
+      }
 
       const responseText = await response.text();
-      let result: { text: string; error?: string };
+      let result: {
+        text: string;
+        error?: string;
+        usage: ProviderTokenUsage | null;
+      };
       try {
         result = getResponseText(config.provider, responseText);
       } catch {
@@ -916,28 +1152,32 @@ async function streamGeminiTextOnce(
           )
         );
       }
+      recordResponseUsage(requestOptions, result.text, result.usage);
       onChunk(result.text);
       return result.text;
     }
 
-    let response = await fetchWithTransientRetry(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(
-        isGemini
-          ? getGeminiRequestBody(requestOptions)
-          : getOpenAiRequestBody(requestOptions, config.model, true)
-      ),
-      signal,
-    }, !isGemini);
+    let response = await fetchWithTransientRetry(
+      endpoint,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(
+          isGemini
+            ? getGeminiRequestBody(requestOptions)
+            : getOpenAiRequestBody(requestOptions, config.model, true)
+        ),
+        signal,
+      },
+      !isGemini,
+      requestOptions.rateLimitMode
+    );
     if (shouldRetryWithoutJsonMode(requestOptions, config, response.status)) {
       const fallbackResponse = await fetchWithTransientRetry(
         endpoint,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: getOpenAiHeaders(config.endpoint, config.apiKey),
           body: JSON.stringify(
             getOpenAiFallbackBody(
               requestOptions,
@@ -947,7 +1187,8 @@ async function streamGeminiTextOnce(
           ),
           signal,
         },
-        true
+        true,
+        requestOptions.rateLimitMode
       );
       response = fallbackResponse;
     }
@@ -972,6 +1213,7 @@ async function streamGeminiTextOnce(
     let buffer = "";
     const resultChunks: string[] = [];
     let resultLength = 0;
+    let streamUsage: ProviderTokenUsage | null = null;
 
     const consumeEvent = (event: string) => {
       const data = event
@@ -980,6 +1222,8 @@ async function streamGeminiTextOnce(
         .map((line) => line.slice(5).trim())
         .join("\n");
       if (!data || data === "[DONE]") return;
+      streamUsage =
+        getProviderUsageFromText(config.provider, data) ?? streamUsage;
       let text: string;
       try {
         text = getStreamText(config.provider, config.model, data);
@@ -1008,9 +1252,27 @@ async function streamGeminiTextOnce(
       }
     };
 
+    const STREAM_IDLE_TIMEOUT_MS = 35_000;
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        let idleTimer: ReturnType<typeof setTimeout> | undefined;
+        const readPromise = reader.read();
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          idleTimer = setTimeout(() => {
+            reject(
+              new Error(
+                `${config.provider === "gemini" ? "Gemini" : "Local AI"} stream stalled for ${STREAM_IDLE_TIMEOUT_MS / 1000}s.`
+              )
+            );
+          }, STREAM_IDLE_TIMEOUT_MS);
+        });
+        let readResult: ReadableStreamReadResult<Uint8Array>;
+        try {
+          readResult = await Promise.race([readPromise, timeoutPromise]);
+        } finally {
+          if (idleTimer !== undefined) clearTimeout(idleTimer);
+        }
+        const { done, value } = readResult;
         buffer += decoder.decode(value, { stream: !done });
         const events = buffer.split(/\r?\n\r?\n/);
         buffer = events.pop() ?? "";
@@ -1029,7 +1291,9 @@ async function streamGeminiTextOnce(
         `${config.provider === "gemini" ? "Gemini" : "Local AI"} returned an empty streaming response for model ${config.model}.`
       );
     }
-    return resultChunks.join("");
+    const text = resultChunks.join("");
+    recordResponseUsage(requestOptions, text, streamUsage);
+    return text;
   });
 }
 
@@ -1127,35 +1391,42 @@ export async function testGeminiConnection(options: {
   }
 }
 
-export async function fetchLocalModels(baseUrl: string): Promise<string[]> {
+export async function fetchLocalModels(
+  baseUrl: string,
+  apiKey?: string
+): Promise<string[]> {
   let url: URL;
   try {
     url = new URL(baseUrl);
   } catch {
-    throw new Error(`Invalid local AI base URL: ${baseUrl}`);
+    throw new Error(`Invalid OpenAI-compatible base URL: ${baseUrl}`);
   }
   if (!["http:", "https:"].includes(url.protocol)) {
-    throw new Error("Local AI base URL must use HTTP or HTTPS.");
+    throw new Error("OpenAI-compatible base URL must use HTTP or HTTPS.");
   }
   let path = url.pathname.replace(/\/+$/, "");
   path = path.replace(/\/chat\/completions$/i, "");
   if (!path.endsWith("/models")) {
-    if (!path.endsWith("/v1")) path += "/v1";
+    if (!/\/v\d+$/i.test(path)) path += "/v1";
     path += "/models";
   }
   url.pathname = path;
   url.search = "";
   url.hash = "";
 
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (apiKey?.trim()) {
+    headers.Authorization = `Bearer ${apiKey.trim()}`;
+  }
   const response = await requestEndpoint(
     url.toString(),
-    { method: "GET", headers: { Accept: "application/json" } },
+    { method: "GET", headers },
     true
   );
   const responseText = await response.text();
   if (!response.ok) {
     throw new Error(
-      `Local model discovery failed (${response.status}): ${getErrorDetail(
+      `Model discovery failed (${response.status}): ${getErrorDetail(
         responseText,
         response.statusText
       )}`
@@ -1193,3 +1464,5 @@ export async function fetchLocalModels(baseUrl: string): Promise<string[]> {
     })
     .filter((model, index, list) => Boolean(model) && list.indexOf(model) === index);
 }
+
+export const fetchOpenAiModels = fetchLocalModels;

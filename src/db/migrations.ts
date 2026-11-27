@@ -1,6 +1,6 @@
 import type Database from "@tauri-apps/plugin-sql";
 
-const CURRENT_SCHEMA_VERSION = 13;
+const CURRENT_SCHEMA_VERSION = 14;
 
 export async function runMigrations(db: Database): Promise<void> {
   await db.execute("PRAGMA journal_mode = WAL;");
@@ -348,6 +348,25 @@ export async function runMigrations(db: Database): Promise<void> {
         "ALTER TABLE curriculum_tree_nodes ADD COLUMN pos_y REAL NOT NULL DEFAULT 0;"
       );
     }
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS calendar_events (
+        id TEXT PRIMARY KEY NOT NULL,
+        title TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        description TEXT,
+        due_date TEXT NOT NULL,
+        due_time TEXT,
+        is_completed INTEGER NOT NULL DEFAULT 0,
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
+        quiz_node_id TEXT REFERENCES node_quizzes(node_id) ON DELETE SET NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    await db.execute(
+      "CREATE INDEX IF NOT EXISTS idx_calendar_events_due_date ON calendar_events(due_date, due_time);"
+    );
 
     await db.execute(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION};`);
   } catch (err) {

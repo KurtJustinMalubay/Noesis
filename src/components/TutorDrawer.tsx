@@ -11,10 +11,13 @@ import {
 import {
   BookOpen,
   Bot,
+  CalendarDays,
   Check,
   ChevronLeft,
   History,
   LoaderCircle,
+  Mic,
+  MicOff,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -22,13 +25,22 @@ import {
   Send,
   Square,
   Trash2,
+  Volume2,
+  VolumeX,
   X,
 } from "lucide-react";
+import {
+  speakWithAppVoice,
+  startDictation,
+  stopSpeaking,
+} from "../utils/speech";
 import {
   askGroundedTutor,
   summarizeTutorThread,
 } from "../ai/curriculumService";
+import { generateCalendarStudyPlan } from "../ai/calendarPlanService";
 import { AnimatedPresence } from "./AnimatedPresence";
+import { DrawerChevronIcon } from "./DrawerChevronIcon";
 import {
   clearTutorThreadMessages,
   countTutorThreadMessages,
@@ -50,12 +62,23 @@ import type { GraphNode } from "../types/domain";
 import { RichContent } from "./ui/RichContent";
 import type { TutorPayload } from "../ai/tokenOptimizer";
 import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
+import { parseStudyPlanResponse } from "../calendar/studyPlan";
+import type { CalendarEventInput } from "../calendar/types";
+import { bulkCreateCalendarEvents } from "../db/repositories/calendarRepo";
 
 interface TutorDrawerProps {
   isOpen: boolean;
   activeLesson: GraphNode | null;
   activeNodeTitle?: string;
+  dashboardContext?: string | null;
+  userProfile?: { name?: string; focus?: string } | null;
   workspaceId: string | null;
+  studyCalendarEnabled?: boolean;
+  calendarWorkspaces?: {
+    id: string;
+    title: string;
+    unmasteredCount: number;
+  }[];
   onPanelReady: () => void;
   onClose: () => void;
   onToast: (message: string | null) => void;
@@ -83,6 +106,120 @@ interface TutorChatSettings {
   interactionStyle: "tutor" | "assistant";
   askFollowUpQuestions: boolean;
   preferConciseReplies: boolean;
+}
+
+interface StudyPlanEdit {
+  title?: string;
+  dueDate?: string;
+}
+
+interface StudyPlanPreviewState {
+  summary: string;
+  baseEvents: CalendarEventInput[];
+  events: CalendarEventInput[];
+  selectedIndexes: number[];
+  edits: StudyPlanEdit[];
+  addedCount: number | null;
+}
+
+const STUDY_PLAN_MARKER = "\n<!--noesis-study-plan:v1:";
+
+function visibleTutorContent(content: string): string {
+  const markerIndex = content.lastIndexOf(STUDY_PLAN_MARKER);
+  return markerIndex < 0 ? content : content.slice(0, markerIndex).trimEnd();
+}
+
+function serializeStudyPlanContent(state: StudyPlanPreviewState): string {
+  const persisted = {
+    summary: state.summary,
+    events: state.baseEvents,
+    selectedIndexes: state.selectedIndexes,
+    edits: state.edits,
+    addedCount: state.addedCount,
+  };
+  return `${state.summary}${STUDY_PLAN_MARKER}${encodeURIComponent(
+    JSON.stringify(persisted)
+  )}-->`;
+}
+
+function readStudyPlanPreview(
+  content: string,
+  workspaceIds: readonly string[]
+): StudyPlanPreviewState | null {
+  const markerIndex = content.lastIndexOf(STUDY_PLAN_MARKER);
+  if (markerIndex < 0 || !content.endsWith("-->")) return null;
+
+  try {
+    const encoded = content.slice(
+      markerIndex + STUDY_PLAN_MARKER.length,
+      -3
+    );
+    const stored: unknown = JSON.parse(decodeURIComponent(encoded));
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
+      return null;
+    }
+    const value = stored as Record<string, unknown>;
+    if (
+      typeof value.summary !== "string" ||
+      !Array.isArray(value.events) ||
+      !Array.isArray(value.selectedIndexes) ||
+      !Array.isArray(value.edits) ||
+      (value.addedCount !== null &&
+        (!Number.isInteger(value.addedCount) ||
+          Number(value.addedCount) < 1 ||
+          Number(value.addedCount) > value.events.length))
+    ) {
+      return null;
+    }
+
+    const parsed = parseStudyPlanResponse(
+      JSON.stringify({ summary: value.summary, events: value.events }),
+      { workspaceIds }
+    );
+    const storedEdits = value.edits as unknown[];
+    const edits = parsed.events.map((_, index): StudyPlanEdit => {
+      const edit = storedEdits[index];
+      if (!edit || typeof edit !== "object" || Array.isArray(edit)) return {};
+      const record = edit as Record<string, unknown>;
+      return {
+        ...(typeof record.title === "string" ? { title: record.title } : {}),
+        ...(typeof record.dueDate === "string"
+          ? { dueDate: record.dueDate }
+          : {}),
+      };
+    });
+    const events = parsed.events.map((event, index) => ({
+      ...event,
+      ...edits[index],
+    }));
+
+    return {
+      summary: parsed.summary,
+      baseEvents: parsed.events,
+      events,
+      selectedIndexes: [
+        ...new Set(
+          value.selectedIndexes.filter(
+            (index): index is number =>
+              Number.isInteger(index) && index >= 0 && index < events.length
+          )
+        ),
+      ],
+      edits,
+      addedCount:
+        typeof value.addedCount === "number" ? value.addedCount : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function localIsoDate(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(
+    2,
+    "0"
+  )}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
 const TUTOR_SETTINGS_KEY = "noesis.tutor-chat-settings.v1";
@@ -160,13 +297,37 @@ function errorMessage(error: unknown): string {
 const TutorMessageBubble = memo(function TutorMessageBubble({
   message,
   isActiveStream,
+  isSpeaking,
+  studyCalendarEnabled,
+  studyPlanWorkspaceIds,
+  isAddingStudyPlan,
+  onToggleSpeak,
+  onUpdateStudyPlan,
+  onAddStudyPlan,
 }: {
   message: TutorMessage;
   isActiveStream: boolean;
+  isSpeaking: boolean;
+  studyCalendarEnabled: boolean;
+  studyPlanWorkspaceIds: readonly string[];
+  isAddingStudyPlan: boolean;
+  onToggleSpeak: (message: TutorMessage) => void;
+  onUpdateStudyPlan: (
+    message: TutorMessage,
+    state: StudyPlanPreviewState
+  ) => void;
+  onAddStudyPlan: (
+    message: TutorMessage,
+    state: StudyPlanPreviewState
+  ) => void;
 }) {
+  const plan =
+    studyCalendarEnabled && message.role === "assistant"
+      ? readStudyPlanPreview(message.content, studyPlanWorkspaceIds)
+      : null;
   return (
     <div
-      className={`mb-3 rounded-xl p-3 text-xs ${
+      className={`mb-3 min-w-0 max-w-full rounded-xl p-3 text-xs break-words [overflow-wrap:anywhere] ${
         message.role === "user"
           ? "ml-6 bg-[var(--color-accent-soft)] text-[var(--color-ink)]"
           : "mr-4 border border-[var(--color-border)] bg-[var(--color-panel)] text-[var(--color-ink)] shadow-[0_2px_8px_rgba(35,51,60,0.04)]"
@@ -178,29 +339,156 @@ const TutorMessageBubble = memo(function TutorMessageBubble({
           {message.attached_lesson_title}
         </p>
       )}
-      <div className="prose lesson-prose prose-xs max-w-none select-text">
+      <div className="prose lesson-prose prose-xs max-w-none break-words [overflow-wrap:anywhere] select-text">
         {message.content ? (
-          <RichContent>{message.content}</RichContent>
+          <RichContent>{visibleTutorContent(message.content)}</RichContent>
         ) : message.role === "assistant" && isActiveStream ? (
           <span
-            className="inline-flex items-center gap-1 py-1 text-[var(--color-muted)]"
+            className="inline-flex items-center gap-1 py-1 text-[11px] text-[var(--color-muted)]"
             aria-label="Tutor is responding"
           >
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:120ms]" />
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:240ms]" />
+            <span className="h-1.5 w-1.5 rounded-full bg-current opacity-85" />
+            <span className="h-1.5 w-1.5 rounded-full bg-current opacity-55" />
+            <span className="h-1.5 w-1.5 rounded-full bg-current opacity-30" />
           </span>
         ) : null}
         {message.role === "assistant" &&
           isActiveStream &&
           message.content && (
-            <span className="ml-1 inline-block h-3 w-1 animate-pulse bg-[var(--color-accent)] align-middle" />
+            <span className="ml-1 inline-block h-3 w-1 bg-[var(--color-accent)] opacity-75 align-middle" />
           )}
       </div>
+      {plan && (
+        <section
+          aria-label="Study calendar preview"
+          className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel-subtle)] p-3"
+        >
+          <h4 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-ink)]">
+            <CalendarDays className="h-3.5 w-3.5 text-[var(--color-accent)]" />
+            Study calendar plan
+          </h4>
+          <div className="space-y-2">
+            {plan.events.map((planEvent, index) => {
+              const isSelected = plan.selectedIndexes.includes(index);
+              return (
+                <div
+                  key={`${message.id}-plan-${index}`}
+                  className="flex items-start gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-panel)] p-2"
+                >
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    disabled={plan.addedCount !== null || isAddingStudyPlan}
+                    onChange={(event) =>
+                      onUpdateStudyPlan(message, {
+                        ...plan,
+                        selectedIndexes: event.target.checked
+                          ? [...plan.selectedIndexes, index]
+                          : plan.selectedIndexes.filter(
+                              (selectedIndex) => selectedIndex !== index
+                            ),
+                      })
+                    }
+                    aria-label={`Select ${planEvent.title}`}
+                    className="mt-1 accent-[var(--color-accent)]"
+                  />
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <input
+                      type="text"
+                      value={planEvent.title}
+                      maxLength={160}
+                      disabled={plan.addedCount !== null || isAddingStudyPlan}
+                      onChange={(event) => {
+                        const edits = [...plan.edits];
+                        edits[index] = {
+                          ...edits[index],
+                          title: event.target.value,
+                        };
+                        onUpdateStudyPlan(message, {
+                          ...plan,
+                          events: plan.events.map((item, eventIndex) =>
+                            eventIndex === index
+                              ? { ...item, title: event.target.value }
+                              : item
+                          ),
+                          edits,
+                        });
+                      }}
+                      aria-label={`Event ${index + 1} title`}
+                      className="w-full rounded border border-[var(--color-border)] bg-[var(--color-panel)] px-2 py-1 text-[11px] font-medium text-[var(--color-ink)] disabled:opacity-70"
+                    />
+                    <input
+                      type="date"
+                      value={planEvent.dueDate}
+                      disabled={plan.addedCount !== null || isAddingStudyPlan}
+                      onChange={(event) => {
+                        const edits = [...plan.edits];
+                        edits[index] = {
+                          ...edits[index],
+                          dueDate: event.target.value,
+                        };
+                        onUpdateStudyPlan(message, {
+                          ...plan,
+                          events: plan.events.map((item, eventIndex) =>
+                            eventIndex === index
+                              ? { ...item, dueDate: event.target.value }
+                              : item
+                          ),
+                          edits,
+                        });
+                      }}
+                      aria-label={`Event ${index + 1} date`}
+                      className="rounded border border-[var(--color-border)] bg-[var(--color-panel)] px-2 py-1 text-[10px] text-[var(--color-ink)] disabled:opacity-70"
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {plan.addedCount !== null ? (
+            <p className="mt-2 text-[10px] font-semibold text-[var(--color-accent)]" role="status">
+              Added {plan.addedCount} {plan.addedCount === 1 ? "event" : "events"}
+            </p>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onAddStudyPlan(message, plan)}
+              disabled={!plan.selectedIndexes.length || isAddingStudyPlan}
+              className="mt-2 rounded-md bg-[var(--color-accent-button)] px-3 py-1.5 text-[10px] font-semibold text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isAddingStudyPlan
+                ? "Adding…"
+                : "Add Selected to Calendar"}
+            </button>
+          )}
+        </section>
+      )}
       {message.citations.length > 0 && (
         <p className="mt-2 border-t border-[var(--color-border)] pt-1.5 text-[10px] text-[var(--color-accent)]">
           Sources: {message.citations.join(", ")}
         </p>
+      )}
+      {message.role === "assistant" && !isActiveStream && message.content && (
+        <div className="mt-1.5 flex justify-end">
+          <button
+            type="button"
+            onClick={() => onToggleSpeak(message)}
+            aria-label={isSpeaking ? "Stop reading message" : "Read message aloud"}
+            title={isSpeaking ? "Stop reading" : "Read aloud"}
+            className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium transition ${
+              isSpeaking
+                ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                : "text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            }`}
+          >
+            {isSpeaking ? (
+              <VolumeX className="h-3 w-3" />
+            ) : (
+              <Volume2 className="h-3 w-3" />
+            )}
+            <span>{isSpeaking ? "Stop" : "Listen"}</span>
+          </button>
+        </div>
       )}
     </div>
   );
@@ -210,7 +498,11 @@ export function TutorDrawer({
   isOpen,
   activeLesson,
   activeNodeTitle,
+  dashboardContext,
+  userProfile,
   workspaceId,
+  studyCalendarEnabled = false,
+  calendarWorkspaces = [],
   onPanelReady,
   onClose,
   onToast,
@@ -241,6 +533,14 @@ export function TutorDrawer({
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(
+    null
+  );
+  const [addingStudyPlanMessageId, setAddingStudyPlanMessageId] = useState<
+    string | null
+  >(null);
+  const [isListening, setIsListening] = useState(false);
+  const stopDictationRef = useRef<(() => void) | null>(null);
   const [chatSettings, setChatSettings] = useState(loadTutorChatSettings);
   const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -280,6 +580,10 @@ export function TutorDrawer({
   const isSending = Boolean(
     activeThreadId && sendingThreadId === activeThreadId
   );
+  const isPlanAutocompleteOpen =
+    studyCalendarEnabled &&
+    /^\/[a-z]*$/i.test(input.trim()) &&
+    "/plan".startsWith(input.trim().toLowerCase());
 
   const updateChatSettings = (settings: TutorChatSettings) => {
     setChatSettings(settings);
@@ -305,31 +609,159 @@ export function TutorDrawer({
       setIsActionsMenuOpen(false);
       setIsHistoryOpen(false);
       setIsSettingsOpen(false);
+      stopSpeaking();
+      setSpeakingMessageId(null);
+      stopDictationRef.current?.();
+      stopDictationRef.current = null;
+      setIsListening(false);
     }
   }, [isOpen]);
 
   useEffect(() => {
-    if (!isOpen || (!isActionsMenuOpen && !isSettingsOpen && !isHistoryOpen)) {
+    return () => {
+      stopSpeaking();
+      stopDictationRef.current?.();
+    };
+  }, []);
+
+  const toggleSpeakMessage = useCallback(
+    (message: TutorMessage) => {
+      if (speakingMessageId === message.id) {
+        stopSpeaking();
+        setSpeakingMessageId(null);
+        return;
+      }
+      speakWithAppVoice(visibleTutorContent(message.content), {
+        onStart: () => setSpeakingMessageId(message.id),
+        onEnd: () =>
+          setSpeakingMessageId((current) =>
+            current === message.id ? null : current
+          ),
+        onError: (msg) => {
+          setSpeakingMessageId(null);
+          onToast(msg);
+        },
+      });
+    },
+    [onToast, speakingMessageId]
+  );
+
+  const studyPlanWorkspaceIds = calendarWorkspaces.map(
+    (workspace) => workspace.id
+  );
+
+  const updateStudyPlanPreview = useCallback(
+    async (message: TutorMessage, state: StudyPlanPreviewState) => {
+      const content = serializeStudyPlanContent(state);
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === message.id ? { ...item, content, citations: [] } : item
+        )
+      );
+      try {
+        await updateTutorMessage(message.id, content);
+      } catch (error) {
+        onToast(`Unable to save study plan preview: ${errorMessage(error)}`);
+      }
+    },
+    [onToast]
+  );
+
+  const addSelectedStudyPlanEvents = useCallback(
+    async (message: TutorMessage, state: StudyPlanPreviewState) => {
+      if (state.addedCount !== null || !state.selectedIndexes.length) return;
+      const events = state.selectedIndexes.map((index) => state.events[index]);
+      try {
+        const validated = parseStudyPlanResponse(
+          JSON.stringify({ summary: state.summary, events }),
+          { workspaceIds: studyPlanWorkspaceIds }
+        );
+        setAddingStudyPlanMessageId(message.id);
+        await bulkCreateCalendarEvents(validated.events);
+        const updatedState = {
+          ...state,
+          addedCount: validated.events.length,
+        };
+        const content = serializeStudyPlanContent(updatedState);
+        try {
+          await updateTutorMessage(message.id, content);
+        } catch (error) {
+          onToast(
+            `Events were added, but the preview could not be saved: ${errorMessage(error)}`
+          );
+        }
+        setMessages((current) =>
+          current.map((item) =>
+            item.id === message.id ? { ...item, content, citations: [] } : item
+          )
+        );
+      } catch (error) {
+        onToast(`Unable to add study plan events: ${errorMessage(error)}`);
+      } finally {
+        setAddingStudyPlanMessageId(null);
+      }
+    },
+    [onToast, studyPlanWorkspaceIds]
+  );
+
+  const toggleDictation = useCallback(() => {
+    if (isListening) {
+      stopDictationRef.current?.();
+      stopDictationRef.current = null;
+      setIsListening(false);
+      return;
+    }
+    setIsListening(true);
+    stopDictationRef.current = startDictation({
+      onFinalTranscript: (transcript) => {
+        if (!transcript) return;
+        setInput((current) =>
+          current.trim() ? `${current.trimEnd()} ${transcript}` : transcript
+        );
+      },
+      onEnd: () => {
+        stopDictationRef.current = null;
+        setIsListening(false);
+      },
+      onError: (msg) => {
+        stopDictationRef.current = null;
+        setIsListening(false);
+        onToast(msg);
+      },
+    });
+  }, [isListening, onToast]);
+
+  useEffect(() => {
+    if (!isOpen) {
       return;
     }
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      if (document.querySelector('[aria-modal="true"]')) return;
+      if (
+        document.querySelector(
+          '[aria-modal="true"], [data-confirm-delete], [data-exit-confirmation]'
+        )
+      ) {
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
       if (isSettingsOpen) {
         setIsSettingsOpen(false);
         setIsActionsMenuOpen(true);
       } else if (isHistoryOpen) {
         setIsHistoryOpen(false);
         setIsActionsMenuOpen(true);
-      } else {
+      } else if (isActionsMenuOpen) {
         setIsActionsMenuOpen(false);
+      } else {
+        onClose();
       }
     };
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
-  }, [isActionsMenuOpen, isHistoryOpen, isOpen, isSettingsOpen]);
+  }, [isActionsMenuOpen, isHistoryOpen, isOpen, isSettingsOpen, onClose]);
 
   useEffect(() => {
     if (!isOpen || (!isActionsMenuOpen && !isSettingsOpen && !isHistoryOpen)) {
@@ -586,6 +1018,10 @@ export function TutorDrawer({
   const handleSend = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const prompt = input.trim();
+    const studyPlanMatch = studyCalendarEnabled
+      ? prompt.match(/^\/plan(?:\s+([\s\S]*))?$/i)
+      : null;
+    const studyPlanRequest = studyPlanMatch?.[1]?.trim() ?? "";
     if (
       !prompt ||
       isLoadingThread ||
@@ -599,7 +1035,7 @@ export function TutorDrawer({
       .slice(-6)
       .map((message) => ({
         role: message.role,
-        content: message.content,
+        content: visibleTutorContent(message.content),
         attached_lesson_title: message.attached_lesson_title,
       }));
     let threadId = activeThreadIdRef.current;
@@ -697,40 +1133,69 @@ export function TutorDrawer({
     };
 
     try {
-      const { reply, citations } = await askGroundedTutor(
-        prompt,
-        activeNodeTitle,
-        workspaceId ?? undefined,
-        {
+      let reply: string;
+      let citations: string[];
+      if (studyPlanMatch && !studyPlanRequest) {
+        reply = "What would you like the study calendar plan to cover?";
+        citations = [];
+      } else if (studyPlanMatch) {
+        const parsedPlan = await generateCalendarStudyPlan({
+          request: studyPlanRequest,
+          today: localIsoDate(),
+          workspaces: calendarWorkspaces,
           signal: controller.signal,
-          lessonContext: attachedLesson,
-          interactionStyle: chatSettings.interactionStyle,
-          rollingSummary: threads.find((thread) => thread.id === threadId)
-            ?.rolling_summary,
-          history: conversationHistory,
-          askFollowUpQuestions: chatSettings.askFollowUpQuestions,
-          preferConciseReplies: chatSettings.preferConciseReplies,
-          onPayload: setPayloadMetrics,
-          onChunk: (chunk) => {
-            streamedChunks.push(chunk);
-            if (updateFrame === null) {
-              updateFrame = requestAnimationFrame(() => {
-                updateFrame = null;
-                const content = streamedChunks.join("");
-                if (activeThreadIdRef.current === threadId) {
-                  setMessages((current) =>
-                    current.map((message) =>
-                      message.id === assistantMessageId
-                        ? { ...message, content }
-                        : message
-                    )
-                  );
-                }
-              });
-            }
-          },
-        }
-      );
+        });
+        reply = serializeStudyPlanContent({
+          summary: parsedPlan.summary,
+          baseEvents: parsedPlan.events,
+          events: parsedPlan.events,
+          selectedIndexes: parsedPlan.events.map((_, index) => index),
+          edits: [],
+          addedCount: null,
+        });
+        citations = [];
+      } else {
+        const response = await askGroundedTutor(
+          prompt,
+          activeNodeTitle,
+          workspaceId ?? undefined,
+          {
+            signal: controller.signal,
+            lessonContext: attachedLesson,
+            dashboardContext: attachedLesson ? null : dashboardContext,
+            userProfile,
+            interactionStyle: chatSettings.interactionStyle,
+            rollingSummary: threads.find((thread) => thread.id === threadId)
+              ?.rolling_summary,
+            history: conversationHistory,
+            askFollowUpQuestions: chatSettings.askFollowUpQuestions,
+            preferConciseReplies: chatSettings.preferConciseReplies,
+            onPayload: setPayloadMetrics,
+            onChunk: studyPlanMatch
+              ? undefined
+              : (chunk) => {
+                  streamedChunks.push(chunk);
+                  if (updateFrame === null) {
+                    updateFrame = requestAnimationFrame(() => {
+                      updateFrame = null;
+                      const content = streamedChunks.join("");
+                      if (activeThreadIdRef.current === threadId) {
+                        setMessages((current) =>
+                          current.map((message) =>
+                            message.id === assistantMessageId
+                              ? { ...message, content }
+                              : message
+                          )
+                        );
+                      }
+                    });
+                  }
+                },
+          }
+        );
+        reply = response.reply;
+        citations = response.citations;
+      }
       cancelPendingUpdate();
       await updateTutorMessage(assistantMessageId, reply, citations);
       if (activeThreadIdRef.current === threadId) {
@@ -1046,11 +1511,14 @@ export function TutorDrawer({
           <button
             type="button"
             onClick={onClose}
-            className="grid h-9 w-9 place-items-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] focus-visible:outline-2 focus-visible:outline-[var(--color-focus-ring)]"
+            className="group/close grid h-9 w-9 place-items-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] focus-visible:outline-2 focus-visible:outline-[var(--color-focus-ring)]"
             aria-label="Close tutor panel"
-            title="Close tutor"
+            title="Collapse tutor"
           >
-            <X className="h-4 w-4" />
+            <DrawerChevronIcon
+              direction="right"
+              className="h-4 w-4 motion-safe:transition-transform motion-safe:duration-150 group-hover/close:translate-x-0.5"
+            />
           </button>
         </div>
 
@@ -1373,6 +1841,17 @@ export function TutorDrawer({
               isActiveStream={
                 isSending && index === messages.length - 1
               }
+              isSpeaking={speakingMessageId === message.id}
+              studyCalendarEnabled={studyCalendarEnabled}
+              studyPlanWorkspaceIds={studyPlanWorkspaceIds}
+              isAddingStudyPlan={addingStudyPlanMessageId === message.id}
+              onToggleSpeak={toggleSpeakMessage}
+              onUpdateStudyPlan={(planMessage, state) =>
+                void updateStudyPlanPreview(planMessage, state)
+              }
+              onAddStudyPlan={(planMessage, state) =>
+                void addSelectedStudyPlanEvents(planMessage, state)
+              }
             />
           ))
         )}
@@ -1424,6 +1903,24 @@ export function TutorDrawer({
             </span>
           )}
         </div>
+        {isPlanAutocompleteOpen && (
+          <div className="mb-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] p-1 shadow-sm">
+            <button
+              type="button"
+              onClick={() => {
+                setInput("/plan ");
+                composerRef.current?.focus();
+              }}
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] text-[var(--color-ink)] transition hover:bg-[var(--color-hover)]"
+            >
+              <CalendarDays className="h-3.5 w-3.5 text-[var(--color-accent)]" />
+              <span className="font-semibold">/plan</span>
+              <span className="text-[var(--color-muted)]">
+                Create a study calendar plan
+              </span>
+            </button>
+          </div>
+        )}
         <form onSubmit={(event) => void handleSend(event)} className="flex items-end gap-2">
           <textarea
             ref={composerRef}
@@ -1431,6 +1928,16 @@ export function TutorDrawer({
             value={input}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {
+              if (
+                isPlanAutocompleteOpen &&
+                (event.key === "ArrowDown" || event.key === "Enter") &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing
+              ) {
+                event.preventDefault();
+                setInput("/plan ");
+                return;
+              }
               if (
                 event.key === "Enter" &&
                 !event.shiftKey &&
@@ -1453,6 +1960,25 @@ export function TutorDrawer({
             }
             className="min-h-[40px] max-h-[124px] min-w-0 flex-1 resize-none select-text rounded-lg border border-[var(--color-border)] bg-[var(--color-panel-subtle)] px-3 py-2.5 text-xs leading-5 text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:border-[var(--color-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent-soft)] disabled:opacity-60"
           />
+          <button
+            type="button"
+            onClick={toggleDictation}
+            disabled={isLoadingThread || isSending}
+            aria-pressed={isListening}
+            aria-label={isListening ? "Stop voice input" : "Start voice input"}
+            title={isListening ? "Stop microphone" : "Speak to tutor"}
+            className={`rounded-lg border p-2.5 transition disabled:opacity-50 ${
+              isListening
+                ? "border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                : "border-[var(--color-border)] bg-[var(--color-panel-subtle)] text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
+            }`}
+          >
+            {isListening ? (
+              <MicOff className="h-4 w-4" />
+            ) : (
+              <Mic className="h-4 w-4" />
+            )}
+          </button>
           {isSending ? (
             <button
               type="button"

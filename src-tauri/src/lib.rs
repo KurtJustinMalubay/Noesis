@@ -6,9 +6,11 @@ use std::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, SqlitePool, Transaction};
-use tauri::{ipc::Channel, AppHandle, Manager};
+use tauri::{AppHandle, Manager, ipc::Channel};
 use tauri_plugin_sql::{DbInstances, DbPool};
 
+mod calendar;
+mod kokoro;
 mod store_distribution;
 
 const LOCAL_AI_TIMEOUT: Duration = Duration::from_secs(300);
@@ -91,7 +93,7 @@ struct CurriculumTreeEdgeRecord {
     target_id: String,
 }
 
-async fn get_sqlite_pool(app: &AppHandle) -> Result<SqlitePool, String> {
+pub(crate) async fn get_sqlite_pool(app: &AppHandle) -> Result<SqlitePool, String> {
     let instances = app.state::<DbInstances>();
     let databases = instances.0.read().await;
     match databases.get("sqlite:noesis.db") {
@@ -903,7 +905,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_sql::Builder::new().build())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init());
 
     #[cfg(desktop)]
     {
@@ -915,6 +918,13 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             greet,
+            calendar::get_calendar_events,
+            calendar::upsert_calendar_event,
+            calendar::bulk_create_calendar_events,
+            calendar::toggle_calendar_event,
+            calendar::delete_calendar_event,
+            calendar::toggle_mini_agenda_window,
+            calendar::close_mini_agenda_window,
             save_generated_workspace,
             delete_generated_workspace,
             create_curriculum_tree,
@@ -923,7 +933,13 @@ pub fn run() {
             restore_curriculum_tree_graph,
             local_ai_request,
             local_ai_stream,
-            store_distribution::is_microsoft_store_install
+            store_distribution::is_microsoft_store_install,
+            kokoro::kokoro_model_status,
+            kokoro::kokoro_download_model,
+            kokoro::kokoro_delete_models,
+            kokoro::kokoro_speak,
+            kokoro::kokoro_stop,
+            kokoro::kokoro_warmup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-const DEFAULT_EXIT_DURATION = 320;
+const DEFAULT_EXIT_DURATION = 160;
 
 export function useDelayedUnmount(
   present: boolean,
@@ -54,6 +54,7 @@ interface AnimatedPresenceProps {
   motion: "modal" | "side-panel" | "toast" | "popover";
   className?: string;
   exitDuration?: number;
+  onBackdropClick?: () => void;
   children: ReactNode;
 }
 
@@ -62,6 +63,7 @@ export function AnimatedPresence({
   motion,
   className,
   exitDuration,
+  onBackdropClick,
   children,
 }: AnimatedPresenceProps) {
   const { mounted, visible } = useDelayedUnmount(present, exitDuration);
@@ -80,6 +82,15 @@ export function AnimatedPresence({
       data-presence={visible ? "visible" : "hidden"}
       aria-hidden={!present}
       inert={!present}
+      onClick={
+        onBackdropClick
+          ? (event) => {
+              if (event.target === event.currentTarget) {
+                onBackdropClick();
+              }
+            }
+          : undefined
+      }
     >
       {present ? children : retainedChildren.current}
     </div>

@@ -7,13 +7,10 @@ import {
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  Archive,
   FileUp,
   GitBranch,
   LoaderCircle,
-  Pencil,
   Sparkles,
-  Trash2,
 } from "lucide-react";
 import type {
   CanvasLayoutMode,
@@ -29,18 +26,14 @@ import { generateCurriculumTreeDraft } from "../ai/curriculumService";
 import { ingestLocalFilePath } from "../vault/ingestService";
 import {
   addCurriculumTreeNode,
-  archiveCurriculumTree,
   connectCurriculumTreeNodes,
   createCurriculumTree,
-  deleteCurriculumTree,
-  deleteCurriculumTreeAndLinkedWorkspaces,
   deleteCurriculumTreeNode,
   disconnectCurriculumTreeNodes,
   getCurriculumTreeGraph,
   linkCurriculumTreeWorkspace,
   listArchivedCurriculumTrees,
   listCurriculumTrees,
-  renameCurriculumTree,
   restoreCurriculumTreeGraph,
   updateCurriculumTreeLayoutMode,
   updateCurriculumTreeNode,
@@ -53,7 +46,6 @@ import { validateAndLayerDag } from "../engine/dagTopology";
 import type { UserPreferences } from "../ai/keyStore";
 import { summarizeCurriculumProgress } from "../utils/curriculumProgress";
 import { DagCanvas } from "./DagCanvas";
-import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
 
 interface CurriculumTreeDagViewProps {
   workspaces: Workspace[];
@@ -114,7 +106,6 @@ export function CurriculumTreeDagView({
   nodeDensity,
   onProgressChange,
   onSelectWorkspace,
-  onDeletedWorkspaces,
   onCreateWorkspaceForNode,
   onToast,
 }: CurriculumTreeDagViewProps) {
@@ -128,16 +119,9 @@ export function CurriculumTreeDagView({
   const [treePrompt, setTreePrompt] = useState("");
   const [sourceDocument, setSourceDocument] =
     useState<CurriculumSourceDocument | null>(null);
-  const [isRenaming, setIsRenaming] = useState(false);
-  const [treeTitleDraft, setTreeTitleDraft] = useState("");
   const [workspaceToLink, setWorkspaceToLink] = useState("");
   const [undoStack, setUndoStack] = useState<CurriculumGraphSnapshot[]>([]);
   const [redoStack, setRedoStack] = useState<CurriculumGraphSnapshot[]>([]);
-  const [treeActionTarget, setTreeActionTarget] = useState<{
-    tree: CurriculumTree;
-    action: "archive" | "delete";
-  } | null>(null);
-  const [deleteLinkedWorkspaces, setDeleteLinkedWorkspaces] = useState(false);
 
   const selectedTree =
     trees.find((tree) => tree.id === selectedTreeId) ?? null;
@@ -208,28 +192,11 @@ export function CurriculumTreeDagView({
       : baseNodes;
   }, [edges, graphEdges, nodes, selectedTree]);
 
-  const refreshTrees = async (preferredTreeId?: string | null) => {
-    const [nextTrees, nextArchivedTrees] = await Promise.all([
-      listCurriculumTrees(),
-      listArchivedCurriculumTrees(),
-    ]);
-    onTreesChange(nextTrees);
-    onArchivedTreesChange(nextArchivedTrees);
-    const nextId =
-      preferredTreeId && nextTrees.some((tree) => tree.id === preferredTreeId)
-        ? preferredTreeId
-        : selectedTreeId && nextTrees.some((tree) => tree.id === selectedTreeId)
-          ? selectedTreeId
-          : nextTrees[0]?.id ?? null;
-    onSelectTree(nextId);
-  };
-
   const refreshGraph = async (treeId: string) => {
     const graph = await getCurriculumTreeGraph(treeId);
     if (!graph) throw new Error("This curriculum map no longer exists.");
     setNodes(graph.nodes);
     setEdges(graph.edges);
-    setTreeTitleDraft(graph.tree.title);
     onTreesChange((current) =>
       current.map((tree) => (tree.id === treeId ? graph.tree : tree))
     );
@@ -275,7 +242,6 @@ export function CurriculumTreeDagView({
         if (!graph) throw new Error("This curriculum map no longer exists.");
         setNodes(graph.nodes);
         setEdges(graph.edges);
-        setTreeTitleDraft(graph.tree.title);
         onTreesChange((current) =>
           current.map((tree) =>
             tree.id === selectedTreeId ? graph.tree : tree
@@ -358,7 +324,6 @@ export function CurriculumTreeDagView({
       onSelectTree(tree.id);
       setNodes(treeNodes);
       setEdges(treeEdges);
-      setTreeTitleDraft(tree.title);
       onSetCreatingTree(false);
       setTreePrompt("");
       setSourceDocument(null);
@@ -389,74 +354,6 @@ export function CurriculumTreeDagView({
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  };
-
-  const saveTreeTitle = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!selectedTree || !treeTitleDraft.trim() || isSaving) return;
-    setIsSaving(true);
-    setError(null);
-    try {
-      await renameCurriculumTree(selectedTree.id, treeTitleDraft);
-      onTreesChange((current) =>
-        current.map((tree) =>
-          tree.id === selectedTree.id
-            ? {
-                ...tree,
-                title: treeTitleDraft.trim(),
-                updated_at: Date.now(),
-              }
-            : tree
-        )
-      );
-      setIsRenaming(false);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const confirmTreeAction = async () => {
-    if (!treeActionTarget || isSaving) return;
-    const { tree, action } = treeActionTarget;
-    setIsSaving(true);
-    setError(null);
-    try {
-      if (action === "archive") {
-        await archiveCurriculumTree(tree.id);
-        await refreshTrees(null);
-        onToast(`Moved "${tree.title}" to Archive. Linked workspaces were kept.`);
-        return;
-      }
-      if (deleteLinkedWorkspaces) {
-        const deletedWorkspaceIds =
-          await deleteCurriculumTreeAndLinkedWorkspaces(tree.id);
-        await refreshTrees(null);
-        try {
-          await onDeletedWorkspaces(deletedWorkspaceIds);
-        } catch (cause) {
-          onToast(
-            `Deleted "${tree.title}" and its linked workspace data, but the workspace view could not refresh: ${
-              cause instanceof Error ? cause.message : String(cause)
-            }`
-          );
-          return;
-        }
-        onToast(
-          `Deleted "${tree.title}" and ${deletedWorkspaceIds.length} linked workspace${deletedWorkspaceIds.length === 1 ? "" : "s"} with their study data.`
-        );
-        return;
-      }
-      await deleteCurriculumTree(tree.id);
-      await refreshTrees(null);
-      onToast(`Deleted "${tree.title}". Linked workspaces were kept.`);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-      throw cause;
-    } finally {
-      setIsSaving(false);
     }
   };
 
@@ -761,7 +658,7 @@ export function CurriculumTreeDagView({
               <GitBranch className="h-9 w-9 text-[var(--color-muted)]" />
               <h3 className="mt-3 text-base font-semibold">No curriculum maps yet</h3>
               <p className="mt-1 max-w-md text-xs leading-5 text-[var(--color-muted)]">
-                Create a DAG workspace for a semester, year, or full program. Add subjects, connect prerequisites, and link each subject to its own workspace.
+                Create a curriculum map for a semester, year, or full program. Add subjects, connect prerequisites, and link each subject to its own workspace.
               </p>
               <button
                 type="button"
@@ -774,73 +671,6 @@ export function CurriculumTreeDagView({
             </div>
           ) : (
             <div className="relative min-h-0 flex-1 overflow-hidden">
-              <div
-                data-canvas-toolbar
-                className="absolute left-4 top-14 z-20 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)]/95 px-3 py-2 shadow-[0_5px_18px_rgba(35,51,60,0.12)] backdrop-blur sm:top-4"
-              >
-                {isRenaming ? (
-                  <form
-                    onSubmit={(event) => void saveTreeTitle(event)}
-                    className="flex min-w-0 items-center gap-2"
-                  >
-                    <input
-                      autoFocus
-                      value={treeTitleDraft}
-                      onChange={(event) => setTreeTitleDraft(event.target.value)}
-                      maxLength={120}
-                      aria-label="Curriculum map title"
-                      className="min-w-0 max-w-48 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-2.5 py-1.5 text-xs font-semibold"
-                    />
-                    <button
-                      type="submit"
-                      disabled={isSaving}
-                      className="rounded-lg bg-[var(--color-accent-button)] px-2.5 py-1.5 text-[10px] font-semibold text-[var(--color-accent-foreground)] disabled:opacity-50"
-                    >
-                      Save
-                    </button>
-                  </form>
-                ) : (
-                  <>
-                    <span className="max-w-48 truncate text-[11px] font-semibold text-[var(--color-ink)]">
-                      {selectedTree.title}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setIsRenaming(true)}
-                      aria-label="Rename curriculum map"
-                      title="Rename map"
-                      className="rounded-md p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)]"
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isSaving}
-                      onClick={() => {
-                        setTreeActionTarget({ tree: selectedTree, action: "archive" });
-                      }}
-                      aria-label="Archive curriculum map"
-                      title="Archive map (linked workspaces are kept)"
-                      className="rounded-md p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-ink)] disabled:opacity-50"
-                    >
-                      <Archive className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isSaving}
-                      onClick={() => {
-                        setDeleteLinkedWorkspaces(false);
-                        setTreeActionTarget({ tree: selectedTree, action: "delete" });
-                      }}
-                      aria-label="Delete curriculum map"
-                      title="Permanently delete map"
-                      className="rounded-md p-1.5 text-[var(--color-muted)] hover:bg-rose-50 hover:text-rose-700 disabled:opacity-50"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </>
-                )}
-              </div>
               <DagCanvas
                     nodeKind="subject"
                     showArchiveControls={false}
@@ -858,7 +688,14 @@ export function CurriculumTreeDagView({
                     quizNodeIds={new Set()}
                     canUndo={undoStack.length > 0 && !isSaving}
                     canRedo={redoStack.length > 0 && !isSaving}
-                    onSelectNode={setSelectedNodeId}
+                    onSelectNode={(nodeId) => {
+                      setSelectedNodeId(nodeId);
+                      const clicked = nodes.find((node) => node.id === nodeId);
+                      if (clicked && !clicked.workspace_id) {
+                        onCreateWorkspaceForNode(clicked);
+                      }
+                    }}
+                    onDeselectNode={() => setSelectedNodeId(null)}
                     onSetLayoutMode={setLayoutMode}
                     onMoveNode={moveNode}
                     onRealignGrid={realignGrid}
@@ -943,84 +780,6 @@ export function CurriculumTreeDagView({
             </div>
           )}
       </div>
-      {treeActionTarget && (
-        <ConfirmDeleteModal
-          title={
-            treeActionTarget.action === "archive"
-              ? "Archive curriculum map?"
-              : "Permanently delete curriculum map?"
-          }
-          itemName={treeActionTarget.tree.title}
-          description={
-            treeActionTarget.action === "archive"
-              ? "The map and its subjects can be restored later. Linked workspaces and their study data will remain unchanged."
-              : deleteLinkedWorkspaces
-                ? "This permanently deletes the map, every linked workspace, and all lessons, quizzes, flashcards, and study data owned by those workspaces. Linked workspaces must already be archived; archive any active ones first. Any other maps linked to these workspaces will keep their subjects but lose the workspace links."
-                : "This permanently deletes only the map and its subjects. Linked workspaces and their study data will remain."
-          }
-          impactItems={
-            treeActionTarget.action === "delete"
-              ? [
-                  {
-                    label: "Linked workspaces",
-                    value: linkedWorkspaceIds.size,
-                  },
-                  {
-                    label: "Delete linked workspaces",
-                    value: deleteLinkedWorkspaces ? "Yes" : "No",
-                  },
-                ]
-              : []
-          }
-          mode={treeActionTarget.action}
-          deleteLabel={
-            treeActionTarget.action === "archive"
-              ? "Move to Archive"
-              : "Permanently delete"
-          }
-          confirmationPhrase={
-            treeActionTarget.action === "delete"
-              ? treeActionTarget.tree.title
-              : undefined
-          }
-          onCancel={() => setTreeActionTarget(null)}
-          onConfirm={confirmTreeAction}
-          onError={(cause) =>
-            setError(cause instanceof Error ? cause.message : String(cause))
-          }
-        >
-          {treeActionTarget.action === "delete" && (
-            <fieldset className="mt-4 space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3 text-xs">
-              <legend className="px-1 font-semibold text-[var(--text-primary)]">
-                What should be deleted?
-              </legend>
-              <label className="flex items-start gap-2 text-[var(--text-secondary)]">
-                <input
-                  type="radio"
-                  name="curriculum-delete-scope"
-                  checked={!deleteLinkedWorkspaces}
-                  onChange={() => setDeleteLinkedWorkspaces(false)}
-                  className="mt-0.5 accent-[var(--color-accent)]"
-                />
-                <span>Map only; keep all linked workspaces and data</span>
-              </label>
-              <label className="flex items-start gap-2 text-[var(--text-secondary)]">
-                <input
-                  type="radio"
-                  name="curriculum-delete-scope"
-                  checked={deleteLinkedWorkspaces}
-                  onChange={() => setDeleteLinkedWorkspaces(true)}
-                  className="mt-0.5 accent-rose-700"
-                />
-                <span>
-                  Map plus all {linkedWorkspaceIds.size} linked workspace
-                  {linkedWorkspaceIds.size === 1 ? "" : "s"} and their study data
-                </span>
-              </label>
-            </fieldset>
-          )}
-        </ConfirmDeleteModal>
-      )}
     </section>
   );
 }
