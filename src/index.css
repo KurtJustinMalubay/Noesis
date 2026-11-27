@@ -976,8 +976,7 @@ button:disabled {
   }
 
   .motion-spotlight {
-    transition: transform var(--duration-spring) var(--ease-spring);
-    will-change: transform;
+    transition: opacity var(--duration-snap) var(--ease-snap);
   }
 
   .sidebar-crossfade {

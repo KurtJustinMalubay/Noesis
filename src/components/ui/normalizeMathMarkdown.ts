@@ -158,6 +158,34 @@ function closeUnclosedDisplayMath(markdown: string): string {
   return markdown;
 }
 
+function repairMismatchedDisplayMath(markdown: string): string {
+  const delimiters = [...markdown.matchAll(/\\\[|\\\]/g)];
+  const openDelimiters: number[] = [];
+  const unmatchedClosers: number[] = [];
+
+  for (const delimiter of delimiters) {
+    if (delimiter.index === undefined) continue;
+    if (delimiter[0] === "\\[") {
+      openDelimiters.push(delimiter.index);
+    } else if (openDelimiters.length > 0) {
+      openDelimiters.pop();
+    } else {
+      unmatchedClosers.push(delimiter.index);
+    }
+  }
+
+  const displayDollarCount = markdown.match(/(?<!\\)\$\$/g)?.length ?? 0;
+  if (displayDollarCount % 2 === 0) return markdown;
+
+  const unmatchedIndex =
+    openDelimiters.pop() ?? unmatchedClosers.pop();
+  if (unmatchedIndex === undefined) return markdown;
+
+  return `${markdown.slice(0, unmatchedIndex)}$$${markdown.slice(
+    unmatchedIndex + 2
+  )}`;
+}
+
 export function normalizeMathMarkdown(markdown: string): string {
   const protectedCode: string[] = [];
   const protectCode = (code: string) => {
@@ -171,16 +199,18 @@ export function normalizeMathMarkdown(markdown: string): string {
     .replace(FENCED_CODE_PATTERN, protectCode)
     .replace(INLINE_CODE_PATTERN, protectCode);
 
-  normalized = normalized
+  normalized = repairMismatchedDisplayMath(normalized)
+    .replace(
+      /\\\[([\s\S]*?)\\\]/g,
+      (_match, expression: string) =>
+        `$$${normalizeLatexCommands(expression)}$$`
+    )
     .replace(/\\\(([\s\S]*?)\\\)/g, (_match, expression: string) => {
       const collapsed = expression.replace(/\s*\n\s*/g, " ");
       return `$${normalizeInlineFractionStyle(
         normalizeLatexCommands(collapsed)
       )}$`;
-    })
-    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, expression: string) =>
-      `$$${normalizeLatexCommands(expression)}$$`
-    );
+    });
 
   normalized = closeUnclosedDisplayMath(normalized);
 

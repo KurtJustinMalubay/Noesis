@@ -742,6 +742,10 @@ function MainApp() {
         }
         return;
       }
+      if (targetView === "graph") {
+        setMainView("graph");
+        return;
+      }
       store.setActiveModal("new_workspace");
       return;
     }

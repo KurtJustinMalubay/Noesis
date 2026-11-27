@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Archive,
   CheckCircle2,
@@ -42,6 +48,7 @@ interface DagCanvasProps {
   edges: GraphEdge[];
   layoutMode: CanvasLayoutMode;
   selectedNodeId: string | null;
+  renderSelectedNodeActions?: (node: GraphNode) => ReactNode;
   showDots: boolean;
   edgeRouting: UserPreferences["edgeRouting"];
   nodeDensity: UserPreferences["nodeDensity"];
@@ -129,6 +136,7 @@ export function DagCanvas({
   edges,
   layoutMode,
   selectedNodeId,
+  renderSelectedNodeActions,
   showDots,
   edgeRouting,
   nodeDensity,
@@ -1470,7 +1478,7 @@ export function DagCanvas({
               : `${prerequisiteCount} prereq${prerequisiteCount === 1 ? "" : "s"}`;
           const progressLabel = nodeKind === "subject"
             ? node.is_hydrated
-              ? "Workspace linked"
+              ? "Workspace created"
               : "Workspace not linked"
             : isMastered
             ? "Mastered"
@@ -1493,6 +1501,7 @@ export function DagCanvas({
             <div
               key={node.id}
               data-dag-node
+              data-dag-node-id={node.id}
               onMouseEnter={() => setHoveredNodeId(node.id)}
               onMouseLeave={() => setHoveredNodeId(null)}
               onContextMenu={(e) => {
@@ -1566,7 +1575,14 @@ export function DagCanvas({
                   </div>
                   <span className={`mt-0.5 shrink-0 ${stateIcon}`}>
                     {nodeKind === "subject" ? (
-                      <Layers className="h-4 w-4" />
+                      node.is_hydrated ? (
+                        <CheckCircle2
+                          className="h-4 w-4 text-[var(--color-success)]"
+                          aria-label="Workspace created"
+                        />
+                      ) : (
+                        <Layers className="h-4 w-4" />
+                      )
                     ) : isMastered ? (
                       <CheckCircle2 className="h-4 w-4" />
                     ) : isLocked ? (
@@ -1580,7 +1596,20 @@ export function DagCanvas({
                 </div>
 
                 <div className="flex items-center justify-between gap-2 text-[9px] font-medium">
-                  <span className="truncate text-slate-500">{progressLabel}</span>
+                  {nodeKind === "subject" && node.is_hydrated ? (
+                    <span
+                      className="inline-flex min-w-0 items-center gap-1 truncate rounded-full border border-[var(--color-success)]/35 bg-[var(--color-success)]/10 px-1.5 py-0.5 text-[8px] font-semibold text-[var(--color-success)]"
+                      aria-label="Workspace created for this subject"
+                      title="This subject already has a workspace"
+                    >
+                      <CheckCircle2 className="h-3 w-3 shrink-0" />
+                      <span className="truncate">Workspace created</span>
+                    </span>
+                  ) : (
+                    <span className="truncate text-slate-500">
+                      {progressLabel}
+                    </span>
+                  )}
                   <span
                     className={`shrink-0 rounded-full px-1.5 py-0.5 font-mono ${
                       node.in_degree_unmastered > 0
@@ -1732,6 +1761,21 @@ export function DagCanvas({
                     <Archive className="h-3.5 w-3.5" />
                     {nodeKind === "subject" ? "Remove Subject" : "Archive Concept"}
                   </button>
+                </div>
+              )}
+              {isSelected && renderSelectedNodeActions && (
+                <div
+                  data-canvas-toolbar
+                  aria-label={`${node.title} actions`}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  className={`pointer-events-auto absolute left-1/2 z-40 -translate-x-1/2 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)]/95 p-2 shadow-[0_5px_18px_rgba(35,51,60,0.12)] backdrop-blur ${
+                    pan.y + (node.pos_y + nodeHeight) * scale >
+                    canvasSize.height - 96
+                      ? "bottom-[calc(100%+10px)]"
+                      : "top-[calc(100%+10px)]"
+                  }`}
+                >
+                  {renderSelectedNodeActions(node)}
                 </div>
               )}
             </div>

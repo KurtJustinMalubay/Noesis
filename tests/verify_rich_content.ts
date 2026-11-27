@@ -75,6 +75,26 @@ Logic is useful.
     normalizedLineBreaks.endsWith("$\\nu$"),
   "escaped lesson line breaks should restore Markdown structure and preserve LaTeX commands"
 );
+const malformedMathDelimiters = normalizeMathMarkdown(
+  String.raw`Room proportions: $\\Phi \approx 1.618$. Enclosure is \[E = \frac{A_{solid}}{A_{total}}$$ and then $E$ approaches $1$.`
+);
+assert(
+  malformedMathDelimiters.includes(
+    String.raw`$$E = \frac{A_{solid}}{A_{total}}$$`
+  ) &&
+    !malformedMathDelimiters.includes(String.raw`\[E =`) &&
+    malformedMathDelimiters.includes(String.raw`$\Phi \approx 1.618$`),
+  "mismatched display-math delimiters should normalize rather than leak raw TeX"
+);
+const alternateMalformedMathDelimiters = normalizeMathMarkdown(
+  String.raw`The equation is $$E = \frac{A_{solid}}{A_{total}}\] in the lesson.`
+);
+assert(
+  alternateMalformedMathDelimiters.includes(
+    String.raw`$$E = \frac{A_{solid}}{A_{total}}$$`
+  ) && !alternateMalformedMathDelimiters.includes(String.raw`\]`),
+  "display math closed with an alternate delimiter should be repaired"
+);
 const escapedLineBreakCode =
   "Inline `" +
   String.raw`\n` +

@@ -682,6 +682,82 @@ export function CurriculumTreeDagView({
                     edges={graphEdges}
                     layoutMode={selectedTree.layout_mode}
                     selectedNodeId={selectedNodeId}
+                    renderSelectedNodeActions={(node) => (
+                      <div className="flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-center gap-2">
+                        <span className="max-w-40 truncate px-2 text-[11px] font-semibold text-[var(--color-ink)]">
+                          {node.title}
+                        </span>
+                        {node.workspace_id ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void onSelectWorkspace(node.workspace_id!).catch(
+                                (cause: unknown) =>
+                                  onToast(
+                                    cause instanceof Error
+                                      ? cause.message
+                                      : String(cause)
+                                  )
+                              )
+                            }
+                            className="rounded-lg bg-[var(--color-accent-button)] px-3 py-2 text-[10px] font-semibold text-[var(--color-accent-foreground)]"
+                          >
+                            Open workspace
+                          </button>
+                        ) : (
+                          <>
+                            <form
+                              onSubmit={(event) =>
+                                void linkSelectedWorkspace(event)
+                              }
+                              className="flex items-center gap-2"
+                            >
+                              <select
+                                value={workspaceToLink}
+                                onChange={(event) =>
+                                  setWorkspaceToLink(event.target.value)
+                                }
+                                aria-label="Workspace to link to this subject"
+                                className="max-w-44 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-2.5 py-2 text-[10px]"
+                              >
+                                <option value="">
+                                  Link existing workspace…
+                                </option>
+                                {linkableWorkspaces.map((workspace) => (
+                                  <option
+                                    key={workspace.id}
+                                    value={workspace.id}
+                                  >
+                                    {workspace.title}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="submit"
+                                disabled={isSaving || !workspaceToLink}
+                                className="rounded-lg border border-[var(--color-border)] px-2.5 py-2 text-[10px] font-semibold disabled:opacity-40"
+                              >
+                                Link
+                              </button>
+                            </form>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const curriculumNode = nodes.find(
+                                  (item) => item.id === node.id
+                                );
+                                if (curriculumNode) {
+                                  onCreateWorkspaceForNode(curriculumNode);
+                                }
+                              }}
+                              className="rounded-lg bg-[var(--color-accent-button)] px-3 py-2 text-[10px] font-semibold text-[var(--color-accent-foreground)]"
+                            >
+                              Create workspace
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
                     showDots={showDots}
                     edgeRouting={edgeRouting}
                     nodeDensity={nodeDensity}
@@ -711,72 +787,6 @@ export function CurriculumTreeDagView({
                     onRedo={redo}
               />
 
-              {selectedNode && (
-                <section
-                  data-canvas-toolbar
-                  aria-label="Selected curriculum subject"
-                  className="absolute bottom-4 right-4 z-20 flex max-w-[calc(100%-2rem)] flex-wrap items-center justify-end gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-panel)]/95 p-2 shadow-[0_5px_18px_rgba(35,51,60,0.12)] backdrop-blur"
-                >
-                  <span className="max-w-40 truncate px-2 text-[11px] font-semibold text-[var(--color-ink)]">
-                    {selectedNode.title}
-                  </span>
-                  {selectedNode.workspace_id ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void onSelectWorkspace(selectedNode.workspace_id!).catch(
-                          (cause: unknown) =>
-                            onToast(
-                              cause instanceof Error
-                                ? cause.message
-                                : String(cause)
-                            )
-                        )
-                      }
-                      className="rounded-lg bg-[var(--color-accent-button)] px-3 py-2 text-[10px] font-semibold text-[var(--color-accent-foreground)]"
-                    >
-                      Open workspace
-                    </button>
-                  ) : (
-                    <>
-                      <form
-                        onSubmit={(event) => void linkSelectedWorkspace(event)}
-                        className="flex items-center gap-2"
-                      >
-                        <select
-                          value={workspaceToLink}
-                          onChange={(event) =>
-                            setWorkspaceToLink(event.target.value)
-                          }
-                          aria-label="Workspace to link to this subject"
-                          className="max-w-44 rounded-lg border border-[var(--color-border)] bg-[var(--color-panel)] px-2.5 py-2 text-[10px]"
-                        >
-                          <option value="">Link existing workspace…</option>
-                          {linkableWorkspaces.map((workspace) => (
-                            <option key={workspace.id} value={workspace.id}>
-                              {workspace.title}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          type="submit"
-                          disabled={isSaving || !workspaceToLink}
-                          className="rounded-lg border border-[var(--color-border)] px-2.5 py-2 text-[10px] font-semibold disabled:opacity-40"
-                        >
-                          Link
-                        </button>
-                      </form>
-                      <button
-                        type="button"
-                        onClick={() => onCreateWorkspaceForNode(selectedNode)}
-                        className="rounded-lg bg-[var(--color-accent-button)] px-3 py-2 text-[10px] font-semibold text-[var(--color-accent-foreground)]"
-                      >
-                        Create workspace
-                      </button>
-                    </>
-                  )}
-                </section>
-              )}
             </div>
           )}
       </div>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, X } from "lucide-react";
 import { useDelayedUnmount } from "./AnimatedPresence";
 
@@ -161,11 +161,7 @@ export function AppGuide({
 }: AppGuideProps) {
   const [stepIndex, setStepIndex] = useState(0);
   const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
-  const [targetTransform, setTargetTransform] = useState(
-    "translate3d(0, 0, 0) scale(1)"
-  );
-  const previousRect = useRef<DOMRect | null>(null);
-  const animationFrames = useRef<number[]>([]);
+  const targetRectRef = useRef<DOMRect | null>(null);
   const onCloseRef = useRef(onClose);
   const { mounted, visible } = useDelayedUnmount(isOpen, 170);
   const steps = STEPS.filter((item) => {
@@ -218,55 +214,38 @@ export function AppGuide({
     }
   }, [currentView, isOpen, stepAdvanceOnView, stepIndex]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isOpen) {
+      targetRectRef.current = null;
       setTargetRect(null);
-      previousRect.current = null;
       return;
     }
 
     const updateTarget = () => {
       const target = document.querySelector(`[data-guide="${step.target}"]`);
       const nextRect = target?.getBoundingClientRect() ?? null;
-      const previous = previousRect.current;
-      previousRect.current = nextRect;
-      if (nextRect && previous && nextRect.width > 0 && nextRect.height > 0) {
-        animationFrames.current.forEach((frame) =>
-          cancelAnimationFrame(frame)
-        );
-        setTargetTransform(
-          `translate3d(${previous.left - nextRect.left}px, ${
-            previous.top - nextRect.top
-          }px, 0) scale(${previous.width / nextRect.width}, ${
-            previous.height / nextRect.height
-          })`
-        );
-        const firstFrame = requestAnimationFrame(() => {
-          const secondFrame = requestAnimationFrame(() =>
-            setTargetTransform("translate3d(0, 0, 0) scale(1)")
-          );
-          animationFrames.current = [secondFrame];
-        });
-        animationFrames.current = [firstFrame];
+      const previousRect = targetRectRef.current;
+      if (
+        nextRect?.left === previousRect?.left &&
+        nextRect?.top === previousRect?.top &&
+        nextRect?.width === previousRect?.width &&
+        nextRect?.height === previousRect?.height
+      ) {
+        return;
       }
+      targetRectRef.current = nextRect;
       setTargetRect(nextRect);
     };
 
     updateTarget();
-    const observer = new MutationObserver(() => {
-      if (document.querySelector(`[data-guide="${step.target}"]`)) {
-        updateTarget();
-        observer.disconnect();
-      }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-    window.addEventListener("resize", updateTarget);
-    window.addEventListener("scroll", updateTarget, true);
+    let frameId = 0;
+    const trackTarget = () => {
+      updateTarget();
+      frameId = window.requestAnimationFrame(trackTarget);
+    };
+    frameId = window.requestAnimationFrame(trackTarget);
     return () => {
-      window.removeEventListener("resize", updateTarget);
-      window.removeEventListener("scroll", updateTarget, true);
-      observer.disconnect();
-      animationFrames.current.forEach((frame) => cancelAnimationFrame(frame));
+      window.cancelAnimationFrame(frameId);
     };
   }, [currentView, isOpen, step.target]);
 
@@ -314,7 +293,6 @@ export function AppGuide({
             top: targetRect.top - 5,
             width: targetRect.width + 10,
             height: targetRect.height + 10,
-            transform: targetTransform,
             boxShadow: "0 0 0 9999px rgba(13, 22, 30, 0.48)",
           }}
           aria-hidden="true"
