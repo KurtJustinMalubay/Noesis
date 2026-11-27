@@ -41,6 +41,7 @@ import {
 import { AnimatedPresence } from "./components/AnimatedPresence";
 import { BootSplash } from "./components/BootSplash";
 import { UpdateIndicator } from "./components/UpdateIndicator";
+import { NotificationConsentModal } from "./components/NotificationConsentModal";
 import type {
   CurriculumTree,
   CurriculumTreeNode,
@@ -91,7 +92,8 @@ import type { CalendarEvent } from "./calendar/types";
 import { getUnarchivedWorkspaces } from "./utils/workspaceArchive";
 import {
   getImportantAppNotification,
-  requestNativeNotificationPermission,
+  grantNativeNotificationConsent,
+  hasNativeNotificationConsent,
   sendNativeNotification,
 } from "./utils/nativeNotifications";
 import StudyCalendarView from "./components/StudyCalendarView";
@@ -271,6 +273,14 @@ function MainApp() {
     "collapse" | "expand" | null
   >(null);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
+  const [nativeNotificationsEnabled, setNativeNotificationsEnabled] = useState(
+    () => hasNativeNotificationConsent()
+  );
+  const [isNotificationConsentOpen, setIsNotificationConsentOpen] =
+    useState(false);
+  const [notificationConsentError, setNotificationConsentError] = useState<
+    string | null
+  >(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hasOpenedGuide, setHasOpenedGuide] = useState(false);
   const [hasOpenedModal, setHasOpenedModal] = useState(false);
@@ -287,6 +297,9 @@ function MainApp() {
   const profilePromptEvaluated = useRef(false);
   const launchFullscreenApplied = useRef(false);
   const checkingCalendarReminders = useRef(false);
+  const notificationPromptDismissed = useRef(false);
+  const nativeNotificationsEnabledRef = useRef(nativeNotificationsEnabled);
+  nativeNotificationsEnabledRef.current = nativeNotificationsEnabled;
   const pendingCurriculumNodeRef = useRef<CurriculumTreeNode | null>(null);
   const lastSelectedNodeRef = useRef<GraphNode | null>(null);
   const setExcalidrawSidebarSlot = useCallback(
@@ -294,6 +307,18 @@ function MainApp() {
     []
   );
   const store = useNoesisStore();
+  const promptForNativeNotifications = useCallback(() => {
+    if (
+      !isTauri() ||
+      nativeNotificationsEnabledRef.current ||
+      notificationPromptDismissed.current
+    ) {
+      return;
+    }
+    notificationPromptDismissed.current = true;
+    setNotificationConsentError(null);
+    setIsNotificationConsentOpen(true);
+  }, []);
   const activeWorkspaces = useMemo(
     () => getUnarchivedWorkspaces(store.workspaces),
     [store.workspaces]
@@ -337,11 +362,25 @@ function MainApp() {
     (view: "dashboard" | "graph" | "curriculum" | "calendar") => {
       setMainView(view);
       if (view === "calendar") {
-        void requestNativeNotificationPermission();
+        promptForNativeNotifications();
       }
     },
-    []
+    [promptForNativeNotifications]
   );
+  const enableNativeNotifications = useCallback(() => {
+    if (!grantNativeNotificationConsent()) {
+      setNotificationConsentError(
+        "Could not save your notification choice. Check local app storage and try again."
+      );
+      return;
+    }
+
+    setNotificationConsentError(null);
+    nativeNotificationsEnabledRef.current = true;
+    setNativeNotificationsEnabled(true);
+    setIsNotificationConsentOpen(false);
+    store.showToast("Native notifications are enabled.");
+  }, [store.showToast]);
   const requestExitConfirmation = useCallback(
     () => setIsExitConfirmationOpen(true),
     []
@@ -1344,7 +1383,7 @@ function MainApp() {
                     data-guide="calendar-tab"
                     onClick={() => {
                       setMainView("calendar");
-                      void requestNativeNotificationPermission();
+                      promptForNativeNotifications();
                     }}
                     aria-pressed={mainView === "calendar"}
                     aria-label="Calendar"
@@ -1971,6 +2010,15 @@ function MainApp() {
       <BootSplash
         ready={dbReady || Boolean(bootError)}
         status={bootError ? "Local vault unavailable" : undefined}
+      />
+      <NotificationConsentModal
+        isOpen={isNotificationConsentOpen}
+        error={notificationConsentError}
+        onEnable={enableNativeNotifications}
+        onDismiss={() => {
+          setNotificationConsentError(null);
+          setIsNotificationConsentOpen(false);
+        }}
       />
       <AnimatedPresence
         present={Boolean(store.toastMessage)}

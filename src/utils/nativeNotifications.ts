@@ -1,18 +1,28 @@
 import { isTauri } from "@tauri-apps/api/core";
 import {
   isPermissionGranted,
-  requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 
-export async function requestNativeNotificationPermission(): Promise<boolean> {
-  if (!isTauri()) return false;
+const NOTIFICATION_CONSENT_KEY = "noesis.native-notification-consent.v1";
 
+export function hasNativeNotificationConsent(): boolean {
+  if (!isTauri()) return false;
   try {
-    if (await isPermissionGranted()) return true;
-    return (await requestPermission()) === "granted";
+    return window.localStorage.getItem(NOTIFICATION_CONSENT_KEY) === "enabled";
   } catch (error) {
-    console.error("Could not request native notification permission.", error);
+    console.error("Could not read native notification consent.", error);
+    return false;
+  }
+}
+
+export function grantNativeNotificationConsent(): boolean {
+  if (!isTauri()) return false;
+  try {
+    window.localStorage.setItem(NOTIFICATION_CONSENT_KEY, "enabled");
+    return true;
+  } catch (error) {
+    console.error("Could not save native notification consent.", error);
     return false;
   }
 }
@@ -21,7 +31,7 @@ export async function sendNativeNotification(
   title: string,
   body: string
 ): Promise<boolean> {
-  if (!isTauri()) return false;
+  if (!hasNativeNotificationConsent()) return false;
 
   try {
     if (!(await isPermissionGranted())) return false;
