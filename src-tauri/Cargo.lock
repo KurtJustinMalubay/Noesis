@@ -2846,7 +2846,7 @@ dependencies = [
 
 [[package]]
 name = "noesis"
-version = "1.4.4"
+version = "1.5.0"
 dependencies = [
  "futures-util",
  "libsqlite3-sys",
